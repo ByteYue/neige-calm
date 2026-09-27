@@ -184,7 +184,8 @@ async fn active_forge_action_on_the_track_keeps() {
 }
 
 /// A legacy lease (no kernel delivery; the auto-commit runs after the release) keeps its
-/// worktree for at least the forge deadline after its release; then the checkout goes and the
+/// worktree for the grace — at least the forge deadline — after its release; then the checkout
+/// goes and the
 /// slice branch — the only ref holding a legacy attempt's commits — stays where it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_lease_keeps_inside_the_grace() {
@@ -225,17 +226,10 @@ async fn legacy_lease_keeps_inside_the_grace() {
     let tip = slice_tip(&fx, &lease, &worker.card_id);
     assert_eq!(committed[0]["commit_sha"], tip);
 
-    tick(&fx).await;
+    tick_within_grace(&fx).await;
     assert_kept(&fx, &lease, &worker.card_id).await;
 
-    // The default forge deadline of a parked action is 900 s: released 901 s ago is outside.
-    sqlx::query(
-        "UPDATE workspace_leases SET released_at_ms = released_at_ms - 901000 WHERE lease_id = ?1",
-    )
-    .bind(&lease.lease_id)
-    .execute(&fx.pool())
-    .await
-    .unwrap();
+    // Past the grace (the default forge deadline of a parked action, 900 s).
     tick(&fx).await;
     assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
     assert_eq!(

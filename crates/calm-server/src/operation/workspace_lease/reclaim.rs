@@ -3,12 +3,14 @@
 //! A worker's report releases only the lease row (`decision_sink`): the legacy `git.commit:auto`
 //! action runs after the release, the kernel delivery settles later, and a gate reads the
 //! worktree while its task is `verifying`. The scheduler's reconcile sweep (boot and every tick)
-//! removes the checkout once nothing can read it any more. Only a clean checkout goes, and the
+//! removes the checkout once nothing can read it any more, and only after a grace since the
+//! release. Only a clean checkout goes, and the
 //! slice branch `neige/<track>/<card>` stays: it can hold the only copy of a legacy attempt's
 //! committed work (no candidate ref pins it), and Track deletion still sweeps it. A candidate
 //! stays pinned by its `refs/neige/candidates/…` ref (D9).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use sqlx::SqlitePool;
 
@@ -22,22 +24,27 @@ use super::{
 use crate::error::{CalmError, Result};
 use crate::event::EventBus;
 use crate::mcp_server::transport::forge_deadline_ms;
+use crate::plugin_host::child_process::run_bounded;
 use crate::workspace_materialize::isolated_git_command;
 
 /// At most this many removals are attempted per pass; the rest wait for the next tick.
 pub(crate) const RECLAIM_PER_PASS: usize = 16;
 
-/// A live terminal (the `terminals_running` rule: no exit recorded, not killed) whose `cwd` is
-/// the lease worktree or under it — a terminal opened in the worktree (a dev server, a
-/// preview), or the worker's own PTY. `path` / `canonical` are SQL expressions for the lease's
-/// `path` and `canonical_path` (a NULL `canonical_path` matches nothing).
-fn live_terminal_under_sql(path: &str, canonical: &str) -> String {
+/// A live terminal (the `terminals_running` rule: no exit recorded, not killed) of another card
+/// whose `cwd` is the lease worktree or under it — a terminal opened in the worktree (a dev
+/// server, a Planner preview). `card`, `path` and `canonical` are SQL expressions for the lease's
+/// `card_id`, `path` and `canonical_path` (a NULL `canonical_path` matches nothing). The lease's
+/// own worker card is exempt: its PTY outlives a successful report until the Track completes,
+/// and removing a finished worker's cwd loses no work — [`WorktreeRemoval::KeepWork`] never
+/// removes a dirty tree and keeps the slice branch.
+fn live_terminal_under_sql(card: &str, path: &str, canonical: &str) -> String {
     let under = |root: &str| {
         format!("(te.cwd = {root} OR substr(te.cwd, 1, length({root}) + 1) = {root} || '/')")
     };
     format!(
         "EXISTS (SELECT 1 FROM terminals te \
-         WHERE te.exit_code IS NULL AND te.signal_killed = 0 AND ({} OR {}))",
+         WHERE te.exit_code IS NULL AND te.signal_killed = 0 AND te.card_id IS NOT {card} \
+         AND ({} OR {}))",
         under(path),
         under(canonical)
     )
@@ -56,25 +63,24 @@ fn attempt_finished_sql(t: &str) -> String {
 /// The released leases whose worktree may be removed, oldest release first. Lease `L` of card
 /// `C` on a live Track qualifies when:
 /// - `L` is `C`'s latest released lease (every lease of a card shares its path), `C` holds no
-///   `held`/`releasing` lease, and no live terminal works in the worktree (both re-checked
-///   before the git calls);
+///   `held`/`releasing` lease, and no other card's live terminal works in the worktree (both
+///   re-checked before the git calls);
 /// - `L`'s latest delivery (highest ordinal) is absent, a `candidate`, `failed` without retry,
 ///   or abandoned;
 /// - `C`'s attempt — the task the lease owner's worker op was keyed by (the ownership proof of
 ///   `calm_truth::db::sqlite::worker_op_targets_card_tx`), else every task `C` worked — is
 ///   finished ([`attempt_finished_sql`]), or `C` is gone. A `failed` attempt nobody replaced,
 ///   a `verifying` one and a card without a task keep their worktree;
-/// - a legacy lease (`delivery_policy IS NULL`, whose auto-commit runs after the release) was
-///   released at or before `legacy_released_before_ms`;
+/// - the lease was released at or before `released_before_ms` ([`reclaim_grace_ms`] ago);
 /// - the kernel has not removed `C`'s worktree since it was last provisioned.
 ///
 /// The Track's forge actions are checked per entry in [`reclaim_released_workspace_worktrees`].
 pub(crate) async fn reclaimable_released_workspace_leases(
     pool: &SqlitePool,
-    legacy_released_before_ms: i64,
+    released_before_ms: i64,
 ) -> Result<Vec<WorkspaceLease>> {
     let removed = worktree_removed_after_last_provision_sql("wl.card_id");
-    let terminal = live_terminal_under_sql("wl.path", "wl.canonical_path");
+    let terminal = live_terminal_under_sql("wl.card_id", "wl.path", "wl.canonical_path");
     let owner_finished = attempt_finished_sql("t");
     let sql = format!(
         r#"SELECT {WORKSPACE_LEASE_COLUMNS} FROM workspace_leases wl
@@ -114,20 +120,21 @@ pub(crate) async fn reclaimable_released_workspace_leases(
                    AND NOT EXISTS (
                      SELECT 1 FROM tasks t
                      WHERE t.worker_card_id = wl.card_id AND NOT {owner_finished})))
-             AND (wl.delivery_policy IS NOT NULL OR wl.released_at_ms <= ?1)
+             AND wl.released_at_ms <= ?1
              AND NOT {removed}
            ORDER BY wl.released_at_ms ASC, wl.lease_id ASC"#
     );
     let rows = sqlx::query(&sql)
-        .bind(legacy_released_before_ms)
+        .bind(released_before_ms)
         .fetch_all(pool)
         .await?;
     rows.into_iter().map(row_to_workspace_lease).collect()
 }
 
-/// How long a legacy lease keeps its worktree after its release: at least the deadline of any
-/// forge action, the legacy `git.commit:auto` that commits it after the release included.
-pub(crate) fn legacy_reclaim_grace_ms() -> i64 {
+/// How long every lease keeps its worktree after its release: at least the deadline of any
+/// forge action (a legacy lease's `git.commit:auto` commits it after the release), which also
+/// leaves the Planner time to open a preview terminal in it after its wake.
+pub(crate) fn reclaim_grace_ms() -> i64 {
     forge_deadline_ms(true).max(forge_deadline_ms(false))
 }
 
@@ -206,11 +213,17 @@ async fn reclaim_one(
         return Ok(Reclaim::Skipped);
     }
     let removal = lease.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
+    let removed = tokio::task::spawn_blocking(move || {
         remove_workspace_worktree_for_lease_as(&removal, WorktreeRemoval::KeepWork)
     })
     .await
-    .map_err(|error| CalmError::Internal(format!("worktree reclaim task: {error}")))??;
+    .map_err(|error| CalmError::Internal(format!("worktree reclaim task: {error}")));
+    // A failed or timed-out git run (a locked worktree, submodules, a hung filter, …) leaves the
+    // entry as it was, like a refusal: the same state fails the same way on every pass.
+    let outcome = match removed {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) | Err(error) => RemovalOutcome::Refused(error.to_string()),
+    };
     // `Removed(false)` (nothing was left on disk) is recorded as removed too: otherwise the
     // entry would be selected again on every pass.
     if let RemovalOutcome::Refused(why) = outcome {
@@ -223,7 +236,7 @@ async fn reclaim_one(
     }
 }
 
-/// The card holds a lease again, or a live terminal works in the worktree.
+/// The card holds a lease again, or another card's live terminal works in the worktree.
 async fn lease_in_use(pool: &SqlitePool, lease: &WorkspaceLease) -> Result<bool> {
     let canonical = lease
         .base
@@ -232,7 +245,7 @@ async fn lease_in_use(pool: &SqlitePool, lease: &WorkspaceLease) -> Result<bool>
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM workspace_leases \
          WHERE card_id = ?1 AND state IN ('held','releasing')) OR {}",
-        live_terminal_under_sql("?2", "?3")
+        live_terminal_under_sql("?1", "?2", "?3")
     );
     let in_use = sqlx::query_scalar(&sql)
         .bind(&lease.card_id)
@@ -268,26 +281,29 @@ pub(super) fn remove_clean_worktree_keeping_branch(
             target.path.display()
         )));
     }
+    // Without its `.git` file, `git -C <path>` would find the attached repository above it and
+    // read that checkout's status instead.
+    if !target.path.is_dir() || !target.path.join(".git").is_file() {
+        return Ok(RemovalOutcome::Refused(format!(
+            "{} is not a worktree directory with a .git file; left alone",
+            target.path.display()
+        )));
+    }
     if let Some(changes) = uncommitted_changes(target)? {
         return Ok(RemovalOutcome::Refused(format!(
             "worktree {} has uncommitted changes or untracked files ({changes}); left in place",
             target.path.display()
         )));
     }
-    // Isolated: without `--force`, git runs `status` in the checkout, which runs its clean
-    // filters.
-    let output = isolated_git_command()
-        .arg("-C")
+    // Isolated and bounded: without `--force`, git runs `status` in the checkout (clean
+    // filters); no fsmonitor — the `-c` reaches that child `status` too.
+    let mut command = isolated_git_command();
+    command
+        .args(["-c", "core.fsmonitor=false", "-C"])
         .arg(&target.repo_root)
         .args(["worktree", "remove"])
-        .arg(&target.path)
-        .output()
-        .map_err(|e| {
-            CalmError::Internal(format!(
-                "spawn git worktree remove for {}: {e}",
-                target.path.display()
-            ))
-        })?;
+        .arg(&target.path);
+    let output = run_reclaim_git(command, "git worktree remove")?;
     if !output.status.success() && git_worktree_registered(target)? {
         return Err(git_failed(
             "git worktree remove",
@@ -303,7 +319,8 @@ pub(super) fn remove_clean_worktree_keeping_branch(
 fn uncommitted_changes(target: &WorkspaceLeaseTarget) -> Result<Option<String>> {
     // Isolated: `status` runs the checkout's clean filters. No fsmonitor (a worker can point
     // the shared config at a command that never returns) and no index write.
-    let output = isolated_git_command()
+    let mut command = isolated_git_command();
+    command
         .arg("--no-optional-locks")
         .args(["-c", "core.fsmonitor=false", "-C"])
         .arg(&target.path)
@@ -313,14 +330,8 @@ fn uncommitted_changes(target: &WorkspaceLeaseTarget) -> Result<Option<String>> 
             "-z",
             "--untracked-files=normal",
             "--ignore-submodules=none",
-        ])
-        .output()
-        .map_err(|e| {
-            CalmError::Internal(format!(
-                "spawn git status in {}: {e}",
-                target.path.display()
-            ))
-        })?;
+        ]);
+    let output = run_reclaim_git(command, "git status")?;
     if !output.status.success() {
         return Err(git_failed("git status", &target.path, &output));
     }
@@ -343,4 +354,23 @@ fn uncommitted_changes(target: &WorkspaceLeaseTarget) -> Result<Option<String>> 
         shown.push_str(&format!(", … {} entries", entries.len()));
     }
     Ok(Some(shown))
+}
+
+/// Bound on each reclaim git run that executes repository code. The remove deletes the whole
+/// checkout, ignored build output (`node_modules`, `target`) included, so it gets minutes, not
+/// the gate sampler's seconds; it runs off the async runtime and outside any transaction.
+const RECLAIM_GIT_TIMEOUT: Duration = Duration::from_secs(120);
+const RECLAIM_GIT_OUTPUT_CAP: usize = 1024 * 1024;
+
+/// One git run through the gate's bounded runner (process group, deadline, capped output),
+/// driven from the blocking thread the removal runs on.
+fn run_reclaim_git(command: std::process::Command, what: &str) -> Result<std::process::Output> {
+    let deadline = tokio::time::Instant::now() + RECLAIM_GIT_TIMEOUT;
+    tokio::runtime::Handle::current()
+        .block_on(run_bounded(
+            tokio::process::Command::from(command),
+            deadline,
+            RECLAIM_GIT_OUTPUT_CAP,
+        ))
+        .map_err(|error| CalmError::Internal(format!("{what}: {error:?}")))
 }

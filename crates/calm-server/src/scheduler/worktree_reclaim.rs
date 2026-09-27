@@ -5,8 +5,7 @@
 //! until the process restarts.
 use super::*;
 use crate::operation::workspace_lease::reclaim::{
-    legacy_reclaim_grace_ms, reclaim_released_workspace_worktrees,
-    reclaimable_released_workspace_leases,
+    reclaim_grace_ms, reclaim_released_workspace_worktrees, reclaimable_released_workspace_leases,
 };
 
 impl Scheduler {
@@ -20,7 +19,7 @@ impl Scheduler {
         };
         let leases = match reclaimable_released_workspace_leases(
             &pool,
-            now_ms().saturating_sub(legacy_reclaim_grace_ms()),
+            now_ms().saturating_sub(reclaim_grace_ms()),
         )
         .await
         {

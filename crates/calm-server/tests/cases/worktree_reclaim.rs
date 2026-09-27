@@ -69,16 +69,39 @@ async fn wait_reclaimed(fx: &Fx, repo_root: &Path, path: &Path, card: &str) {
     }
 }
 
-/// One reconcile tick (`sweep_all`, the periodic backstop) and the reclaim it started.
+/// Just past the reclaim grace (the default forge deadline of a parked action, 900 s).
+const PAST_GRACE_MS: i64 = 901_000;
+
+/// Move every release so far back past the reclaim grace — what the passage of time does.
+pub(super) async fn age_releases(fx: &Fx) {
+    sqlx::query(
+        "UPDATE workspace_leases SET released_at_ms = released_at_ms - ?1 WHERE state = 'released'",
+    )
+    .bind(PAST_GRACE_MS)
+    .execute(&fx.pool())
+    .await
+    .unwrap();
+}
+
+/// One reconcile tick (`sweep_all`, the periodic backstop) with every release so far past the
+/// grace, and the reclaim it started.
 pub(super) async fn tick(fx: &Fx) {
+    age_releases(fx).await;
+    tick_within_grace(fx).await;
+}
+
+/// One reconcile tick without moving any release past the grace.
+pub(super) async fn tick_within_grace(fx: &Fx) {
     let scheduler = fx.scheduler();
     scheduler.mark_boot_sweep_complete();
     scheduler.sweep_all().await;
     scheduler.worktree_reclaim_idle_for_test().await;
 }
 
-/// A kernel restart (recovery, then the boot sweep) and the reclaim it started.
+/// A kernel restart (recovery, then the boot sweep) with every release so far past the grace,
+/// and the reclaim it started.
 pub(super) async fn reboot(fx: &mut Fx) {
+    age_releases(fx).await;
     fx.reboot().await;
     fx.scheduler().worktree_reclaim_idle_for_test().await;
 }
@@ -207,6 +230,7 @@ async fn boot_sweep_reclaims_done_candidate_worktree() {
     assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 0);
 
     let tip = slice_tip(&fx, &lease, &worker.card_id);
+    age_releases(&fx).await;
     fx.reboot().await;
 
     wait_reclaimed(&fx, &lease.repo_root, &lease.path, &worker.card_id).await;
@@ -241,6 +265,29 @@ async fn tick_reclaims_once_and_plan_list_reads_removed() {
     tick(&fx).await;
     assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 1);
     assert_eq!(lease_state(&fx, &lease.lease_id).await, "released");
+}
+
+/// A kernel lease keeps its worktree for the grace after its release (the Planner may open a
+/// preview in it after its wake), then is reclaimed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kernel_lease_inside_the_grace_is_kept() {
+    let fx = fixture().await;
+    let (worker, task, lease) = delivered(&fx, "fresh").await;
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
+    let policy: Option<String> =
+        sqlx::query_scalar("SELECT delivery_policy FROM workspace_leases WHERE lease_id = ?1")
+            .bind(&lease.lease_id)
+            .fetch_one(&fx.pool())
+            .await
+            .unwrap();
+    assert_eq!(policy.as_deref(), Some("kernel"));
+
+    tick_within_grace(&fx).await;
+    assert_kept(&fx, &lease, &worker.card_id).await;
+
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

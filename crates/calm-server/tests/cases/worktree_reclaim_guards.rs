@@ -1,12 +1,14 @@
 //! #1815 review round 1: what the released-worktree reclaim must not take — work left in the
 //! checkout, a worktree a live terminal works in — and how it decides: the lease owner's attempt
-//! over other tasks of the card, a replaced failed attempt, refusals remembered off the cap.
+//! over other tasks of the card, a replaced failed attempt, refusals remembered off the cap; the
+//! production success path with the worker's own PTY still live; bounded, hook-free git.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use calm_server::db::sqlite::card_with_terminal_create_tx;
 use calm_server::db::write_in_tx_typed;
-use calm_server::model::{CardRole, Task, new_id};
+use calm_server::mcp_server::registry::ToolCallIdentity;
+use calm_server::model::{CardRole, Task, TaskStatus, new_id};
 use calm_server::operation::claude_adapter::ClaudeWorkerAdapter;
 use calm_server::operation::{OperationKey, OperationRepo as _, SqlxOperationRepo};
 use calm_server::session_projection_repo::AgentProvider;
@@ -21,7 +23,7 @@ use serde_json::json;
 use super::git_delivery::*;
 use super::task_replace::{prepare_replace, replace, replace_args};
 use super::worktree_reclaim::*;
-use crate::mcp_track_report::call_tool;
+use crate::mcp_track_report::{call_tool, worker_identity};
 use crate::task_recovery::{current, declare};
 
 /// A tracked file modified and an untracked file each keep the checkout (and its branch)
@@ -147,6 +149,116 @@ async fn refusals_do_not_count_toward_the_cap() {
     }
 }
 
+/// The production success path: a real worker prepare and provisioning, the worker's report
+/// through `calm.task.complete` (release, kernel delivery, candidate), its PTY still live — as
+/// it stays until the Track completes. After the grace the worktree is reclaimed with its slice
+/// branch at the candidate; a second card's live terminal in a worktree keeps that one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finished_worker_with_its_own_pty_live_is_reclaimed() {
+    let fx = fixture().await;
+    let (task, reported) = reported_worker(&fx, "reported").await;
+    let (_, previewed) = reported_worker(&fx, "previewed").await;
+    let _preview = open_terminal(&fx, &previewed.lease.path).await;
+    let candidate = fx.candidate_row(&task.id).await.expect("candidate");
+    assert_eq!(
+        slice_tip(&fx, &reported.lease, &reported.card),
+        candidate.commit_sha
+    );
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &reported.lease, &reported.card, &candidate.commit_sha).await;
+    assert!(worker_pty_live(&fx, &reported.card).await);
+    assert_kept(&fx, &previewed.lease, &previewed.card).await;
+}
+
+/// [`prepared_worker`] run to a settled report: `running` on its card (the scheduler's stamp),
+/// an edit, `calm.task.complete` as that worker, the delivery settled. Its PTY stays live.
+async fn reported_worker(fx: &Fx, key: &str) -> (Task, OwnedLease) {
+    let (task, owned) = prepared_worker(fx, key).await;
+    fx.claim_running(&task.id, &owned.card).await;
+    let session_id: String =
+        sqlx::query_scalar("SELECT id FROM worker_sessions WHERE card_id = ?1")
+            .bind(&owned.card)
+            .fetch_one(&fx.pool())
+            .await
+            .unwrap();
+    let worker = ToolCallIdentity {
+        card_id: owned.card.clone(),
+        provider: AgentProvider::Claude,
+        session_id,
+        thread_id: format!("{key}-thread"),
+        ..worker_identity(&fx.boot)
+    };
+    std::fs::write(owned.lease.path.join("worker.txt"), format!("{key}\n")).unwrap();
+    fx.complete(&worker, &task.id).await;
+    fx.wait_settled(&task.id).await;
+    assert_eq!(
+        fx.delivery_row(&task.id)
+            .await
+            .unwrap()
+            .settlement
+            .as_deref(),
+        Some("candidate")
+    );
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
+    assert_eq!(lease_state(fx, &owned.lease.lease_id).await, "released");
+    assert!(
+        worker_pty_live(fx, &owned.card).await,
+        "the worker PTY outlives the report"
+    );
+    (task, owned)
+}
+
+/// The shared repository config names an fsmonitor hook (any worker can write it): the reclaim
+/// never runs it — not in its `status`, not in `worktree remove`'s own status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reclaim_never_runs_the_fsmonitor_hook() {
+    let fx = fixture().await;
+    let (worker, _, lease) = delivered(&fx, "fsmonitor").await;
+    let scratch = fx.track_root.parent().unwrap().to_path_buf();
+    let marker = scratch.join("fsmonitor-ran");
+    let hook = scratch.join("fsmonitor-hook");
+    write_executable(
+        &hook,
+        &format!("#!/bin/sh\ntouch '{}'\nsleep 5\nexit 1\n", marker.display()),
+    );
+    git(
+        &lease.repo_root,
+        &["config", "core.fsmonitor", hook.to_str().unwrap()],
+    );
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
+    assert!(!marker.exists(), "the fsmonitor hook ran");
+}
+
+/// A locked worktree (clean, but `worktree remove` without `--force` fails) is a refusal, not
+/// a failure: sixteen of them ahead of a clean one leave room for it on the first pass, and
+/// stay untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_removals_do_not_count_toward_the_cap() {
+    let fx = fixture().await;
+    let mut locked = Vec::new();
+    for n in 0..16 {
+        let (worker, _, lease) =
+            released_without_delivery(&fx, &format!("locked-{n}"), "done").await;
+        git(
+            &lease.repo_root,
+            &["worktree", "lock", lease.path.to_str().unwrap()],
+        );
+        locked.push((worker, lease));
+    }
+    let (clean, _, clean_lease) = released_without_delivery(&fx, "unlocked", "done").await;
+    let tip = slice_tip(&fx, &clean_lease, &clean.card_id);
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &clean_lease, &clean.card_id, &tip).await;
+    for (worker, lease) in &locked {
+        assert_kept(&fx, lease, &worker.card_id).await;
+    }
+}
+
 /// A running terminal (the production composite `calm.terminal.open` writes) whose cwd is `cwd`;
 /// returns the terminal id.
 async fn open_terminal(fx: &Fx, cwd: &Path) -> String {
@@ -182,14 +294,7 @@ async fn open_terminal(fx: &Fx, cwd: &Path) -> String {
 }
 
 /// A worker whose attempt failed through `calm.task.fail` (the production release).
-async fn failed_attempt(
-    fx: &Fx,
-    name: &str,
-) -> (
-    calm_server::mcp_server::registry::ToolCallIdentity,
-    Task,
-    KernelWorkspaceLease,
-) {
+async fn failed_attempt(fx: &Fx, name: &str) -> (ToolCallIdentity, Task, KernelWorkspaceLease) {
     let worker = fx.new_worker(name, AgentProvider::Claude).await;
     let lease = fx.kernel_lease(&worker.card_id).await;
     let task = fx
@@ -212,11 +317,12 @@ struct OwnedLease {
     lease: KernelWorkspaceLease,
 }
 
-/// The production worker sequence up to the lease: the scheduler's payload, an operations row
-/// keyed by the attempt, the real Claude worker adapter's `prepare_tx` (creates the worker card
-/// with its PTY row and takes the lease with the op as `lease_owner`), the spawn's provisioning,
-/// the worker process exiting, and the report's release. Returns the attempt and the lease.
-async fn owner_op_lease(fx: &Fx, key: &str) -> (Task, OwnedLease) {
+/// The production worker sequence up to a provisioned worktree: the scheduler's payload, an
+/// operations row keyed by the attempt, the real Claude worker adapter's `prepare_tx` (creates
+/// the worker card with its PTY row — cwd = the worktree — and takes the lease with the op as
+/// `lease_owner`), then the spawn's provisioning and a succeeded op. The attempt is
+/// `dispatched`, the PTY live.
+async fn prepared_worker(fx: &Fx, key: &str) -> (Task, OwnedLease) {
     declare(
         &fx.boot,
         json!({
@@ -287,31 +393,15 @@ async fn owner_op_lease(fx: &Fx, key: &str) -> (Task, OwnedLease) {
     provision_workspace_lease_for_test(&pool, fx.track(), &card, &fx.workspace_root)
         .await
         .unwrap();
-    let terminal: String = sqlx::query_scalar("SELECT id FROM terminals WHERE card_id = ?1")
-        .bind(&card)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    fx.boot
-        .repo
-        .terminal_set_exit(&terminal, Some(0), false)
-        .await
-        .unwrap();
-    assert!(
-        release_workspace_lease_for_card_for_test(
-            fx.boot.repo.as_ref(),
-            &fx.boot.ctx.events,
-            &card
-        )
-        .await
-        .unwrap()
-    );
-    sqlx::query("UPDATE tasks SET worker_card_id = ?1 WHERE id = ?2")
-        .bind(&card)
-        .bind(&task.id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // The spawn half: the worktree above, and the op's row as a successful spawn leaves it (this
+    // fixture's runtime has no worker adapter to drive it).
+    sqlx::query(
+        "UPDATE operations SET phase = 'succeeded', completed_at_ms = updated_at_ms WHERE id = ?1",
+    )
+    .bind(&op.id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let path = PathBuf::from(path);
     let repo_root = path.ancestors().nth(4).unwrap().to_path_buf();
     let lease = KernelWorkspaceLease {
@@ -322,6 +412,39 @@ async fn owner_op_lease(fx: &Fx, key: &str) -> (Task, OwnedLease) {
         git_common_dir: PathBuf::from(git_common_dir),
     };
     (task, OwnedLease { card, lease })
+}
+
+/// [`prepared_worker`], then the production release with no report; the task names the card.
+async fn owner_op_lease(fx: &Fx, key: &str) -> (Task, OwnedLease) {
+    let (task, owned) = prepared_worker(fx, key).await;
+    assert!(
+        release_workspace_lease_for_card_for_test(
+            fx.boot.repo.as_ref(),
+            &fx.boot.ctx.events,
+            &owned.card
+        )
+        .await
+        .unwrap()
+    );
+    sqlx::query("UPDATE tasks SET worker_card_id = ?1 WHERE id = ?2")
+        .bind(&owned.card)
+        .bind(&task.id)
+        .execute(&fx.pool())
+        .await
+        .unwrap();
+    (task, owned)
+}
+
+/// Whether the card's own PTY row records no exit.
+async fn worker_pty_live(fx: &Fx, card: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM terminals \
+         WHERE card_id = ?1 AND exit_code IS NULL AND signal_killed = 0)",
+    )
+    .bind(card)
+    .fetch_one(&fx.pool())
+    .await
+    .unwrap()
 }
 
 /// Another attempt of this Track stamped with `card` as its worker, in `status`.
