@@ -83,14 +83,27 @@ pub(super) async fn reboot(fx: &mut Fx) {
     fx.scheduler().worktree_reclaim_idle_for_test().await;
 }
 
-pub(super) async fn assert_reclaimed(fx: &Fx, lease: &KernelWorkspaceLease, card: &str) {
+/// The slice branch's commit, read before a reclaim so [`assert_reclaimed`] can pin it.
+pub(super) fn slice_tip(fx: &Fx, lease: &KernelWorkspaceLease, card: &str) -> String {
+    git(
+        &lease.repo_root,
+        &[
+            "rev-parse",
+            &format!("refs/heads/{}", fx.slice_branch(card)),
+        ],
+    )
+}
+
+/// The checkout and its registration are gone, one `worktree.removed`; the slice branch stays
+/// at `tip` (it may hold the only copy of the attempt's commits).
+pub(super) async fn assert_reclaimed(fx: &Fx, lease: &KernelWorkspaceLease, card: &str, tip: &str) {
     assert!(
         !lease.path.exists(),
         "{} still on disk",
         lease.path.display()
     );
     assert!(!worktree_registered(&lease.repo_root, &lease.path));
-    assert!(!branch_exists(&lease.repo_root, &fx.slice_branch(card)));
+    assert_eq!(slice_tip(fx, lease, card), tip, "the slice branch is kept");
     assert_eq!(worktree_removed_events(fx, card).await, 1);
 }
 
@@ -193,30 +206,18 @@ async fn boot_sweep_reclaims_done_candidate_worktree() {
     assert!(worktree_registered(&lease.repo_root, &lease.path));
     assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 0);
 
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     fx.reboot().await;
 
     wait_reclaimed(&fx, &lease.repo_root, &lease.path, &worker.card_id).await;
-    // The candidate stays pinned by its ref after the worktree and slice branch are gone (D9).
+    // The candidate stays pinned by its ref (D9), and the slice branch stays where it was.
     let candidate = fx.candidate_row(&task.id).await.unwrap();
     assert_eq!(
         ref_target(&lease.git_common_dir, &candidate.ref_name).as_deref(),
         Some(candidate.commit_sha.as_str())
     );
-    assert!(
-        git_output(
-            &lease.repo_root,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{}", fx.slice_branch(&worker.card_id)),
-            ],
-        )
-        .status
-        .code()
-            == Some(1),
-        "the slice branch was deleted with the worktree"
-    );
+    assert_eq!(slice_tip(&fx, &lease, &worker.card_id), tip);
+    assert_eq!(tip, candidate.commit_sha);
 }
 
 /// The tick reclaims; `calm.plan.list` then reads `removed: true`; a second tick finds nothing
@@ -229,8 +230,9 @@ async fn tick_reclaims_once_and_plan_list_reads_removed() {
     let before = fx.plan_entry("tick").await;
     assert_eq!(before["worktree"]["removed"], false, "{before}");
 
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
     let after = fx.plan_entry("tick").await;
     assert_eq!(after["worktree"]["removed"], true, "{after}");
     assert!(after["worktree"].get("path").is_none(), "{after}");
@@ -248,9 +250,11 @@ async fn done_without_delivery_and_canceled_are_reclaimed() {
     let (canceled, _, canceled_lease) =
         released_without_delivery(&fx, "canceled", "canceled").await;
 
+    let done_tip = slice_tip(&fx, &done_lease, &done.card_id);
+    let canceled_tip = slice_tip(&fx, &canceled_lease, &canceled.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &done_lease, &done.card_id).await;
-    assert_reclaimed(&fx, &canceled_lease, &canceled.card_id).await;
+    assert_reclaimed(&fx, &done_lease, &done.card_id, &done_tip).await;
+    assert_reclaimed(&fx, &canceled_lease, &canceled.card_id, &canceled_tip).await;
 }
 
 /// A deleted card's worktree goes whatever its attempt's status (here `failed`, which would keep
@@ -265,26 +269,31 @@ async fn deleted_card_is_reclaimed() {
         .await
         .unwrap();
 
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn abandoned_delivery_is_reclaimed() {
-    let fx = fixture().await;
-    let (worker, task, lease) = fx.hook_failing_task("abandoned", json!({})).await;
+    let mut fx = fixture().await;
+    // A delivery that committed but died before pinning its ref settles `failed`, retryable,
+    // with the checkout clean; the Planner abandons it.
+    let (worker, task, lease) = crashed_before_ref(&mut fx).await;
+    fx.reboot().await;
     fx.wait_settled(&task.id).await;
     let row = fx.delivery_row(&task.id).await.unwrap();
+    assert_eq!(row.settlement.as_deref(), Some("failed"));
     assert_eq!(row.retry_allowed, Some(1));
-    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
     fx.abandon(&task, &row.delivery_id, "abandon-1", Some("not needed"))
         .await
         .expect("abandon admitted");
     assert!(fx.abandonment_row(&row.delivery_id).await.is_some());
-    remove_pre_commit(&lease);
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
 
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }
 
 /// The latest delivery decides: a retryable failure followed by a candidate retry is settled.
@@ -308,12 +317,13 @@ async fn candidate_retry_after_retryable_failure_is_reclaimed() {
     assert_eq!(second.settlement.as_deref(), Some("candidate"));
     assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
 
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }
 
 /// A delivery that failed without retry (`workspace_missing`: the directory went away) settles
-/// the lease; the reclaim clears the registration and the slice branch left behind.
+/// the lease; the reclaim prunes the registration left behind and keeps the slice branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unretryable_failed_delivery_is_reclaimed() {
     let mut fx = fixture().await;
@@ -332,13 +342,11 @@ async fn unretryable_failed_delivery_is_reclaimed() {
     assert_eq!(row.retry_allowed, Some(0));
     assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
     assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 0);
-    assert!(branch_exists(
-        &lease.repo_root,
-        &fx.slice_branch(&worker.card_id)
-    ));
+    assert!(worktree_registered(&lease.repo_root, &lease.path));
 
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }
 
 /// The boot sweep takes a backlog, at most 16 removals per pass; the next pass takes the rest.
@@ -347,7 +355,10 @@ async fn boot_backlog_is_reclaimed_sixteen_per_pass() {
     let mut fx = fixture().await;
     let mut released = Vec::new();
     for n in 0..17 {
-        released.push(released_without_delivery(&fx, &format!("backlog-{n}"), "done").await);
+        let (worker, _, lease) =
+            released_without_delivery(&fx, &format!("backlog-{n}"), "done").await;
+        let tip = slice_tip(&fx, &lease, &worker.card_id);
+        released.push((worker, tip, lease));
     }
 
     reboot(&mut fx).await;
@@ -358,17 +369,20 @@ async fn boot_backlog_is_reclaimed_sixteen_per_pass() {
     assert_eq!(removed, 16);
 
     tick(&fx).await;
-    for (worker, _, lease) in &released {
-        assert_reclaimed(&fx, lease, &worker.card_id).await;
+    for (worker, tip, lease) in &released {
+        assert_reclaimed(&fx, lease, &worker.card_id, tip).await;
     }
 }
 
 /// A lease path that no longer resolves to its recorded worktree (here moved behind a symlink)
-/// is refused: nothing is removed, no event, and the moved checkout survives.
+/// is refused: nothing is removed, no event, and the moved checkout survives. The refusal is
+/// remembered for the process: restoring the path does not bring it back on the next tick, a
+/// restart does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn identity_refusal_leaves_the_entry_untouched() {
-    let fx = fixture().await;
+    let mut fx = fixture().await;
     let (worker, _, lease) = delivered(&fx, "moved").await;
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     let moved = lease.path.with_file_name("moved-away");
     std::fs::rename(&lease.path, &moved).unwrap();
     std::os::unix::fs::symlink(&moved, &lease.path).unwrap();
@@ -380,8 +394,18 @@ async fn identity_refusal_leaves_the_entry_untouched() {
         std::fs::read_to_string(moved.join("worker.txt")).unwrap(),
         "moved\n"
     );
-    assert!(branch_exists(
-        &lease.repo_root,
-        &fx.slice_branch(&worker.card_id)
-    ));
+    assert_eq!(slice_tip(&fx, &lease, &worker.card_id), tip);
+
+    std::fs::remove_file(&lease.path).unwrap();
+    std::fs::rename(&moved, &lease.path).unwrap();
+    tick(&fx).await;
+    assert_eq!(
+        worktree_removed_events(&fx, &worker.card_id).await,
+        0,
+        "a refused lease is not looked at again by this process"
+    );
+    assert!(lease.path.is_dir());
+
+    reboot(&mut fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }

@@ -1,7 +1,8 @@
 //! The reconcile sweep's released-worktree reclaim (#1815): the selection runs inside the pass,
 //! so it reads the same state as the rest of the pass; the removals (git and the file tree,
 //! hundreds of MB for some checkouts) run in a spawned task, so neither boot nor a tick waits
-//! for them. One reclaim at a time per scheduler.
+//! for them. One reclaim at a time per scheduler; a lease it refused is not looked at again
+//! until the process restarts.
 use super::*;
 use crate::operation::workspace_lease::reclaim::{
     legacy_reclaim_grace_ms, reclaim_released_workspace_worktrees,
@@ -33,11 +34,22 @@ impl Scheduler {
             return;
         }
         let events = self.events.clone();
+        let refused = Arc::clone(&self.worktree_reclaim_refused);
         tokio::spawn(async move {
-            let reclaimed = reclaim_released_workspace_worktrees(&pool, &events, leases).await;
-            if reclaimed > 0 {
-                tracing::info!(reclaimed, "released lease worktrees reclaimed");
+            let skip = refused.lock().expect("reclaim refusals lock").clone();
+            let pass = reclaim_released_workspace_worktrees(&pool, &events, leases, &skip).await;
+            if pass.reclaimed > 0 {
+                tracing::info!(
+                    reclaimed = pass.reclaimed,
+                    "released lease worktrees reclaimed"
+                );
             }
+            let mut remembered = refused.lock().expect("reclaim refusals lock");
+            for (lease_id, why) in pass.refused {
+                tracing::info!(%lease_id, %why, "released worktree kept; not retried until restart");
+                remembered.insert(lease_id);
+            }
+            drop(remembered);
             drop(guard);
         });
     }

@@ -41,8 +41,9 @@ async fn pending_delivery_keeps_until_settled() {
     let settled = fx.wait_settled(&task.id).await;
     let row = fx.delivery_row(&task.id).await.unwrap();
     assert_eq!(row.settlement.as_deref(), Some("candidate"), "{settled:?}");
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
 }
 
 /// A failure the Planner may still retry needs the worktree.
@@ -175,17 +176,20 @@ async fn active_forge_action_on_the_track_keeps() {
     std::fs::write(&flag, "").unwrap();
     fx.wait_settled(&blocked_task.id).await;
     remove_pre_commit(&blocked_lease);
+    let done_tip = slice_tip(&fx, &done_lease, &done.card_id);
+    let blocked_tip = slice_tip(&fx, &blocked_lease, &blocked.card_id);
     tick(&fx).await;
-    assert_reclaimed(&fx, &done_lease, &done.card_id).await;
-    assert_reclaimed(&fx, &blocked_lease, &blocked.card_id).await;
+    assert_reclaimed(&fx, &done_lease, &done.card_id, &done_tip).await;
+    assert_reclaimed(&fx, &blocked_lease, &blocked.card_id, &blocked_tip).await;
 }
 
 /// A legacy lease (no kernel delivery; the auto-commit runs after the release) keeps its
-/// worktree for at least the forge deadline after its release, then is reclaimed.
+/// worktree for at least the forge deadline after its release; then the checkout goes and the
+/// slice branch — the only ref holding a legacy attempt's commits — stays where it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_lease_keeps_inside_the_grace() {
     let fx = fixture().await;
-    let worker = fx.new_worker("legacy", AgentProvider::Claude).await;
+    let worker = fx.new_worker("legacy", AgentProvider::Codex).await;
     let lease = fx.kernel_lease(&worker.card_id).await;
     sqlx::query("UPDATE workspace_leases SET delivery_policy = NULL WHERE lease_id = ?1")
         .bind(&lease.lease_id)
@@ -193,12 +197,33 @@ async fn legacy_lease_keeps_inside_the_grace() {
         .await
         .unwrap();
     let task = fx
-        .running_task("legacy", "claude", &worker.card_id, json!({}))
+        .running_task("legacy", "codex", &worker.card_id, json!({}))
         .await;
+    std::fs::write(lease.path.join("worker.txt"), "legacy\n").unwrap();
     fx.complete(&worker, &task.id).await;
+    let legacy_key = format!(
+        "dev.neige.git-forge:{}:{}:git.commit:auto",
+        fx.track(),
+        worker.card_id
+    );
+    let op = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(op) = fx.forge_op(&legacy_key).await {
+                break op;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the legacy auto-commit was submitted");
+    fx.runtime.wait(&op.id).await.unwrap();
+    let committed = fx.worktree_committed_events(&worker.card_id).await;
+    assert_eq!(committed.len(), 1);
     assert_eq!(fx.delivery_count(&task.id).await, 0);
     assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
     assert_eq!(lease_state(&fx, &lease.lease_id).await, "released");
+    let tip = slice_tip(&fx, &lease, &worker.card_id);
+    assert_eq!(committed[0]["commit_sha"], tip);
 
     tick(&fx).await;
     assert_kept(&fx, &lease, &worker.card_id).await;
@@ -212,5 +237,9 @@ async fn legacy_lease_keeps_inside_the_grace() {
     .await
     .unwrap();
     tick(&fx).await;
-    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
+    assert_eq!(
+        git(&lease.repo_root, &["show", &format!("{tip}:worker.txt")]),
+        "legacy"
+    );
 }

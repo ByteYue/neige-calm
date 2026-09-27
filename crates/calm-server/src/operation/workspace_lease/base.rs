@@ -762,12 +762,25 @@ pub(crate) fn verify_lease_path_identity_before_removal(
     lease_path: &Path,
     base: Option<&LeaseBase>,
 ) -> Result<()> {
+    match lease_path_identity_refusal(lease_path, base)? {
+        Some(refusal) => Err(CalmError::Internal(refusal)),
+        None => Ok(()),
+    }
+}
+
+/// [`verify_lease_path_identity_before_removal`]'s rule as a value: the refusal sentence when
+/// the lease path resolves somewhere other than the recorded worktree, `None` when removal may
+/// proceed. `Err` only when the path cannot be resolved at all.
+pub(crate) fn lease_path_identity_refusal(
+    lease_path: &Path,
+    base: Option<&LeaseBase>,
+) -> Result<Option<String>> {
     let Some(base) = base else {
-        return Ok(());
+        return Ok(None);
     };
     let actual = match std::fs::canonicalize(lease_path) {
         Ok(actual) => actual,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(CalmError::Internal(format!(
                 "canonicalize workspace lease path {}: {error}",
@@ -776,7 +789,7 @@ pub(crate) fn verify_lease_path_identity_before_removal(
         }
     };
     if actual != base.canonical_path {
-        return Err(CalmError::Internal(format!(
+        return Ok(Some(format!(
             "refused: lease path {} no longer resolves to its recorded worktree: \
              expected {}, found {}; nothing was removed",
             lease_path.display(),
@@ -784,7 +797,7 @@ pub(crate) fn verify_lease_path_identity_before_removal(
             actual.display()
         )));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// The check every registration state of provisioning ends in: the worktree's

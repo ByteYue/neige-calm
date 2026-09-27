@@ -508,6 +508,9 @@ pub struct Scheduler {
     inflight: Arc<DashMap<String, ()>>,
     /// Held by the one running released-worktree reclaim (`worktree_reclaim.rs`).
     worktree_reclaim: Arc<tokio::sync::Mutex<()>>,
+    /// Leases the reclaim refused (work in the checkout, a moved path, …), left out of later
+    /// passes for this process's lifetime; a restart looks at them again.
+    worktree_reclaim_refused: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Boot-order gate for the backstop sweeps: the reconcile tick may fire before boot
     /// recovery, so `sweep_all` no-ops until `sweep_boot` completes.
     boot_sweep_done: AtomicBool,
@@ -644,6 +647,7 @@ impl Scheduler {
             track_dirty: DashMap::new(),
             inflight: Arc::new(DashMap::new()),
             worktree_reclaim: Arc::new(tokio::sync::Mutex::new(())),
+            worktree_reclaim_refused: Arc::default(),
             boot_sweep_done: AtomicBool::new(false),
             context_sweep_boot_done: AtomicBool::new(false),
             context_metrics: Arc::new(ContextMetrics::default()),
