@@ -1295,6 +1295,9 @@ pub(crate) enum RemovalOutcome {
     /// nothing; the reclaim also reports a failed `worktree remove` this way, which may have
     /// deleted part of a checkout already found clean.
     Refused(String),
+    /// The checkout passed every [`WorktreeRemoval::KeepWork`] pre-check and nothing was touched
+    /// yet: the reclaim re-checks the database, then calls `reclaim::remove_checked_worktree`.
+    Cleared,
 }
 
 impl RemovalOutcome {
@@ -1302,6 +1305,9 @@ impl RemovalOutcome {
         match self {
             RemovalOutcome::Removed(removed) => Ok(removed),
             RemovalOutcome::Refused(refusal) => Err(CalmError::Internal(refusal)),
+            RemovalOutcome::Cleared => Err(CalmError::Internal(
+                "a discarding removal has no pre-check stage".into(),
+            )),
         }
     }
 }
@@ -1394,7 +1400,7 @@ fn remove_workspace_worktree_as(
     let registered = registration != GitWorktreeRegistration::Absent;
     let path_existed = !link_removed && target.path.exists();
     if mode == WorktreeRemoval::KeepWork {
-        return reclaim::remove_clean_worktree_keeping_branch(target, registered, path_existed);
+        return reclaim::keep_work_precheck(target, registered, path_existed);
     }
     if registered || path_existed {
         let output = neige_git_command()

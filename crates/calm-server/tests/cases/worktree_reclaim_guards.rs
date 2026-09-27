@@ -325,6 +325,61 @@ async fn detached_head_a_ref_reaches_is_reclaimed() {
     .await;
 }
 
+/// HEAD attached to a worktree-private ref (`refs/worktree/*` lives in the worktree's own git
+/// dir and goes with it) holding a commit nothing else reaches: kept, commit intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn head_on_a_worktree_private_ref_keeps_the_worktree() {
+    let fx = fixture().await;
+    let (worker, _, lease) = delivered(&fx, "private-ref").await;
+    git(&lease.path, &["update-ref", "refs/worktree/save", "HEAD"]);
+    git(&lease.path, &["symbolic-ref", "HEAD", "refs/worktree/save"]);
+    let saved = commit_file(&lease.path, "saved.txt", "only here\n", "saved work");
+    assert_eq!(
+        git(&lease.path, &["symbolic-ref", "-q", "HEAD"]),
+        "refs/worktree/save"
+    );
+
+    tick(&fx).await;
+    assert_kept(&fx, &lease, &worker.card_id).await;
+    assert_eq!(
+        git(&lease.path, &["rev-parse", "refs/worktree/save"]),
+        saved
+    );
+}
+
+/// A bisect in progress (its `refs/bisect/*` are worktree-private) keeps the worktree, with
+/// HEAD on the slice branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bisect_refs_keep_the_worktree() {
+    let fx = fixture().await;
+    let (worker, _, lease) = delivered(&fx, "bisecting").await;
+    git(&lease.path, &["bisect", "start"]);
+    git(&lease.path, &["bisect", "good", &lease.base_sha]);
+    assert!(!git(&lease.path, &["for-each-ref", "refs/bisect"]).is_empty());
+    assert_eq!(
+        git(&lease.path, &["symbolic-ref", "-q", "HEAD"]),
+        format!("refs/heads/{}", fx.slice_branch(&worker.card_id))
+    );
+
+    tick(&fx).await;
+    assert_kept(&fx, &lease, &worker.card_id).await;
+}
+
+/// Another card's live terminal whose cwd reaches the worktree through a symlink alias (a
+/// path the SQL guard's lexical comparison cannot see) keeps it: the final re-check resolves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_terminal_through_a_symlink_alias_keeps_the_worktree() {
+    let fx = fixture().await;
+    let (worker, _, lease) = delivered(&fx, "aliased").await;
+    std::fs::create_dir(lease.path.join("web")).unwrap();
+    let alias = fx.track_root.parent().unwrap().join("preview-alias");
+    std::os::unix::fs::symlink(&lease.path, &alias).unwrap();
+    let _preview = open_terminal(&fx, &alias.join("web")).await;
+
+    tick(&fx).await;
+    assert_kept(&fx, &lease, &worker.card_id).await;
+}
+
 /// A lease path that is a symlink is refused, even for a legacy lease without a recorded base
 /// (no identity check): nothing is unlinked or pruned, the linked-to checkout is untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
