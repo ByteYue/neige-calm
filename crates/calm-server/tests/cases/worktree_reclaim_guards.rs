@@ -217,6 +217,23 @@ async fn reported_worker(fx: &Fx, key: &str) -> (Task, OwnedLease) {
 async fn reclaim_never_runs_the_fsmonitor_hook_or_a_clean_filter_in_the_remove() {
     let fx = fixture().await;
     let (worker, _, lease) = delivered(&fx, "fsmonitor").await;
+    // No index entry racily clean (a slower runner's state): past the timestamp granularity,
+    // the index re-stamped before any filter exists.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    git(&lease.path, &["update-index", "-q", "--refresh"]);
+    // Then stat data that no longer matches the index, content unchanged: `status` must re-read
+    // each tracked file through the clean filter below, whatever git version and timing. Before
+    // the hook exists — `ls-files` would run it.
+    for tracked in git(&lease.path, &["ls-files"]).lines() {
+        std::fs::File::options()
+            .write(true)
+            .open(lease.path.join(tracked))
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000),
+            )
+            .unwrap();
+    }
     let scratch = fx.track_root.parent().unwrap().to_path_buf();
     let fsmonitor_ran = scratch.join("fsmonitor-ran");
     let filter_callers = scratch.join("filter-callers");
