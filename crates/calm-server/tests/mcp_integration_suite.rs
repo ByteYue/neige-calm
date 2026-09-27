@@ -90,6 +90,8 @@ mod task_replace;
 mod task_replace_carry;
 #[path = "cases/task_replace_refusals.rs"]
 mod task_replace_refusals;
+#[path = "cases/worktree_reclaim.rs"]
+mod worktree_reclaim;
 
 #[path = "cases/mcp_task_dispatch.rs"]
 mod mcp_task_dispatch;
