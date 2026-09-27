@@ -6,6 +6,7 @@ mod file_delivery;
 mod git_delivery;
 mod running_worker;
 mod worker_failure;
+mod worktree_reclaim;
 use running_worker::RunningWorkerFailure;
 pub(crate) use running_worker::WorkerCleanupReason;
 pub use running_worker::{
@@ -505,6 +506,8 @@ pub struct Scheduler {
     track_dirty: DashMap<TrackId, Arc<AtomicBool>>,
     /// Per-task single-flight for submit/wait drives (live + sweep).
     inflight: Arc<DashMap<String, ()>>,
+    /// Held by the one running released-worktree reclaim (`worktree_reclaim.rs`).
+    worktree_reclaim: Arc<tokio::sync::Mutex<()>>,
     /// Boot-order gate for the backstop sweeps: the reconcile tick may fire before boot
     /// recovery, so `sweep_all` no-ops until `sweep_boot` completes.
     boot_sweep_done: AtomicBool,
@@ -640,6 +643,7 @@ impl Scheduler {
             track_locks: DashMap::new(),
             track_dirty: DashMap::new(),
             inflight: Arc::new(DashMap::new()),
+            worktree_reclaim: Arc::new(tokio::sync::Mutex::new(())),
             boot_sweep_done: AtomicBool::new(false),
             context_sweep_boot_done: AtomicBool::new(false),
             context_metrics: Arc::new(ContextMetrics::default()),
@@ -1890,6 +1894,8 @@ impl Scheduler {
         }
         // Unsettled git deliveries are the authoritative discovery, whatever the task status (F6.4).
         pending_tracks.extend(self.unsettled_git_delivery_tracks().await);
+        // Before this pass dispatches anything: a delivery it resubmits is still unsettled here.
+        self.start_worktree_reclaim().await;
         let tasks = match self.repo.tasks_nonterminal().await {
             Ok(tasks) => tasks,
             Err(e) => {

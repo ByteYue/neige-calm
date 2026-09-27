@@ -1068,7 +1068,7 @@ fn forge_result_filename(idem_key: &str) -> String {
     format!("{:x}.result", hasher.finalize())
 }
 
-fn forge_deadline_ms(parked: bool) -> i64 {
+pub(crate) fn forge_deadline_ms(parked: bool) -> i64 {
     let default_secs = if parked { 900 } else { 300 };
     let secs = std::env::var("NEIGE_FORGE_DEADLINE_SECS")
         .ok()

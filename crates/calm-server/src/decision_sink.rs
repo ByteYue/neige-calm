@@ -246,8 +246,10 @@ impl CardDecisionSink {
         }
 
         if release_workspace {
-            // Normal worker reports release only the lease row; downstream PR
-            // flow still needs the worker worktree and slice branch.
+            // Normal worker reports release only the lease row: the delivery (or the
+            // legacy auto-commit) and a gate still read the worker worktree and slice
+            // branch. The scheduler's reconcile sweep removes them once the attempt is
+            // terminal and its delivery settled (`workspace_lease/reclaim.rs`, #1815).
             release_workspace_lease_for_card_repo(self.repo.as_ref(), &self.events, &card_id_str)
                 .await?;
         }
