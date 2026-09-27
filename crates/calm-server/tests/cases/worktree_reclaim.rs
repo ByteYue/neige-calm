@@ -1,16 +1,21 @@
 //! #1815: a released lease's worktree is reclaimed by the scheduler's reconcile sweep (boot and
 //! every tick) once nothing can still read it — the attempt is terminal, its latest delivery is
 //! settled or abandoned, and no forge action runs on the Track. Real git repositories, the
-//! production report/delivery path, and the production boot sweep.
+//! production report/delivery path, and the production boot sweep and reconcile tick. The arms
+//! that keep the worktree are in `worktree_reclaim_kept.rs`.
 use std::path::Path;
 use std::time::Duration;
 
+use calm_server::mcp_server::registry::ToolCallIdentity;
+use calm_server::model::{Task, TaskStatus, now_ms};
+use calm_server::session_projection_repo::AgentProvider;
+use calm_server::test_seams::{KernelWorkspaceLease, release_workspace_lease_for_card_for_test};
 use serde_json::json;
 
 use super::git_delivery::*;
 
 /// Whether `git worktree list` in `repo_root` names `path`.
-fn worktree_registered(repo_root: &Path, path: &Path) -> bool {
+pub(super) fn worktree_registered(repo_root: &Path, path: &Path) -> bool {
     let listed = git(repo_root, &["worktree", "list", "--porcelain"]);
     let path = path.to_string_lossy();
     listed
@@ -19,7 +24,21 @@ fn worktree_registered(repo_root: &Path, path: &Path) -> bool {
         .any(|listed| listed == path)
 }
 
-async fn worktree_removed_events(fx: &Fx, card: &str) -> i64 {
+pub(super) fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+    git_output(
+        repo_root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .status
+    .success()
+}
+
+pub(super) async fn worktree_removed_events(fx: &Fx, card: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM events WHERE kind = 'worktree.removed' AND scope_card = ?1",
     )
@@ -48,6 +67,99 @@ async fn wait_reclaimed(fx: &Fx, repo_root: &Path, path: &Path, card: &str) {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// One reconcile tick (`sweep_all`, the periodic backstop) and the reclaim it started.
+pub(super) async fn tick(fx: &Fx) {
+    let scheduler = fx.scheduler();
+    scheduler.mark_boot_sweep_complete();
+    scheduler.sweep_all().await;
+    scheduler.worktree_reclaim_idle_for_test().await;
+}
+
+/// A kernel restart (recovery, then the boot sweep) and the reclaim it started.
+pub(super) async fn reboot(fx: &mut Fx) {
+    fx.reboot().await;
+    fx.scheduler().worktree_reclaim_idle_for_test().await;
+}
+
+pub(super) async fn assert_reclaimed(fx: &Fx, lease: &KernelWorkspaceLease, card: &str) {
+    assert!(
+        !lease.path.exists(),
+        "{} still on disk",
+        lease.path.display()
+    );
+    assert!(!worktree_registered(&lease.repo_root, &lease.path));
+    assert!(!branch_exists(&lease.repo_root, &fx.slice_branch(card)));
+    assert_eq!(worktree_removed_events(fx, card).await, 1);
+}
+
+pub(super) async fn assert_kept(fx: &Fx, lease: &KernelWorkspaceLease, card: &str) {
+    assert!(lease.path.is_dir(), "{} was removed", lease.path.display());
+    assert!(worktree_registered(&lease.repo_root, &lease.path));
+    assert!(branch_exists(&lease.repo_root, &fx.slice_branch(card)));
+    assert_eq!(worktree_removed_events(fx, card).await, 0);
+}
+
+pub(super) async fn lease_state(fx: &Fx, lease_id: &str) -> String {
+    sqlx::query_scalar("SELECT state FROM workspace_leases WHERE lease_id = ?1")
+        .bind(lease_id)
+        .fetch_one(&fx.pool())
+        .await
+        .unwrap()
+}
+
+pub(super) async fn set_task_status(fx: &Fx, task_id: &str, status: &str) {
+    sqlx::query("UPDATE tasks SET status = ?1, finished_at_ms = ?2 WHERE id = ?3")
+        .bind(status)
+        .bind(now_ms())
+        .bind(task_id)
+        .execute(&fx.pool())
+        .await
+        .unwrap();
+}
+
+/// A worker that completed with an edit: the production report releases the lease and the
+/// kernel delivery settles; returns once it has.
+pub(super) async fn delivered(
+    fx: &Fx,
+    name: &str,
+) -> (ToolCallIdentity, Task, KernelWorkspaceLease) {
+    let worker = fx.new_worker(name, AgentProvider::Claude).await;
+    let lease = fx.kernel_lease(&worker.card_id).await;
+    let task = fx
+        .running_task(name, "claude", &worker.card_id, json!({}))
+        .await;
+    std::fs::write(lease.path.join("worker.txt"), format!("{name}\n")).unwrap();
+    fx.complete(&worker, &task.id).await;
+    fx.wait_settled(&task.id).await;
+    (worker, task, lease)
+}
+
+/// A worker whose lease was released through the production release with no report (so no
+/// delivery row), its task then set to `status`.
+pub(super) async fn released_without_delivery(
+    fx: &Fx,
+    name: &str,
+    status: &str,
+) -> (ToolCallIdentity, Task, KernelWorkspaceLease) {
+    let worker = fx.new_worker(name, AgentProvider::Claude).await;
+    let lease = fx.kernel_lease(&worker.card_id).await;
+    let task = fx
+        .running_task(name, "claude", &worker.card_id, json!({}))
+        .await;
+    assert!(
+        release_workspace_lease_for_card_for_test(
+            fx.boot.repo.as_ref(),
+            &fx.boot.ctx.events,
+            &worker.card_id
+        )
+        .await
+        .unwrap()
+    );
+    set_task_status(fx, &task.id, status).await;
+    assert_eq!(fx.delivery_count(&task.id).await, 0);
+    (worker, task, lease)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -105,4 +217,171 @@ async fn boot_sweep_reclaims_done_candidate_worktree() {
             == Some(1),
         "the slice branch was deleted with the worktree"
     );
+}
+
+/// The tick reclaims; `calm.plan.list` then reads `removed: true`; a second tick finds nothing
+/// to do (no second `worktree.removed`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tick_reclaims_once_and_plan_list_reads_removed() {
+    let fx = fixture().await;
+    let (worker, task, lease) = delivered(&fx, "tick").await;
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
+    let before = fx.plan_entry("tick").await;
+    assert_eq!(before["worktree"]["removed"], false, "{before}");
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+    let after = fx.plan_entry("tick").await;
+    assert_eq!(after["worktree"]["removed"], true, "{after}");
+    assert!(after["worktree"].get("path").is_none(), "{after}");
+    assert_eq!(after["worktree"]["state"], "released");
+
+    tick(&fx).await;
+    assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 1);
+    assert_eq!(lease_state(&fx, &lease.lease_id).await, "released");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn done_without_delivery_and_canceled_are_reclaimed() {
+    let fx = fixture().await;
+    let (done, _, done_lease) = released_without_delivery(&fx, "no-delivery", "done").await;
+    let (canceled, _, canceled_lease) =
+        released_without_delivery(&fx, "canceled", "canceled").await;
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &done_lease, &done.card_id).await;
+    assert_reclaimed(&fx, &canceled_lease, &canceled.card_id).await;
+}
+
+/// A deleted card's worktree goes whatever its attempt's status (here `failed`, which would keep
+/// it while the card exists).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleted_card_is_reclaimed() {
+    let fx = fixture().await;
+    let (worker, _, lease) = released_without_delivery(&fx, "deleted", "failed").await;
+    sqlx::query("DELETE FROM cards WHERE id = ?1")
+        .bind(&worker.card_id)
+        .execute(&fx.pool())
+        .await
+        .unwrap();
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoned_delivery_is_reclaimed() {
+    let fx = fixture().await;
+    let (worker, task, lease) = fx.hook_failing_task("abandoned", json!({})).await;
+    fx.wait_settled(&task.id).await;
+    let row = fx.delivery_row(&task.id).await.unwrap();
+    assert_eq!(row.retry_allowed, Some(1));
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
+    fx.abandon(&task, &row.delivery_id, "abandon-1", Some("not needed"))
+        .await
+        .expect("abandon admitted");
+    assert!(fx.abandonment_row(&row.delivery_id).await.is_some());
+    remove_pre_commit(&lease);
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+}
+
+/// The latest delivery decides: a retryable failure followed by a candidate retry is settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn candidate_retry_after_retryable_failure_is_reclaimed() {
+    let fx = fixture().await;
+    let (worker, task, lease) = fx.hook_failing_task("retried", json!({})).await;
+    fx.wait_settled(&task.id).await;
+    let first = fx.delivery_row(&task.id).await.unwrap();
+    assert_eq!(first.retry_allowed, Some(1));
+    remove_pre_commit(&lease);
+    fx.retry(&task, &first.delivery_id, "retry-1", None)
+        .await
+        .expect("retry admitted");
+    fx.wait_settled_nth(&task.id, 2).await;
+    let first_now = fx.delivery_row_at(&task.id, 1).await.unwrap();
+    assert_eq!(first_now.settlement.as_deref(), Some("failed"));
+    assert_eq!(first_now.retry_allowed, Some(1));
+    let second = fx.delivery_row(&task.id).await.unwrap();
+    assert_eq!(second.ordinal, 2);
+    assert_eq!(second.settlement.as_deref(), Some("candidate"));
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+}
+
+/// A delivery that failed without retry (`workspace_missing`: the directory went away) settles
+/// the lease; the reclaim clears the registration and the slice branch left behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unretryable_failed_delivery_is_reclaimed() {
+    let mut fx = fixture().await;
+    fx.dispatcher.abort_event_listener_for_test();
+    let worker = fx.codex_worker();
+    let lease = fx.kernel_lease(&worker.card_id).await;
+    let task = fx
+        .running_task("gone", "codex", &worker.card_id, json!({}))
+        .await;
+    fx.report_only(&worker, &task.id).await;
+    std::fs::remove_dir_all(&lease.path).unwrap();
+    // The boot sweep sees the delivery unsettled (kept), then settles it.
+    reboot(&mut fx).await;
+    fx.wait_settled(&task.id).await;
+    let row = fx.delivery_row(&task.id).await.unwrap();
+    assert_eq!(row.retry_allowed, Some(0));
+    assert_eq!(fx.task_columns(&task.id).await.status, TaskStatus::Done);
+    assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 0);
+    assert!(branch_exists(
+        &lease.repo_root,
+        &fx.slice_branch(&worker.card_id)
+    ));
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &lease, &worker.card_id).await;
+}
+
+/// The boot sweep takes a backlog, at most 16 removals per pass; the next pass takes the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn boot_backlog_is_reclaimed_sixteen_per_pass() {
+    let mut fx = fixture().await;
+    let mut released = Vec::new();
+    for n in 0..17 {
+        released.push(released_without_delivery(&fx, &format!("backlog-{n}"), "done").await);
+    }
+
+    reboot(&mut fx).await;
+    let mut removed = 0;
+    for (worker, _, _) in &released {
+        removed += worktree_removed_events(&fx, &worker.card_id).await;
+    }
+    assert_eq!(removed, 16);
+
+    tick(&fx).await;
+    for (worker, _, lease) in &released {
+        assert_reclaimed(&fx, lease, &worker.card_id).await;
+    }
+}
+
+/// A lease path that no longer resolves to its recorded worktree (here moved behind a symlink)
+/// is refused: nothing is removed, no event, and the moved checkout survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identity_refusal_leaves_the_entry_untouched() {
+    let fx = fixture().await;
+    let (worker, _, lease) = delivered(&fx, "moved").await;
+    let moved = lease.path.with_file_name("moved-away");
+    std::fs::rename(&lease.path, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &lease.path).unwrap();
+
+    tick(&fx).await;
+    assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 0);
+    assert!(lease.path.is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(moved.join("worker.txt")).unwrap(),
+        "moved\n"
+    );
+    assert!(branch_exists(
+        &lease.repo_root,
+        &fx.slice_branch(&worker.card_id)
+    ));
 }
