@@ -1281,8 +1281,9 @@ pub(crate) enum WorktreeRemoval {
     /// Rollback and teardown: the checkout goes whatever it holds (`worktree remove --force`),
     /// the slice branch with it; an identity or foreign-registration refusal is an error.
     Discard,
-    /// The released-worktree reclaim (`reclaim.rs`): only a clean registered checkout goes (no
-    /// `--force`), the slice branch stays, and anything else is a [`RemovalOutcome::Refused`].
+    /// The released-worktree reclaim (`reclaim.rs`): only a clean registered checkout whose
+    /// commits are all reachable from a ref goes, the slice branch stays, and anything else is a
+    /// [`RemovalOutcome::Refused`].
     KeepWork,
 }
 
@@ -1290,7 +1291,9 @@ pub(crate) enum WorktreeRemoval {
 pub(crate) enum RemovalOutcome {
     /// `true` when anything (link, registration, directory, branch) was removed.
     Removed(bool),
-    /// Nothing was touched, and why ([`WorktreeRemoval::KeepWork`] only).
+    /// Left in place, and why ([`WorktreeRemoval::KeepWork`] only). A pre-check refusal touches
+    /// nothing; the reclaim also reports a failed `worktree remove` this way, which may have
+    /// deleted part of a checkout already found clean.
     Refused(String),
 }
 
@@ -1359,6 +1362,13 @@ fn remove_workspace_worktree_as(
     // linked back would otherwise keep its branch checked out and fail the
     // `branch -D` below). `worktree remove --force` through the link would
     // delete the link's target — an external directory, the main checkout.
+    if mode == WorktreeRemoval::KeepWork && base::is_symlink_leaf(&target.path)? {
+        // Not ours to unlink or prune around: only rollback and teardown do that.
+        return Ok(RemovalOutcome::Refused(format!(
+            "{} is a symlink, not a lease worktree; left alone",
+            target.path.display()
+        )));
+    }
     let link_removed = base::unlink_symlink_leaf(&target.path)?;
     if link_removed {
         git_worktree_prune(&target.repo_root)?;
@@ -1384,12 +1394,7 @@ fn remove_workspace_worktree_as(
     let registered = registration != GitWorktreeRegistration::Absent;
     let path_existed = !link_removed && target.path.exists();
     if mode == WorktreeRemoval::KeepWork {
-        return reclaim::remove_clean_worktree_keeping_branch(
-            target,
-            link_removed,
-            registered,
-            path_existed,
-        );
+        return reclaim::remove_clean_worktree_keeping_branch(target, registered, path_existed);
     }
     if registered || path_existed {
         let output = neige_git_command()

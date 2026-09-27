@@ -193,7 +193,7 @@ enum Reclaim {
     /// The card took a lease again, a terminal works in the worktree, or a forge action runs
     /// on the Track: nothing was touched; a later pass looks again.
     Skipped,
-    /// Nothing was touched, and why.
+    /// Left in place, and why (a failed removal included; see [`RemovalOutcome::Refused`]).
     Refused(String),
     Removed,
     /// Removed, but the Track row was deleted meanwhile: its own sweep owns the events.
@@ -257,14 +257,17 @@ async fn lease_in_use(pool: &SqlitePool, lease: &WorkspaceLease) -> Result<bool>
 }
 
 /// [`WorktreeRemoval::KeepWork`] after the identity, repository, symlink-leaf and
-/// foreign-registration checks of `remove_workspace_worktree_as`: a registered checkout goes
-/// only when `git status` shows no tracked change and no untracked (non-ignored) file, through
-/// `git worktree remove` without `--force` (which re-checks the same and refuses a tree that
-/// changed since); a registration whose directory is gone is pruned; an unregistered directory
-/// is left alone. The slice branch is never deleted here.
+/// foreign-registration checks of `remove_workspace_worktree_as`. A registered checkout goes
+/// only when `git status` shows no tracked change and no untracked (non-ignored) file and its
+/// HEAD is on a branch or reachable from a ref — both bounded, as they run repository code
+/// (clean filters) — and then through `git worktree remove --force`, unbounded: a deadline
+/// could kill it halfway through the delete. With `--force` git skips its own cleanliness
+/// `status`, so the remove runs no repository code (no fsmonitor, no filters). Nothing awaits
+/// between the checks and the remove; a file written in that window is lost with the checkout.
+/// A registration whose directory is gone is pruned; an unregistered directory is left alone.
+/// The slice branch is never deleted here.
 pub(super) fn remove_clean_worktree_keeping_branch(
     target: &WorkspaceLeaseTarget,
-    link_removed: bool,
     registered: bool,
     path_existed: bool,
 ) -> Result<RemovalOutcome> {
@@ -273,7 +276,7 @@ pub(super) fn remove_clean_worktree_keeping_branch(
             // Drop the registration of the missing directory; touches no files.
             git_worktree_prune(&target.repo_root)?;
         }
-        return Ok(RemovalOutcome::Removed(link_removed || registered));
+        return Ok(RemovalOutcome::Removed(registered));
     }
     if !registered {
         return Ok(RemovalOutcome::Refused(format!(
@@ -295,23 +298,81 @@ pub(super) fn remove_clean_worktree_keeping_branch(
             target.path.display()
         )));
     }
-    // Isolated and bounded: without `--force`, git runs `status` in the checkout (clean
-    // filters); no fsmonitor — the `-c` reaches that child `status` too.
-    let mut command = isolated_git_command();
-    command
+    if let Some(head) = unreferenced_detached_head(target)? {
+        return Ok(RemovalOutcome::Refused(format!(
+            "worktree {} has a detached HEAD {head} that no ref reaches; left in place",
+            target.path.display()
+        )));
+    }
+    // Isolated: no repository code should run with `--force`, but nothing of the kernel's
+    // environment reaches it if some does.
+    let output = isolated_git_command()
         .args(["-c", "core.fsmonitor=false", "-C"])
         .arg(&target.repo_root)
-        .args(["worktree", "remove"])
-        .arg(&target.path);
-    let output = run_reclaim_git(command, "git worktree remove")?;
+        .args(["worktree", "remove", "--force"])
+        .arg(&target.path)
+        .output()
+        .map_err(|e| {
+            CalmError::Internal(format!(
+                "spawn git worktree remove for {}: {e}",
+                target.path.display()
+            ))
+        })?;
     if !output.status.success() && git_worktree_registered(target)? {
         return Err(git_failed(
-            "git worktree remove",
+            "git worktree remove --force",
             &target.repo_root,
             &output,
         ));
     }
     Ok(RemovalOutcome::Removed(true))
+}
+
+/// The checkout's HEAD commit when it is detached and no ref under `refs/` contains it —
+/// commits only this HEAD keeps alive, which removing the worktree would orphan. `None` when
+/// HEAD is on a branch (reclaim never deletes a branch) or some ref reaches it.
+fn unreferenced_detached_head(target: &WorkspaceLeaseTarget) -> Result<Option<String>> {
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let mut command = isolated_git_command();
+        command
+            .args(["-c", "core.fsmonitor=false", "-C"])
+            .arg(cwd)
+            .args(args);
+        run_reclaim_git(command, &format!("git {}", args[0]))
+    };
+    if git(&["symbolic-ref", "-q", "HEAD"], &target.path)?
+        .status
+        .success()
+    {
+        return Ok(None);
+    }
+    let head = git(&["rev-parse", "--verify", "HEAD^{commit}"], &target.path)?;
+    if !head.status.success() {
+        return Err(git_failed("git rev-parse HEAD", &target.path, &head));
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let containing = git(
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--contains",
+            &head,
+            "refs/",
+        ],
+        &target.repo_root,
+    )?;
+    if !containing.status.success() {
+        return Err(git_failed(
+            "git for-each-ref --contains",
+            &target.repo_root,
+            &containing,
+        ));
+    }
+    if containing.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Some(head));
+    }
+    Ok(None)
 }
 
 /// The first entries of `git status --porcelain` in the checkout (tracked changes and
@@ -356,9 +417,9 @@ fn uncommitted_changes(target: &WorkspaceLeaseTarget) -> Result<Option<String>> 
     Ok(Some(shown))
 }
 
-/// Bound on each reclaim git run that executes repository code. The remove deletes the whole
-/// checkout, ignored build output (`node_modules`, `target`) included, so it gets minutes, not
-/// the gate sampler's seconds; it runs off the async runtime and outside any transaction.
+/// Bound on each pre-check git run (the `status` runs the checkout's clean filters; a large
+/// repository's `for-each-ref --contains` walks history). Off the async runtime and outside
+/// any transaction; a timeout is a refusal.
 const RECLAIM_GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const RECLAIM_GIT_OUTPUT_CAP: usize = 1024 * 1024;
 

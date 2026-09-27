@@ -209,31 +209,148 @@ async fn reported_worker(fx: &Fx, key: &str) -> (Task, OwnedLease) {
     (task, owned)
 }
 
-/// The shared repository config names an fsmonitor hook (any worker can write it): the reclaim
-/// never runs it — not in its `status`, not in `worktree remove`'s own status.
+/// The shared repository config names an fsmonitor hook and a clean filter for every path
+/// (any worker can write both). The fsmonitor hook never runs; the clean filter runs only under
+/// the bounded `status` pre-check, never under `worktree remove` (with `--force` git runs no
+/// repository code).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn reclaim_never_runs_the_fsmonitor_hook() {
+async fn reclaim_never_runs_the_fsmonitor_hook_or_a_clean_filter_in_the_remove() {
     let fx = fixture().await;
     let (worker, _, lease) = delivered(&fx, "fsmonitor").await;
     let scratch = fx.track_root.parent().unwrap().to_path_buf();
-    let marker = scratch.join("fsmonitor-ran");
+    let fsmonitor_ran = scratch.join("fsmonitor-ran");
+    let filter_callers = scratch.join("filter-callers");
     let hook = scratch.join("fsmonitor-hook");
+    let filter = scratch.join("clean-filter");
     write_executable(
         &hook,
-        &format!("#!/bin/sh\ntouch '{}'\nsleep 5\nexit 1\n", marker.display()),
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nsleep 5\nexit 1\n",
+            fsmonitor_ran.display()
+        ),
+    );
+    // Records the command lines of its parent and grandparent: the git that ran it, directly or
+    // through `sh -c`.
+    write_executable(
+        &filter,
+        &format!(
+            "#!/bin/sh\ngp=$(cut -d' ' -f4 /proc/$PPID/stat)\n\
+             {{ tr '\\0' ' ' < /proc/$PPID/cmdline; echo; tr '\\0' ' ' < /proc/$gp/cmdline; echo; }} >> '{}'\n\
+             cat\n",
+            filter_callers.display()
+        ),
     );
     git(
         &lease.repo_root,
         &["config", "core.fsmonitor", hook.to_str().unwrap()],
     );
+    git(
+        &lease.repo_root,
+        &["config", "filter.slow.clean", filter.to_str().unwrap()],
+    );
+    std::fs::write(
+        lease.git_common_dir.join("info").join("attributes"),
+        "* filter=slow\n",
+    )
+    .unwrap();
     let tip = slice_tip(&fx, &lease, &worker.card_id);
 
     tick(&fx).await;
     assert_reclaimed(&fx, &lease, &worker.card_id, &tip).await;
-    assert!(!marker.exists(), "the fsmonitor hook ran");
+    assert!(!fsmonitor_ran.exists(), "the fsmonitor hook ran");
+    let callers = std::fs::read_to_string(&filter_callers).unwrap_or_default();
+    assert!(
+        callers.contains("status"),
+        "the pre-check's status ran the filter (the fixture is live):\n{callers}"
+    );
+    assert!(
+        !callers.contains(" worktree remove "),
+        "the clean filter ran under worktree remove:\n{callers}"
+    );
 }
 
-/// A locked worktree (clean, but `worktree remove` without `--force` fails) is a refusal, not
+/// A clean checkout whose detached HEAD carries a commit no ref reaches keeps it: removing the
+/// worktree would orphan that commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_head_no_ref_reaches_keeps_the_worktree() {
+    let fx = fixture().await;
+    let (worker, _, lease) = delivered(&fx, "detached").await;
+    git(&lease.path, &["checkout", "-q", "--detach"]);
+    let orphan = commit_file(&lease.path, "later.txt", "after the report\n", "later work");
+    assert!(
+        git_output(&lease.path, &["symbolic-ref", "-q", "HEAD"])
+            .status
+            .code()
+            == Some(1)
+    );
+
+    tick(&fx).await;
+    assert_kept(&fx, &lease, &worker.card_id).await;
+    assert_eq!(git(&lease.path, &["rev-parse", "HEAD"]), orphan);
+    assert_eq!(
+        git(&lease.repo_root, &["show", &format!("{orphan}:later.txt")]),
+        "after the report"
+    );
+}
+
+/// A detached HEAD some ref reaches holds nothing only it keeps: at the slice branch's tip, or
+/// at the candidate after the slice branch moved elsewhere (only the candidate ref reaches it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_head_a_ref_reaches_is_reclaimed() {
+    let fx = fixture().await;
+    let (at_branch, _, at_branch_lease) = delivered(&fx, "at-branch").await;
+    let (at_candidate, candidate_task, at_candidate_lease) = delivered(&fx, "at-candidate").await;
+    git(&at_branch_lease.path, &["checkout", "-q", "--detach"]);
+    git(&at_candidate_lease.path, &["checkout", "-q", "--detach"]);
+    let slice = fx.slice_branch(&at_candidate.card_id);
+    git(
+        &at_candidate_lease.repo_root,
+        &["branch", "-f", &slice, &at_candidate_lease.base_sha],
+    );
+    let candidate = fx.candidate_row(&candidate_task.id).await.unwrap();
+    assert_eq!(
+        git(&at_candidate_lease.path, &["rev-parse", "HEAD"]),
+        candidate.commit_sha
+    );
+    let branch_tip = slice_tip(&fx, &at_branch_lease, &at_branch.card_id);
+
+    tick(&fx).await;
+    assert_reclaimed(&fx, &at_branch_lease, &at_branch.card_id, &branch_tip).await;
+    assert_reclaimed(
+        &fx,
+        &at_candidate_lease,
+        &at_candidate.card_id,
+        &at_candidate_lease.base_sha,
+    )
+    .await;
+}
+
+/// A lease path that is a symlink is refused, even for a legacy lease without a recorded base
+/// (no identity check): nothing is unlinked or pruned, the linked-to checkout is untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn symlink_leaf_of_a_baseless_lease_is_refused() {
+    let fx = fixture().await;
+    let (worker, _, lease) = released_without_delivery(&fx, "linked", "done").await;
+    sqlx::query(
+        "UPDATE workspace_leases SET base_sha = NULL, base_source = NULL, base_attempt_id = NULL, \
+         canonical_path = NULL, git_common_dir = NULL, delivery_policy = NULL WHERE lease_id = ?1",
+    )
+    .bind(&lease.lease_id)
+    .execute(&fx.pool())
+    .await
+    .unwrap();
+    let moved = lease.path.with_file_name("linked-away");
+    std::fs::rename(&lease.path, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &lease.path).unwrap();
+
+    tick(&fx).await;
+    assert_eq!(worktree_removed_events(&fx, &worker.card_id).await, 0);
+    assert!(lease.path.is_symlink());
+    assert!(moved.join(".git").is_file());
+    assert!(worktree_registered(&lease.repo_root, &lease.path));
+}
+
+/// A locked worktree (clean, but `worktree remove --force` refuses a lock) is a refusal, not
 /// a failure: sixteen of them ahead of a clean one leave room for it on the first pass, and
 /// stay untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
