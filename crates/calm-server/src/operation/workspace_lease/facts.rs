@@ -144,31 +144,27 @@ pub(crate) async fn worker_worktree_facts_tx(
     }))
 }
 
+/// The one rule for "the kernel removed this card's worktree": a `worktree.removed` event newer
+/// than the card's latest `worktree.provisioned` (any `worktree.removed` when it was never
+/// provisioned). An SQL condition over the card-id expression `card` (a bind or a column), shared
+/// by this read and the released-worktree reclaim (`reclaim.rs`).
+pub(super) fn worktree_removed_after_last_provision_sql(card: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM events removed \
+         WHERE removed.scope_card = {card} AND removed.kind = 'worktree.removed' \
+         AND removed.id > COALESCE((SELECT MAX(provisioned.id) FROM events provisioned \
+         WHERE provisioned.scope_card = {card} AND provisioned.kind = 'worktree.provisioned'), 0))"
+    )
+}
+
 async fn worktree_removed_after_last_provision_tx(
     tx: &mut Tx<'_>,
     worker_card_id: &str,
 ) -> Result<bool> {
-    let latest_id = |kind: &'static str| {
-        sqlx::query_scalar::<_, i64>(
-            r#"SELECT id FROM events
-               WHERE scope_card = ?1 AND kind = ?2
-               ORDER BY id DESC
-               LIMIT 1"#,
-        )
-        .bind(worker_card_id.to_string())
-        .bind(kind)
-    };
-    let removed_id = latest_id("worktree.removed")
-        .fetch_optional(&mut **tx)
+    let sql = format!("SELECT {}", worktree_removed_after_last_provision_sql("?1"));
+    let removed = sqlx::query_scalar(&sql)
+        .bind(worker_card_id)
+        .fetch_one(&mut **tx)
         .await?;
-    let Some(removed_id) = removed_id else {
-        return Ok(false);
-    };
-    let provisioned_id = latest_id("worktree.provisioned")
-        .fetch_optional(&mut **tx)
-        .await?;
-    Ok(match provisioned_id {
-        Some(provisioned_id) => removed_id > provisioned_id,
-        None => true,
-    })
+    Ok(removed)
 }

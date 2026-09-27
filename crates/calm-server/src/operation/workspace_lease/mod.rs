@@ -22,6 +22,7 @@ use super::{PhaseTag, TimestampMs, Tx};
 pub(crate) mod base;
 pub(crate) mod carry;
 pub(crate) mod facts;
+pub(crate) mod reclaim;
 pub(crate) mod upstream;
 pub(crate) mod upstream_fetch;
 #[cfg(test)]
@@ -1274,18 +1275,92 @@ fn workspace_dir_is_non_empty(path: &Path) -> Result<bool> {
     }
 }
 
+/// How a lease worktree removal treats what the checkout holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorktreeRemoval {
+    /// Rollback and teardown: the checkout goes whatever it holds (`worktree remove --force`),
+    /// the slice branch with it; an identity or foreign-registration refusal is an error.
+    Discard,
+    /// The released-worktree reclaim (`reclaim.rs`): only a clean registered checkout whose
+    /// commits are all reachable from a ref goes, the slice branch stays, and anything else is a
+    /// [`RemovalOutcome::Refused`].
+    KeepWork,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RemovalOutcome {
+    /// `true` when anything (link, registration, directory, branch) was removed.
+    Removed(bool),
+    /// Left in place, and why ([`WorktreeRemoval::KeepWork`] only). A pre-check refusal touches
+    /// nothing; the reclaim also reports a failed `worktree remove` this way, which may have
+    /// deleted part of a checkout already found clean.
+    Refused(String),
+    /// The checkout passed every [`WorktreeRemoval::KeepWork`] pre-check and nothing was touched
+    /// yet: the reclaim re-checks the database, then calls `reclaim::remove_checked_worktree`.
+    Cleared,
+}
+
+impl RemovalOutcome {
+    fn into_discarded(self) -> Result<bool> {
+        match self {
+            RemovalOutcome::Removed(removed) => Ok(removed),
+            RemovalOutcome::Refused(refusal) => Err(CalmError::Internal(refusal)),
+            RemovalOutcome::Cleared => Err(CalmError::Internal(
+                "a discarding removal has no pre-check stage".into(),
+            )),
+        }
+    }
+}
+
 fn remove_workspace_worktree_for_lease(lease: &WorkspaceLease) -> Result<bool> {
-    base::verify_lease_path_identity_before_removal(Path::new(&lease.path), lease.base.as_ref())?;
+    remove_workspace_worktree_for_lease_as(lease, WorktreeRemoval::Discard)?.into_discarded()
+}
+
+fn remove_workspace_worktree_for_lease_as(
+    lease: &WorkspaceLease,
+    mode: WorktreeRemoval,
+) -> Result<RemovalOutcome> {
+    if let Some(refusal) =
+        base::lease_path_identity_refusal(Path::new(&lease.path), lease.base.as_ref())?
+    {
+        return match mode {
+            WorktreeRemoval::Discard => Err(CalmError::Internal(refusal)),
+            WorktreeRemoval::KeepWork => Ok(RemovalOutcome::Refused(refusal)),
+        };
+    }
     let Some(target) = workspace_lease_target_from_lease(lease)? else {
         // Relative leases were never registered as git worktrees.
-        return remove_workspace_dir_if_exists(&lease.path);
+        return match mode {
+            WorktreeRemoval::Discard => {
+                remove_workspace_dir_if_exists(&lease.path).map(RemovalOutcome::Removed)
+            }
+            WorktreeRemoval::KeepWork => Ok(RemovalOutcome::Refused(format!(
+                "{} is not a lease worktree path",
+                lease.path
+            ))),
+        };
     };
-    remove_workspace_worktree(&target)
+    remove_workspace_worktree_as(&target, mode)
 }
 
 pub(crate) fn remove_workspace_worktree(target: &WorkspaceLeaseTarget) -> Result<bool> {
+    remove_workspace_worktree_as(target, WorktreeRemoval::Discard)?.into_discarded()
+}
+
+fn remove_workspace_worktree_as(
+    target: &WorkspaceLeaseTarget,
+    mode: WorktreeRemoval,
+) -> Result<RemovalOutcome> {
     if !git_repo_available(&target.repo_root) {
-        return remove_workspace_dir_if_exists(&target.path_string());
+        return match mode {
+            WorktreeRemoval::Discard => {
+                remove_workspace_dir_if_exists(&target.path_string()).map(RemovalOutcome::Removed)
+            }
+            WorktreeRemoval::KeepWork => Ok(RemovalOutcome::Refused(format!(
+                "repository {} is not available",
+                target.repo_root.display()
+            ))),
+        };
     }
 
     // A symlink leaf is never a registration of ours: unlink it and prune
@@ -1293,6 +1368,13 @@ pub(crate) fn remove_workspace_worktree(target: &WorkspaceLeaseTarget) -> Result
     // linked back would otherwise keep its branch checked out and fail the
     // `branch -D` below). `worktree remove --force` through the link would
     // delete the link's target — an external directory, the main checkout.
+    if mode == WorktreeRemoval::KeepWork && base::is_symlink_leaf(&target.path)? {
+        // Not ours to unlink or prune around: only rollback and teardown do that.
+        return Ok(RemovalOutcome::Refused(format!(
+            "{} is a symlink, not a lease worktree; left alone",
+            target.path.display()
+        )));
+    }
     let link_removed = base::unlink_symlink_leaf(&target.path)?;
     if link_removed {
         git_worktree_prune(&target.repo_root)?;
@@ -1309,14 +1391,17 @@ pub(crate) fn remove_workspace_worktree(target: &WorkspaceLeaseTarget) -> Result
         branch,
     } = registration
     {
-        return Err(base::foreign_registration_refusal(
-            target,
-            &registered_as,
-            branch.as_deref(),
-        ));
+        let refusal = base::foreign_registration_refusal(target, &registered_as, branch.as_deref());
+        return match mode {
+            WorktreeRemoval::Discard => Err(refusal),
+            WorktreeRemoval::KeepWork => Ok(RemovalOutcome::Refused(refusal.to_string())),
+        };
     }
     let registered = registration != GitWorktreeRegistration::Absent;
     let path_existed = !link_removed && target.path.exists();
+    if mode == WorktreeRemoval::KeepWork {
+        return reclaim::keep_work_precheck(target, registered, path_existed);
+    }
     if registered || path_existed {
         let output = neige_git_command()
             .arg("-C")
@@ -1361,7 +1446,9 @@ pub(crate) fn remove_workspace_worktree(target: &WorkspaceLeaseTarget) -> Result
     }
 
     let dir_removed = remove_workspace_dir_if_exists(&target.path_string())?;
-    Ok(link_removed || registered || path_existed || branch_existed || dir_removed)
+    Ok(RemovalOutcome::Removed(
+        link_removed || registered || path_existed || branch_existed || dir_removed,
+    ))
 }
 
 const WORKTREE_EXCLUDE: &str = ".claude/worktrees/";
