@@ -484,6 +484,11 @@ jobs:
     needs: changes
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.rust_changed == 'true') }}
     runs-on: ubuntu-latest
+    # No debuginfo: the archive every shard downloads shrinks; panics still report file:line.
+    # Only this job uses the `rust-test` cache key, so a job-level value splits nothing.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -499,7 +504,7 @@ jobs:
         with:
           shared-key: rust-test
           cache-workspace-crates: true
-          save-if: ${{ github.event_name == 'push' }}
+          save-if: true # TEMP(measure warm cache on this PR) — restore to github.event_name == 'push'
 
       - uses: taiki-e/install-action@nextest
 
@@ -559,6 +564,10 @@ jobs:
             cat "$policy" > "$RUNNER_TEMP/isolated-provider-userns-policy"
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+
+      # trybuild compiles its probe crates offline against the registry the archive does not carry.
+      - name: cargo fetch --locked
+        run: cargo fetch --locked
 
       - uses: actions/download-artifact@v4
         with:
