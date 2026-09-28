@@ -45,28 +45,32 @@ PATH="$stub_bin:$PATH" \
   RUST_NEXTEST_CAPTURE="$local_capture" \
   LOCAL_RUST_GATES_SPEC="$PWD/fe/core/api/generated/openapi.json" \
   scripts/local-rust-gates.sh >/dev/null
-assert_argv "$local_capture" nextest run --workspace --locked --profile ci --test-threads 8
+assert_argv "$local_capture" nextest run --workspace --locked --features \
+  calm-server/codex-e2e --profile ci --test-threads 8
 
 hosted_capture="$temp_root/hosted.args"
 PATH="$stub_bin:$PATH" \
   NEIGE_CODEX_BIN=/must-not-reach-nextest \
   RUST_NEXTEST_CAPTURE="$hosted_capture" \
   scripts/run-ci-rust-nextest.sh github-hosted >/dev/null
-assert_argv "$hosted_capture" nextest run --workspace --locked --profile ci
+assert_argv "$hosted_capture" nextest run --workspace --locked --features \
+  calm-server/codex-e2e --profile ci
 
 self_hosted_capture="$temp_root/self-hosted.args"
 PATH="$stub_bin:$PATH" \
   NEIGE_CODEX_BIN=/must-not-reach-nextest \
   RUST_NEXTEST_CAPTURE="$self_hosted_capture" \
   scripts/run-ci-rust-nextest.sh self-hosted >/dev/null
-assert_argv "$self_hosted_capture" nextest run --workspace --locked --profile ci --test-threads 8
+assert_argv "$self_hosted_capture" nextest run --workspace --locked --features \
+  calm-server/codex-e2e --profile ci --test-threads 8
 
 partition_capture="$temp_root/partition.args"
 PATH="$stub_bin:$PATH" \
   NEIGE_CODEX_BIN=/must-not-reach-nextest \
   RUST_NEXTEST_CAPTURE="$partition_capture" \
   scripts/run-ci-rust-nextest.sh github-hosted --partition hash:2/3 >/dev/null
-assert_argv "$partition_capture" nextest run --workspace --locked --profile ci --partition hash:2/3
+assert_argv "$partition_capture" nextest run --workspace --locked --features \
+  calm-server/codex-e2e --profile ci --partition hash:2/3
 
 archive_capture="$temp_root/archive.args"
 archive_file="$temp_root/tests.tar.zst"

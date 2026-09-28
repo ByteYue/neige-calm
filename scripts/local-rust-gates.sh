@@ -46,7 +46,7 @@ if [[ "${1:-}" == "--quick" ]]; then
   exit 0
 fi
 
-step "6/6 nextest (mirrors the rust job)"
+step "6/6 nextest (WITH features, mirrors the rust job)"
 # Local runs share this production host with live services. The shared wrapper
 # pins the CI profile and disables real Codex; this local cap prevents flakes.
 scripts/run-rust-nextest.sh --test-threads 8

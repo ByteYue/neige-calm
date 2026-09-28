@@ -7,9 +7,9 @@ cd "$(dirname "$0")/.."
 
 usage='usage: scripts/run-rust-nextest.sh [--archive-file FILE] [--test-threads N] [--partition KIND:N/M]'
 # Without --archive-file the suite is built here. With it, the tests come from a
-# `cargo nextest archive --workspace --locked --profile ci` built by CI's rust-build job,
+# `cargo nextest archive` built by CI's rust-build job with the same features,
 # extracted into ./target so compile-time CARGO_BIN_EXE_* paths still resolve.
-source_args=(--workspace --locked)
+source_args=(--workspace --locked --features calm-server/codex-e2e)
 args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in

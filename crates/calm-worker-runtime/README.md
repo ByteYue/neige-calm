@@ -124,7 +124,7 @@ a test failure is explicit, not a skipped success.
 
 ## Required CI integration
 
-The ordinary workspace nextest command does **not**
+The ordinary workspace command with `--features calm-server/codex-e2e` does **not**
 enable this crate's `test-support`. It therefore does not execute the runtime
 integration target or establish the 22-test result recorded during development.
 The CI workflow runs the targeted **worker process isolation** job on an ephemeral

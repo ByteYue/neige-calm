@@ -513,7 +513,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p calm-worker-runtime --bin calm-worker-boundary
-          cargo nextest archive --workspace --locked --profile ci --archive-file nextest-archive.tar.zst
+          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst
           ls -l nextest-archive.tar.zst
 
       - name: upload nextest archive
@@ -574,7 +574,6 @@ jobs:
           name: nextest-archive
 
       - name: cargo nextest run --archive-file
-        # codex-e2e tests are not built here (they self-skip without a codex binary anyway); lint's clippy still compiles them.
         # nextest runs no doctests and this repo has none (every doc fence carries a non-rust tag); add a `cargo test --doc` step if that changes.
         run: |
           scripts/run-ci-rust-nextest.sh \
@@ -1130,10 +1129,13 @@ jobs:
   fe-e2e:
     name: fe e2e (playwright + docker stack)
     needs: [changes, e2e-release-build]
-    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && needs.e2e-release-build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.fe_e2e_changed == 'true') }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_e2e_changed == 'true') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
+      - name: require the e2e release build
+        if: needs.e2e-release-build.result != 'success'
+        run: echo "::error::e2e release binaries finished with ${{ needs.e2e-release-build.result }}" && exit 1
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
@@ -1215,10 +1217,14 @@ jobs:
   stack-e2e-tier-1:
     name: stack e2e (tier 1)
     needs: [changes, e2e-release-build]
-    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && needs.e2e-release-build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.stack_changed == 'true') }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.stack_changed == 'true') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
+      - name: require the e2e release build
+        if: needs.e2e-release-build.result != 'success'
+        run: echo "::error::e2e release binaries finished with ${{ needs.e2e-release-build.result }}" && exit 1
+
       - uses: actions/checkout@v4
 
       # `-m` stamps extraction time, so Makefile's mtime rule sees the binaries as newer than the checkout and `make dev` does not rebuild.
