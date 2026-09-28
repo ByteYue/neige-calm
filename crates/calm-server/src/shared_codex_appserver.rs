@@ -4,6 +4,7 @@
 #[cfg(target_os = "macos")]
 mod macos_process;
 mod preserving_recovery;
+mod thread_release;
 
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -787,6 +788,8 @@ pub struct FakeSharedCodexAppServer {
     fail_next_thread_start: AtomicBool,
     fail_thread_resume: AtomicBool,
     resumed_threads: std::sync::Mutex<Vec<(String, bool)>>,
+    /// Every thread `thread/unsubscribe` was sent for, in order.
+    unsubscribed_threads: std::sync::Mutex<Vec<String>>,
     /// Sticky, unlike `fail_next_thread_start`: the RETRY behaviour is what is under test.
     fail_turn_start: AtomicBool,
     /// Answer `turn/start` the way codex does when it sees the input and says no, as opposed
@@ -839,6 +842,7 @@ impl FakeSharedCodexAppServer {
             fail_next_thread_start: AtomicBool::new(false),
             fail_thread_resume: AtomicBool::new(false),
             resumed_threads: std::sync::Mutex::new(Vec::new()),
+            unsubscribed_threads: std::sync::Mutex::new(Vec::new()),
             fail_turn_start: AtomicBool::new(false),
             reject_turn_start: AtomicBool::new(false),
             config_read: std::sync::Mutex::new(None),
@@ -1531,26 +1535,27 @@ impl SharedCodexAppServer {
     }
 
     /// Drop this daemon's `thread_id -> card_id` attribution for Cards whose delete has already
-    /// committed, so a reconnect does not resume a thread with no database owner. Takes
-    /// `kernel_thread_start_serial` and `resume_replay_serial`; infallible on purpose.
+    /// committed, so a reconnect does not resume a thread with no database owner, then release
+    /// those threads from the daemon. Takes `kernel_thread_start_serial` and
+    /// `resume_replay_serial` for the drop only; infallible on purpose.
     pub async fn forget_threads_for_deleted_cards(&self, card_ids: &HashSet<String>) -> usize {
         if card_ids.is_empty() {
             return 0;
         }
-        let _start_guard = self.kernel_thread_start_serial.lock().await;
-        // And the replay boundary, in this order: an in-flight `resume_cached_threads` may hold a
-        // pre-delete snapshot.
-        let _replay_guard = self.resume_replay_serial.lock().await;
         let mut dropped: Vec<(String, String)> = Vec::new();
-        self.thread_cache.retain(|thread_id, card_id| {
-            if card_ids.contains(card_id) {
-                dropped.push((thread_id.clone(), card_id.clone()));
-                false
-            } else {
-                true
-            }
-        });
         {
+            let _start_guard = self.kernel_thread_start_serial.lock().await;
+            // And the replay boundary, in this order: an in-flight `resume_cached_threads` may
+            // hold a pre-delete snapshot.
+            let _replay_guard = self.resume_replay_serial.lock().await;
+            self.thread_cache.retain(|thread_id, card_id| {
+                if card_ids.contains(card_id) {
+                    dropped.push((thread_id.clone(), card_id.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
             let mut forgotten = self.forgotten_threads.lock().await;
             for (thread_id, _) in &dropped {
                 forgotten.remember(thread_id);
@@ -1564,6 +1569,12 @@ impl SharedCodexAppServer {
                 "dropped shared codex thread attribution for a deleted card"
             );
         }
+        // Outside the serials: the RPCs must not hold up thread starts or a respawn's replay.
+        let thread_ids: Vec<String> = dropped
+            .iter()
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        self.unsubscribe_threads(&thread_ids).await;
         dropped.len()
     }
 

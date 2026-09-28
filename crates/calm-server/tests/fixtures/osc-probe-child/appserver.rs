@@ -300,13 +300,18 @@ impl ReadFixtures {
     /// `FAKE_CODEX_CAPTURE_REQUESTS`: keyed off the socket path, it needs no
     /// process-global env and cannot bleed between tests.
     fn record_method(&self, method: &str) {
+        self.record_line("methods", method);
+    }
+
+    /// Append one line to the `<sock>.<extension>` sidecar.
+    fn record_line(&self, extension: &str, line: &str) {
         use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.sock.with_extension("methods"))
+            .open(self.sock.with_extension(extension))
         {
-            let _ = writeln!(file, "{method}");
+            let _ = writeln!(file, "{line}");
         }
     }
 
@@ -418,6 +423,16 @@ async fn serve_conn(
                     ReadFixtures::result_or(&reads.sock.with_extension("thread-read"), json!({})),
                 )
                 .await?;
+            }
+            // #1853: each `threadId` is appended to `<sock>.unsubscribed`, socket-keyed like
+            // `record_method`, and answered the way codex 0.157 answers a live subscription.
+            "thread/unsubscribe" => {
+                let requested = req
+                    .pointer("/params/threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                reads.record_line("unsubscribed", requested);
+                send_result(&mut write, &id, json!({ "status": "unsubscribed" })).await?;
             }
             "thread/start" | "thread/resume" => {
                 if method == "thread/resume" {

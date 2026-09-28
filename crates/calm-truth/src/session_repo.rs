@@ -89,4 +89,9 @@ pub trait SessionRepo: Send + Sync {
     /// `Planning` with a NULL/terminal root), and with NO active planner-contract
     /// session — never a live or just-created track. Boot-gating is the caller's.
     async fn dead_root_candidates(&self) -> Result<Vec<DeadRootCandidate>>;
+
+    /// The subset of `thread_ids` whose codex session POSITIVELY ended: an `exited`/`failed` row
+    /// names the thread and no other row does. A `superseded` row is not an end (a failed start
+    /// restores it), and a thread no row names yet is never returned.
+    async fn codex_threads_ended(&self, thread_ids: &[String]) -> Result<Vec<String>>;
 }
