@@ -55,10 +55,10 @@ export type TrackInputNotification = Readonly<{
 /** A row's meta line: what kind of thing is waiting, in plain words; only its dot carries colour. */
 const NOTIFICATION_LABEL = Object.freeze({ ask: 'Needs your answer', 'planner-down': "Planner can't continue" } as const);
 
-/** What clicking a row does: the visible label under its body, and the start of its accessible name. */
+/** What clicking a row does: shown in the label's place while the row is hovered or focused, and the start of its accessible name. */
 const NOTIFICATION_ACTION = Object.freeze({
-  ask: Object.freeze({ hint: 'Answer in Planner ›', name: 'Answer the Planner' }),
-  'planner-down': Object.freeze({ hint: 'Open Planner ›', name: 'Open the Planner' }),
+  ask: Object.freeze({ hint: 'Answer in Planner', name: 'Answer the Planner' }),
+  'planner-down': Object.freeze({ hint: 'Open Planner', name: 'Open the Planner' }),
 } as const);
 
 /** The start of a row's text for its accessible name; the whole text is in the Planner conversation. */
@@ -575,7 +575,14 @@ export function TrackPage({
                         className={`${styles.noticeDot} ${notification.kind === 'ask' ? styles.noticeDotAsk : styles.noticeDotDown}`}
                         aria-hidden="true"
                       />
-                      <span className={styles.noticeLabel}>{NOTIFICATION_LABEL[notification.kind]}</span>
+                      {/* One slot, two spans: the label, and the row's action in its place while the row is hovered
+                          or focused. Stacked in one grid cell, so the swap does not move the time. */}
+                      <span className={styles.noticeLabel}>
+                        <span className={styles.noticeLabelText}>{NOTIFICATION_LABEL[notification.kind]}</span>
+                        {onReply !== undefined && (
+                          <span className={styles.noticeAction} aria-hidden="true">{NOTIFICATION_ACTION[notification.kind].hint}</span>
+                        )}
+                      </span>
                       <time className={styles.noticeTime} dateTime={new Date(notification.atMs).toISOString()}>
                         {relativeTime(notification.atMs, nowMs ?? Date.now())}
                       </time>
@@ -589,16 +596,12 @@ export function TrackPage({
                       <button
                         type="button"
                         className={styles.noticeDismiss}
-                        aria-label="Dismiss"
+                        aria-label={`Dismiss: ${NOTIFICATION_LABEL[notification.kind]}: ${notificationGist(notification.text)}`}
                         title="Dismiss"
                         onClick={() => {
                           void dismissFeedback.run(onDismiss(notification.key), 'Could not dismiss this notification.');
                         }}
                       ><Icon name="close" size="sm" /></button>
-                    )}
-                    {/* The row button's visible label, under the body and away from the ×; not a control of its own. */}
-                    {onReply !== undefined && (
-                      <span className={styles.noticeHint} aria-hidden="true">{NOTIFICATION_ACTION[notification.kind].hint}</span>
                     )}
                   </li>
                 ))}

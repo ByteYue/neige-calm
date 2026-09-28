@@ -351,7 +351,7 @@ describe('track conversations', () => {
     });
     const askRow = within(await screen.findByRole('region', { name: 'Notifications' })).getAllByRole('listitem')
       .find((row) => row.getAttribute('data-nc-notification-state') === 'ask');
-    fireEvent.click(within(askRow!).getByRole('button', { name: 'Dismiss' }));
+    fireEvent.click(within(askRow!).getByRole('button', { name: /^Dismiss: Needs your answer: / }));
     await waitFor(() => expect(dismissed).toBe(true));
     expect(requests.filter((request) => request.path === '/api/tracks/w1/activity/dismissals'))
       .toEqual([expect.objectContaining({ method: 'POST', body: { key: 'ask:lifecycle:4' } })]);

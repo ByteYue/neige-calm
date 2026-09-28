@@ -101,10 +101,11 @@ describe('the track lifecycle status in the page header', () => {
 
     const row = notice.querySelector<HTMLElement>('[data-nc-notification-state="ask"]')!;
     const open = row.querySelector<HTMLButtonElement>('[aria-label^="Answer the Planner: "]')!;
-    const dismiss = row.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!;
+    const dismiss = row.querySelector<HTMLButtonElement>('[aria-label^="Dismiss: Needs your answer: "]')!;
     const link = row.querySelector<HTMLAnchorElement>('a')!;
     const time = row.querySelector<HTMLElement>('time')!;
-    const hint = [...row.querySelectorAll<HTMLElement>('[aria-hidden="true"]')].find((el) => el.textContent === 'Answer in Planner ›')!;
+    const label = [...row.querySelectorAll<HTMLElement>('span')].find((el) => el.textContent === 'Needs your answer')!;
+    const action = [...row.querySelectorAll<HTMLElement>('span')].find((el) => el.textContent === 'Answer in Planner')!;
     /* The row button covers the whole row inside its divider; the body text is under it, the link and
        the × are above it. */
     const rowBox = row.getBoundingClientRect();
@@ -118,23 +119,30 @@ describe('the track lifecycle status in the page header', () => {
     };
     const body = row.querySelector(':scope > div')!;
     expect(centre(body.firstElementChild!)).toBe(open);
-    expect(centre(hint)).toBe(open);
     expect(centre(link)).toBe(link);
     expect(centre(dismiss)?.closest('button')).toBe(dismiss);
-    /* Two places: the × after the time at the top right, the action's label under the body at the left. */
+    expect(dismiss.title).toBe('Dismiss');
+    /* The × is alone after the time; the label and the action share one slot at the start of the line. */
     expect(dismiss.getBoundingClientRect().left).toBeGreaterThanOrEqual(time.getBoundingClientRect().right);
-    expect(hint.getBoundingClientRect().top).toBeGreaterThanOrEqual(body.getBoundingClientRect().bottom);
-    expect(Math.abs(hint.getBoundingClientRect().left - body.getBoundingClientRect().left)).toBeLessThan(1);
+    expect(action.getBoundingClientRect().left).toBe(label.getBoundingClientRect().left);
+    /* The body is the row's last line: bottom padding equals top padding. */
+    const rowStyle = getComputedStyle(row);
+    expect(rowStyle.paddingBottom).toBe(rowStyle.paddingTop);
 
-    /* At rest: the time shows, the label and the × do not. Hovering shows both and keeps the time;
-       the row's height does not change. */
+    /* At rest the label shows; hovering puts the action in its place. The time, the × corner and the
+       row's height do not move. */
     const restHeight = row.getBoundingClientRect().height;
-    expect(getComputedStyle(time).visibility).toBe('visible');
-    expect(getComputedStyle(hint).opacity).toBe('0');
+    const restTime = time.getBoundingClientRect().left;
+    expect(getComputedStyle(label).visibility).toBe('visible');
+    expect(getComputedStyle(action).visibility).toBe('hidden');
     expect(getComputedStyle(dismiss).opacity).toBe('0');
     await userEvent.hover(open);
+    expect(getComputedStyle(label).visibility).toBe('hidden');
+    expect(getComputedStyle(action).visibility).toBe('visible');
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+    expect(paintedRgb(getComputedStyle(action).color)).toEqual(paintedRgb(accent));
     expect(getComputedStyle(time).visibility).toBe('visible');
-    expect(getComputedStyle(hint).opacity).toBe('1');
+    expect(time.getBoundingClientRect().left).toBe(restTime);
     expect(getComputedStyle(dismiss).opacity).toBe('1');
     expect(row.getBoundingClientRect().height).toBe(restHeight);
     expect(getComputedStyle(open).cursor).toBe('pointer');

@@ -149,8 +149,8 @@ describe('TrackPage header', () => {
     expect(within(notice).getByText('Waiting on you').nextElementSibling?.textContent).toBe('1');
     const row = within(notice).getByRole('listitem');
     expect(row.getAttribute('data-nc-notification-state')).toBe('ask');
-    /* Meta line (label, time), the body, then the row button's visible label; no text buttons. */
-    expect(row.textContent).toBe('Needs your answer3mMerge PR #1811 now, or hold it?Answer in Planner ›');
+    /* Meta line (the label and, in its slot, the row's action; the time), then the body; no text buttons. */
+    expect(row.textContent).toBe('Needs your answerAnswer in Planner3mMerge PR #1811 now, or hold it?');
     expect(within(row).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
       .toEqual(['Answer the Planner: Merge PR #1811 now, or hold it?']);
     expect(screen.queryByText('Needs input')).toBeNull();
@@ -200,7 +200,10 @@ describe('TrackPage header', () => {
     expect(down.textContent).not.toContain('Fix the cause');
     /* The row button is empty and stretched over the row; the × and the link are its siblings, not its children. */
     expect(ask.querySelectorAll('button button, button a, a button')).toHaveLength(0);
-    await userEvent.click(within(down).getByRole('button', { name: 'Dismiss' }));
+    await userEvent.click(within(down).getByRole('button', {
+      name: "Dismiss: Planner can't continue: 400: The 'gpt-6-astra' model requires a newer version of Codex.",
+    }));
+    expect(within(ask).getByRole('button', { name: /^Dismiss: Needs your answer: Merge \*\*PR #1811\*\*/ }).title).toBe('Dismiss');
     expect(onDismiss).toHaveBeenCalledWith('planner_down:9');
   });
 
