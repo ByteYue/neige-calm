@@ -290,6 +290,38 @@
     line-height: var(--leading-snug);
   }
 
+  .needsInputNoticeMeta {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-inline-size: 0;
+  }
+
+  .needsInputNoticeAsk {
+    color: var(--warn);
+  }
+
+  .needsInputNoticeDown {
+    color: var(--error);
+  }
+
+  .needsInputNoticeTime {
+    flex: none;
+    color: var(--text-3);
+    font-size: var(--text-xs);
+  }
+
+  /* The kernel's words can run long; three lines here, the whole text in the Planner conversation. */
+  .needsInputNoticeText {
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+
   .needsInputNoticeList {
     display: flex;
     flex-direction: column;

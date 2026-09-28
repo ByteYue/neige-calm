@@ -39,8 +39,7 @@ function contrast(first: Rgb, second: Rgb): number {
 }
 
 const plannerNotification = [{
-  origin: 'card' as const, id: 'planner', cardId: 'planner', source: 'Planner',
-  message: 'Requires input to continue.', state: 'awaiting-input' as const, updatedAt: 1,
+  key: 'ask:lifecycle:1', kind: 'ask' as const, text: 'Merge PR #1811 now, or hold it?', atMs: 1,
 }];
 
 describe('the track lifecycle status in the page header', () => {
@@ -80,22 +79,22 @@ describe('the track lifecycle status in the page header', () => {
     expect(paintedRgb(getComputedStyle(actions).color)).toEqual(paintedRgb(text2));
   });
 
-  it('floats a worker input request at the viewport corner with a direct action', async () => {
+  it('floats a Planner ask at the viewport corner with a direct action', async () => {
     await browserPage.viewport(1200, 800);
-    const onOpenInputNotification = vi.fn();
-    renderPage({ inputNotifications: plannerNotification, onOpenInputNotification });
+    const onReply = vi.fn();
+    renderPage({ inputNotifications: plannerNotification, onReply });
 
     const notice = document.querySelector<HTMLElement>('[data-nc-needs-input-notice]')!;
-    const review = document.querySelector<HTMLButtonElement>('[aria-label^="Review Planner notification"]')!;
+    const review = document.querySelector<HTMLButtonElement>('[aria-label^="Reply to the Planner"]')!;
     const noticeBox = notice.getBoundingClientRect();
-    expect(review.innerText).toBe('Review');
+    expect(review.innerText).toBe('Reply');
     expect(review.getBoundingClientRect().height).toBeGreaterThanOrEqual(32);
     expect(window.innerWidth - noticeBox.right).toBeGreaterThanOrEqual(20);
     expect(window.innerWidth - noticeBox.right).toBeLessThanOrEqual(28);
     expect(window.innerHeight - noticeBox.bottom).toBeGreaterThanOrEqual(20);
     expect(window.innerHeight - noticeBox.bottom).toBeLessThanOrEqual(28);
     await userEvent.click(review);
-    expect(onOpenInputNotification).toHaveBeenCalledWith('planner');
+    expect(onReply).toHaveBeenCalledOnce();
   });
 
   it('compacts an input notification beside an open conversation drawer', async () => {

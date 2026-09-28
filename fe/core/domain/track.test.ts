@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  activeTracksOn, cardGoalTitle, createCardOperation, createCodexCardOperation, createTerminalCardOperation,
+  activeTracksOn, createCardOperation, createCodexCardOperation, createTerminalCardOperation,
   createTrackOperation, deleteCardOperation, hasFailed, isBlankForKernel, isRunning, isWaitingForUser,
   isWorking, lifecycleLabel, lifecycleRank, needsUserAttention, toTrack, trackActivityFrom,
   sortAreaTracksByRecent, trackRecentAt,
@@ -219,47 +219,17 @@ describe('activity predicates read only the kernel activity overlay (INV-APP-118
   });
 });
 
-describe('cardGoalTitle', () => {
-  it('takes the first line of a string goal and nothing from any other payload', () => {
-    expect(cardGoalTitle({ goal: 'Review the parser split\nThen post the verdict.' })).toBe('Review the parser split');
-    expect(cardGoalTitle({ goal: '  Ship it  ' })).toBe('Ship it');
-    expect(cardGoalTitle({ goal: '   ' })).toBeNull();
-    /* The first line, not the first non-blank one: a goal whose first line is empty has no title. */
-    expect(cardGoalTitle({ goal: '\nShip it' })).toBeNull();
-    expect(cardGoalTitle({ goal: 42 })).toBeNull();
-    expect(cardGoalTitle({ command: 'zsh' })).toBeNull();
-    expect(cardGoalTitle({ planner_harness: true, prompt: 'Plan it' })).toBeNull();
-    expect(cardGoalTitle(null)).toBeNull();
-    expect(cardGoalTitle('goal')).toBeNull();
-  });
-
-  it('caps the title at 60 characters, counting code points', () => {
-    const sixty = 'x'.repeat(60);
-    expect(cardGoalTitle({ goal: sixty })).toBe(sixty);
-    expect(cardGoalTitle({ goal: `${sixty}y` })).toBe(`${'x'.repeat(59)}…`);
-    const cjk = '审'.repeat(61);
-    expect([...cardGoalTitle({ goal: cjk })!]).toHaveLength(60);
-    /* Astral characters are two UTF-16 units each: a `slice(0, 60)` on units keeps 30 whole characters,
-     * but the impl-shaped `slice(0, 59) + '…'` stub keeps 29 plus a lone surrogate, so the cap counts
-     * code points and never leaves a lone surrogate. */
-    const astral = cardGoalTitle({ goal: '😀'.repeat(61) })!;
-    expect([...astral]).toHaveLength(60);
-    expect(astral).toBe(`${'😀'.repeat(59)}…`);
-    expect(() => encodeURIComponent(astral)).not.toThrow();
-  });
-});
-
 describe('trackActivityFrom: the kernel activity overlay', () => {
   const overlay = (payload: unknown, over: Partial<OverlayWire> = {}): OverlayWire => ({
     id: 'a1', plugin_id: 'kernel', entity_kind: 'track', entity_id: 't1', kind: 'activity',
     payload, updated_at: 1, ...over,
   });
   const payload = {
-    schemaVersion: 1, working: true, attention: 'failed', activity_at_ms: 1_789_460_968_837,
+    schemaVersion: 2, working: true, attention: 'failed', activity_at_ms: 1_789_460_968_837,
     items: [
-      { kind: 'failed', source: 'task', id: 'task-1', card_id: 'worker-1', at_ms: 20 },
-      { kind: 'input', source: 'card', id: 'planner', card_id: 'planner', at_ms: 10 },
-      { kind: 'failed', source: 'lifecycle', id: 't1', card_id: null, at_ms: 5 },
+      { source: 'planner_down', key: 'planner_down:22825', text: 'unexpected status 403 Forbidden', at_ms: 20 },
+      { source: 'ask', key: 'ask:notify:22801', text: 'Which branch?', at_ms: 10 },
+      { source: 'ask', key: 'ask:lifecycle:28475', text: 'Merge the PR?', at_ms: 5 },
     ],
     cards: [{ card_id: 'worker-1', state: 'failed' }, { card_id: 'planner', state: 'input' }, { card_id: 'w2', state: 'working' }],
   };
@@ -271,9 +241,9 @@ describe('trackActivityFrom: the kernel activity overlay', () => {
     expect(activity.activityAt).toBe(1_789_460_968_837);
     expect(activity.recentAt).toBe(1_789_460_968_837);
     expect(activity.attentionItems).toEqual([
-      { origin: 'task', id: 'task-1', cardId: 'worker-1', atMs: 20, kind: 'failed' },
-      { origin: 'card', id: 'planner', cardId: 'planner', atMs: 10, kind: 'input' },
-      { origin: 'lifecycle', id: 't1', cardId: null, atMs: 5, kind: 'failed' },
+      { source: 'planner_down', key: 'planner_down:22825', text: 'unexpected status 403 Forbidden', atMs: 20 },
+      { source: 'ask', key: 'ask:notify:22801', text: 'Which branch?', atMs: 10 },
+      { source: 'ask', key: 'ask:lifecycle:28475', text: 'Merge the PR?', atMs: 5 },
     ]);
     expect(activity.cards).toEqual({ 'worker-1': 'failed', planner: 'input', w2: 'working' });
     expect(activity.progress).toBe(0);
@@ -288,7 +258,7 @@ describe('trackActivityFrom: the kernel activity overlay', () => {
   it('drops a malformed row and keeps the rest of the payload', () => {
     const activity = trackActivityFrom('t1', [overlay({
       ...payload,
-      items: [{ kind: 'input', source: 'card' }, ...payload.items],
+      items: [{ source: 'ask', key: 'ask:lifecycle:1' }, ...payload.items],
       cards: [{ card_id: 'w9', state: 'sleeping' }, { card_id: 'w2', state: 'working' }],
     })]);
     expect(activity.attentionItems).toHaveLength(3);
@@ -296,10 +266,20 @@ describe('trackActivityFrom: the kernel activity overlay', () => {
     expect(activity.working).toBe(true);
   });
 
-  it('ignores a payload that is not the v1 shape at all', () => {
+  it('ignores a payload that is not the v2 shape at all', () => {
     for (const junk of [null, 'working', { schemaVersion: 2, working: true }, { working: 'yes' }]) {
       expect(trackActivityFrom('t1', [overlay(junk)])).toEqual({ ...NEUTRAL_ACTIVITY, recentAt: 1 });
     }
+  });
+
+  /* An older kernel's row: its items meant something else, so the whole row reads as no overlay. */
+  it('v1 activity overlay is ignored', () => {
+    const v1 = {
+      schemaVersion: 1, working: true, attention: 'failed', activity_at_ms: 1_789_460_968_837,
+      items: [{ kind: 'failed', source: 'session', id: 'ws-1', card_id: 'planner', at_ms: 20 }],
+      cards: [{ card_id: 'planner', state: 'failed' }],
+    };
+    expect(trackActivityFrom('t1', [overlay(v1)])).toEqual({ ...NEUTRAL_ACTIVITY, recentAt: 1 });
   });
 
   it('uses every matching row time and valid activity time without trusting input order', () => {
