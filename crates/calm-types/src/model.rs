@@ -493,6 +493,10 @@ pub struct HarnessItem {
     #[ts(optional)]
     pub input_segments: Option<Vec<HarnessInputSegment>>,
     pub created_at_ms: i64,
+    /// A `turn/completed` row's `error.message` in words a person reads (#1829), reduced by the
+    /// kernel; `params` keeps the raw message. `null` on every row without one.
+    #[schema(required = true, nullable = true)]
+    pub turn_error_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, TS)]

@@ -223,8 +223,9 @@ export function ChatThread({ conversation, turns, pending = false, cards, stalle
           data-nc-turn-outcome={turn.status}
         >
           <ChatSystemMessage>{turn.status === 'interrupted' ? 'Stopped' : 'Failed'}</ChatSystemMessage>
-          {turn.status === 'failed' && turn.message !== undefined && turn.message !== '' && (
-            <p className={styles.outcomeDetail} data-nc-turn-outcome-message="">{turn.message}</p>
+          {/* The kernel's readable text; codex's raw message stays reachable as the tooltip. */}
+          {turn.status === 'failed' && turn.text !== undefined && turn.text !== '' && (
+            <p className={styles.outcomeDetail} data-nc-turn-outcome-message="" title={turn.message}>{turn.text}</p>
           )}
           {turn.status === 'failed' && (
             <OutcomeHint code={turn.code} rawStatus={turn.rawStatus} />

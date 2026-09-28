@@ -212,7 +212,7 @@ describe('foldQuietSyncs outcome', () => {
     type Row = Parameters<typeof buildTranscript>[0][number];
     const row = (id: number, overrides: Partial<Row>): Row => ({
       id, worker_session_id: 'runtime', card_id: 'card', track_id: 'track', thread_id: 'thread',
-      turn_id: 'turn', item_uuid: `item-${id}`, item_type: null, method: 'item/completed',
+      turn_id: 'turn', turn_error_text: null, item_uuid: `item-${id}`, item_type: null, method: 'item/completed',
       params: '{}', created_at_ms: NOW + id, ...overrides,
     });
     const wake = row(1, {
@@ -243,7 +243,7 @@ describe('foldQuietSyncs over persisted batches', () => {
   const taskDone = (): Segment => ({ presentation: 'system_task_completed', text: 'Task completed.', attachments: [] });
   const row = (id: number, overrides: Partial<Row>): Row => ({
     id, worker_session_id: 'runtime', card_id: 'card', track_id: 'track', thread_id: 'thread',
-    turn_id: 'turn', item_uuid: `item-${id}`, item_type: null, method: 'item/completed',
+    turn_id: 'turn', turn_error_text: null, item_uuid: `item-${id}`, item_type: null, method: 'item/completed',
     params: '{}', created_at_ms: NOW + id, ...overrides,
   });
   const batch = (id: number, segments: Segment[]): Row => row(id, {
@@ -307,7 +307,7 @@ describe('reportEditAuthor', () => {
 describe('user-notify rows', () => {
   const row = (overrides: Partial<Row>): Row => ({
     id: 40, worker_session_id: 'runtime', card_id: 'card', track_id: 'track', thread_id: 'thread',
-    turn_id: 'turn', item_uuid: 'exec-notify-1', item_type: 'mcpToolCall', method: 'item/completed',
+    turn_id: 'turn', turn_error_text: null, item_uuid: 'exec-notify-1', item_type: 'mcpToolCall', method: 'item/completed',
     params: '{}', created_at_ms: NOW, ...overrides,
   });
   /* The persisted shape: `params.item.arguments` on `item/started` and `item/completed` alike. */

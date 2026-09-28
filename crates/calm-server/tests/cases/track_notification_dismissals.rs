@@ -22,7 +22,7 @@ use super::track_notifications::{
 };
 
 /// The production router over the fixture's repo, bus and caches; the routes wake `wake`.
-fn app(f: &Fx, wake: ActivityWake) -> axum::Router {
+pub(crate) fn app(f: &Fx, wake: ActivityWake) -> axum::Router {
     let plugin = PluginHost::new_full(
         Arc::new(PluginRegistry::empty()),
         f.repo_dyn.clone(),

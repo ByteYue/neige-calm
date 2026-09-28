@@ -87,7 +87,7 @@ function receiptStorage(): UiPreferenceStorage {
 function harnessMessage(id: number, itemType: string, item: unknown) {
   return {
     id, worker_session_id: 'r', card_id: ASSISTANT_CARD.id, track_id: 'w1', thread_id: 't',
-    turn_id: null, item_uuid: null, item_type: itemType, method: 'item/completed',
+    turn_id: null, turn_error_text: null, item_uuid: null, item_type: itemType, method: 'item/completed',
     params: JSON.stringify({ item, completedAtMs: id }), created_at_ms: id,
   };
 }

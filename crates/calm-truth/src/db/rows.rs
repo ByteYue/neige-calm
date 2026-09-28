@@ -231,6 +231,7 @@ impl TryFrom<HarnessItemRow> for HarnessItem {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
+        let turn_error_text = turn_error_text(&r.method, &r.params);
         Ok(HarnessItem {
             id: r.id,
             worker_session_id: r.worker_session_id,
@@ -244,8 +245,20 @@ impl TryFrom<HarnessItemRow> for HarnessItem {
             params: r.params,
             input_segments,
             created_at_ms: r.created_at_ms,
+            turn_error_text,
         })
     }
+}
+
+/// The readable form of a `turn/completed` row's `error.message`; `None` for any other row, and for
+/// one whose params carry no string message.
+fn turn_error_text(method: &str, params: &str) -> Option<String> {
+    if method != "turn/completed" {
+        return None;
+    }
+    let params: serde_json::Value = serde_json::from_str(params).ok()?;
+    let message = params.pointer("/error/message")?.as_str()?;
+    Some(crate::readable_error_text::readable_error_text(message))
 }
 
 /// Row of the `worker_flow_items` table: the raw persistence shape, not a mirror of a calm-types entity.

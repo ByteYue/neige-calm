@@ -715,7 +715,7 @@ describe('planner history pagination', () => {
   it('uses the first (oldest) row from the ascending first page as the second-page after_id', async () => {
     const firstPage = Array.from({ length: 300 }, (_, index) => ({
       id: 701 + index, worker_session_id: 'runtime', card_id: 'card', track_id: 'track', thread_id: 'thread',
-      turn_id: null, item_uuid: null, item_type: 'agentMessage', method: 'item/completed',
+      turn_id: null, turn_error_text: null, item_uuid: null, item_type: 'agentMessage', method: 'item/completed',
       params: '{}', created_at_ms: index,
     }));
     const { transport, paths } = recordingTransport(() => ok(firstPage));

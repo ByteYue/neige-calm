@@ -8674,7 +8674,8 @@
           "thread_id",
           "method",
           "params",
-          "created_at_ms"
+          "created_at_ms",
+          "turn_error_text"
         ],
         "properties": {
           "card_id": {
@@ -8720,6 +8721,13 @@
           },
           "track_id": {
             "type": "string"
+          },
+          "turn_error_text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A `turn/completed` row's `error.message` in words a person reads (#1829), reduced by the\nkernel; `params` keeps the raw message. `null` on every row without one."
           },
           "turn_id": {
             "type": [

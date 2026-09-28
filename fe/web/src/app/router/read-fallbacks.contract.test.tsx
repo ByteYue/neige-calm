@@ -251,7 +251,7 @@ describe('degraded workspace reads stay usable', () => {
         return ok([{
           id: 1, worker_session_id: 'r', track_id: 'w1', thread_id: 't',
           card_id: trackConversationCardId('w1', creates[0].headers!['Idempotency-Key']),
-          turn_id: null, item_uuid: 'entry-0001', item_type: 'userMessage', method: 'item/completed',
+          turn_id: null, turn_error_text: null, item_uuid: 'entry-0001', item_type: 'userMessage', method: 'item/completed',
           params: JSON.stringify({
             item: { id: 'entry-0001', clientId: 'entry-0001', type: 'userMessage', content: [{ type: 'text', text: 'User says:\nOriginal uncertain intent' }] },
             _projection: true,

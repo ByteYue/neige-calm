@@ -88,6 +88,8 @@ mod track_workspace_materialize;
 mod track_workspace_recycle;
 #[path = "cases/track_workspace_repoint.rs"]
 mod track_workspace_repoint;
+#[path = "cases/turn_error_text_wire.rs"]
+mod turn_error_text_wire;
 #[path = "cases/version.rs"]
 mod version;
 

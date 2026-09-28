@@ -216,7 +216,7 @@ describe('#1341 Today lists the launchpad track’s conversations', () => {
       launchpadRows: () => [conversationRow({ id: SUMMARY_CONVERSATION, title: null })],
       historyRows: [{
         id: 1, worker_session_id: 'r', card_id: SUMMARY_CONVERSATION, track_id: 'lp', thread_id: 't',
-        turn_id: null, item_uuid: null, item_type: 'userMessage', method: 'item/completed',
+        turn_id: null, turn_error_text: null, item_uuid: null, item_type: 'userMessage', method: 'item/completed',
         params: JSON.stringify({ item: { content: [{ text: bootstrap }] }, completedAtMs: 1 }),
         created_at_ms: 1,
       }],

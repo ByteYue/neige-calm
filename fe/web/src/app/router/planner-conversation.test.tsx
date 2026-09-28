@@ -45,7 +45,7 @@ function transcriptQueryKey() {
 function harnessRows(count: number) {
   return Array.from({ length: count }, (_, index) => ({
     id: index + 1, worker_session_id: 'runtime', card_id: CARD.id, track_id: TRACK.id, thread_id: 'thread',
-    turn_id: null, item_uuid: null, item_type: 'agentMessage', method: 'item/completed',
+    turn_id: null, turn_error_text: null, item_uuid: null, item_type: 'agentMessage', method: 'item/completed',
     params: JSON.stringify({ item: { text: `reply ${index}` } }), created_at_ms: index + 1,
   }));
 }
@@ -642,7 +642,7 @@ describe('planner conversation regressions', () => {
     const entry = { entry_id: 'entry-9', text: 'sent once', rev: 0, queued_at_ms: 5 };
     const projection = {
       id: 7, worker_session_id: 'runtime', card_id: CARD.id, track_id: TRACK.id, thread_id: 'thread',
-      turn_id: null, item_uuid: entry.entry_id, item_type: 'userMessage', method: 'item/completed',
+      turn_id: null, turn_error_text: null, item_uuid: entry.entry_id, item_type: 'userMessage', method: 'item/completed',
       params: JSON.stringify({
         item: { id: entry.entry_id, clientId: entry.entry_id, type: 'userMessage', content: [{ type: 'text', text: 'sent once' }] },
         _projection: true,
