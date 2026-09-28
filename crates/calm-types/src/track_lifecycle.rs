@@ -81,7 +81,8 @@ pub enum TransitionError {
     },
 }
 
-/// `from planning the planner may write: dispatching, reviewing, failed`, or `… may write nothing`.
+/// `from planning the planner may write: dispatching, reviewing, failed`, or with no legal target
+/// `from done the planner cannot change the lifecycle`.
 fn legal_targets_clause(from: TrackLifecycle, kind: ActorKind) -> String {
     let targets: Vec<&str> = allowed_targets(from, kind)
         .into_iter()
@@ -89,7 +90,7 @@ fn legal_targets_clause(from: TrackLifecycle, kind: ActorKind) -> String {
         .collect();
     let (from, actor) = (from.as_db_str(), kind.label());
     if targets.is_empty() {
-        format!("from {from} the {actor} may write nothing")
+        format!("from {from} the {actor} cannot change the lifecycle")
     } else {
         format!("from {from} the {actor} may write: {}", targets.join(", "))
     }
@@ -490,7 +491,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "track lifecycle: done → reviewing is not allowed; \
-             from done the planner may write nothing"
+             from done the planner cannot change the lifecycle"
         );
     }
 
@@ -519,7 +520,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "track lifecycle: working → working is not allowed for the worker; \
-             from working the worker may write nothing"
+             from working the worker cannot change the lifecycle"
         );
     }
 
