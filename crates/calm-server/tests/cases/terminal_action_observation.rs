@@ -391,7 +391,8 @@ async fn repeated_navigation_corrects_one_character_without_replaying_movement()
     let terminal = h
         .ok(
             "calm.terminal.open",
-            json!({"program":"exec /bin/bash --noprofile --norc","request_id":"readline"}),
+            // Wait for the prompt: typed before readline owns the line, the cooked tty echoes it.
+            json!({"program":"exec /bin/bash --noprofile --norc","request_id":"readline","wait_for":"text","wait_text":["$"],"wait_ms":5000}),
         )
         .await["terminal_id"]
         .as_str()

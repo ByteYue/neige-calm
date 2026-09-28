@@ -216,7 +216,11 @@ async fn open_with_change_wait_on_the_default_shell_runs_the_wait() {
     assert_eq!(opened["wait"]["mode"], "change", "{opened}");
     let waited = opened["wait"]["waited_ms"].as_u64().unwrap();
     match opened["wait"]["outcome"].as_str() {
-        Some("changed") => assert!(waited < 300, "{opened}"),
+        // A change still painting at the budget ends changed but unsettled.
+        Some("changed") => assert!(
+            waited < 300 || opened["wait"]["settled"] == false,
+            "{opened}"
+        ),
         Some("unchanged") => assert!(waited >= 300, "{opened}"),
         other => panic!("a change wait ends changed or unchanged, not {other:?}: {opened}"),
     }

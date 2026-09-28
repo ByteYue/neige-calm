@@ -4654,14 +4654,17 @@ async fn aborted_detached_transition_belt_terms_child_and_leaves_starting_row() 
     let _guard = ENV_LOCK.lock().await;
     let root = tempfile::tempdir().unwrap();
     let marker = root.path().join("belt-term-marker");
+    let handler_ready = root.path().join("handler-ready-marker");
     unsafe {
         std::env::set_var("FAKE_CODEX_INITIALIZE_DELAY_MS", "30000");
         std::env::set_var("FAKE_CODEX_SIGTERM_MARKER", &marker);
         std::env::set_var("FAKE_CODEX_SIGTERM_EXIT_DELAY_MS", "300");
+        std::env::set_var("FAKE_CODEX_HANDLER_READY_MARKER", &handler_ready);
     }
     let _init_env = EnvGuard("FAKE_CODEX_INITIALIZE_DELAY_MS");
     let _marker_env = EnvGuard("FAKE_CODEX_SIGTERM_MARKER");
     let _delay_env = EnvGuard("FAKE_CODEX_SIGTERM_EXIT_DELAY_MS");
+    let _ready_env = EnvGuard("FAKE_CODEX_HANDLER_READY_MARKER");
 
     let repo = repo().await;
     let daemon = server(&root, repo.clone()).await;
@@ -4670,6 +4673,19 @@ async fn aborted_detached_transition_belt_terms_child_and_leaves_starting_row() 
         async move { daemon.start_or_takeover().await }
     });
     let pid = wait_for_starting_pid(&repo).await;
+    // Readiness handshake: a TERM before the fixture arms its handler kills it without the marker.
+    let mut handler_armed = false;
+    for _ in 0..500 {
+        if handler_ready.exists() {
+            handler_armed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        handler_armed,
+        "fixture must report its SIGTERM handler armed before the belt fires"
+    );
 
     assert!(
         daemon.abort_detached_spawn_transition_for_test(),

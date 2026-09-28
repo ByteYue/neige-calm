@@ -2310,7 +2310,18 @@ async fn the_disabled_branch_clears_the_token_of_a_crashed_plugin() {
         .await
         .expect("bypass write");
 
-    fx.host.rotate_plugin_token(ID).await.expect(
+    // The crash supervisor may still hold the lifecycle lock; `LifecycleBusy` is the documented
+    // retryable refusal, so retry it (bounded) the way a caller would.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match fx.host.rotate_plugin_token(ID).await {
+            Err(HostError::LifecycleBusy(_)) if Instant::now() < deadline => {
+                sleep(Duration::from_millis(20)).await
+            }
+            result => break result,
+        }
+    }
+    .expect(
         "a crashed plugin is not a running one — the rotation must not \
                  be refused, and refusing would lock the token row out for good",
     );
