@@ -104,7 +104,7 @@ describe('the track lifecycle status in the page header', () => {
     const dismiss = row.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!;
     const link = row.querySelector<HTMLAnchorElement>('a')!;
     const time = row.querySelector<HTMLElement>('time')!;
-    const hint = [...row.querySelectorAll<HTMLElement>('[aria-hidden="true"]')].find((el) => el.textContent === 'Answer →')!;
+    const hint = [...row.querySelectorAll<HTMLElement>('[aria-hidden="true"]')].find((el) => el.textContent === 'Answer in Planner ›')!;
     /* The row button covers the whole row inside its divider; the body text is under it, the link and
        the × are above it. */
     const rowBox = row.getBoundingClientRect();
@@ -116,18 +116,27 @@ describe('the track lifecycle status in the page header', () => {
       const box = el.getBoundingClientRect();
       return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
     };
-    expect(centre(row.querySelector(':scope > div')!.firstElementChild!)).toBe(open);
+    const body = row.querySelector(':scope > div')!;
+    expect(centre(body.firstElementChild!)).toBe(open);
+    expect(centre(hint)).toBe(open);
     expect(centre(link)).toBe(link);
     expect(centre(dismiss)?.closest('button')).toBe(dismiss);
+    /* Two places: the × after the time at the top right, the action's label under the body at the left. */
+    expect(dismiss.getBoundingClientRect().left).toBeGreaterThanOrEqual(time.getBoundingClientRect().right);
+    expect(hint.getBoundingClientRect().top).toBeGreaterThanOrEqual(body.getBoundingClientRect().bottom);
+    expect(Math.abs(hint.getBoundingClientRect().left - body.getBoundingClientRect().left)).toBeLessThan(1);
 
-    /* At rest: the time shows, the hint and the × do not. Hovering swaps them. */
+    /* At rest: the time shows, the label and the × do not. Hovering shows both and keeps the time;
+       the row's height does not change. */
+    const restHeight = row.getBoundingClientRect().height;
     expect(getComputedStyle(time).visibility).toBe('visible');
-    expect(getComputedStyle(hint).visibility).toBe('hidden');
+    expect(getComputedStyle(hint).opacity).toBe('0');
     expect(getComputedStyle(dismiss).opacity).toBe('0');
     await userEvent.hover(open);
-    expect(getComputedStyle(time).visibility).toBe('hidden');
-    expect(getComputedStyle(hint).visibility).toBe('visible');
+    expect(getComputedStyle(time).visibility).toBe('visible');
+    expect(getComputedStyle(hint).opacity).toBe('1');
     expect(getComputedStyle(dismiss).opacity).toBe('1');
+    expect(row.getBoundingClientRect().height).toBe(restHeight);
     expect(getComputedStyle(open).cursor).toBe('pointer');
 
     await userEvent.click(open);

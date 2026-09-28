@@ -653,7 +653,7 @@
     当「在动」、用 lifecycle ∨ `anyCardNeedsInput` 当「等你」，与内核从持久行算出的结论不一致；判定收敛到内核一处
     （`track_activity.rs`），FE 只解码 overlay。第二套推导必然再度分叉。
   source: fe/core/domain/activity.ts:16-52; fe/core/domain/track.ts:145-190,506-526;
-    fe/web/src/app/router/public.tsx:1866-1878,2373-2378; fe/web/src/features/track/page/public.tsx:7,45-68,90-93,557-605,636;
+    fe/web/src/app/router/public.tsx:1866-1878,2373-2378; fe/web/src/features/track/page/public.tsx:7,45-68,90-93,557-604,635;
     fe/web/src/app/providers/queries.ts:904-909,943-950;
     fe/web/src/features/today/public.tsx:137-138,256-257;
     fe/web/src/app/providers/ui-preferences.tsx:69-105; fe/web/src/ui/activity-indicator/activity-indicator.module.css:7-8;
@@ -669,7 +669,7 @@
     fe/web/src/features/chat/list/public.test.tsx:32-88; fe/web/src/app/router/track-conversation.test.tsx:1910-1995;
     fe/web/src/app/router/today-conversation.test.tsx:188-211; fe/web/src/features/chat/thread/public.test.tsx:537-602;
     fe/web/src/features/track/page/public.test.tsx:135-205,282-352;
-    fe/web/src/features/track/page/header-lifecycle.browser.test.tsx:82-176; fe/web/src/features/track/page/mobile-projection.test.tsx:255-283;
+    fe/web/src/features/track/page/header-lifecycle.browser.test.tsx:82-185; fe/web/src/features/track/page/mobile-projection.test.tsx:255-283;
     fe/core/view/track-page.test.ts:239-266; fe/web/src/app/router/track-cards-panel.test.tsx:391-416;
     fe/web/src/systems/cards/builtins/terminal-lifecycle.test.tsx:95-111;
     fe/web/src/systems/cards/builtins/terminal-head-activity.test.tsx:48-75

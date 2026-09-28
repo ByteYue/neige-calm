@@ -149,8 +149,8 @@ describe('TrackPage header', () => {
     expect(within(notice).getByText('Waiting on you').nextElementSibling?.textContent).toBe('1');
     const row = within(notice).getByRole('listitem');
     expect(row.getAttribute('data-nc-notification-state')).toBe('ask');
-    /* Meta line (label, time, the hover hint), then the body; no text buttons. */
-    expect(row.textContent).toBe('Needs your answer3mAnswer →Merge PR #1811 now, or hold it?');
+    /* Meta line (label, time), the body, then the row button's visible label; no text buttons. */
+    expect(row.textContent).toBe('Needs your answer3mMerge PR #1811 now, or hold it?Answer in Planner ›');
     expect(within(row).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
       .toEqual(['Answer the Planner: Merge PR #1811 now, or hold it?']);
     expect(screen.queryByText('Needs input')).toBeNull();
