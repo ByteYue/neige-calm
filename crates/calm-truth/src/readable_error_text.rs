@@ -133,11 +133,21 @@ mod tests {
 
     #[test]
     fn an_unclosed_hidden_element_is_one_search_not_one_per_tag() {
-        let body = "<script>x</p>".repeat(20_000);
+        // About 1 MB of `<script>` tags that never close: one closing-tag search per tag is quadratic
+        // (minutes in a debug build); the remembered miss keeps it linear (well under a second).
+        let body = "<script>x</p>".repeat(80_000);
         let raw = format!("unexpected status 502: <!doctype html>{body}tail");
+        let started = std::time::Instant::now();
+        let text = readable_error_text(&raw);
+        let elapsed = started.elapsed();
         assert_eq!(
-            readable_error_text(&raw),
-            format!("unexpected status 502: {}tail", "x ".repeat(20_000))
+            text,
+            format!("unexpected status 502: {}tail", "x ".repeat(80_000))
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "reducing 1 MB of unclosed <script> tags took {elapsed:?}: the closing-tag search is \
+             quadratic again (the serial projector runs this on every planner-down recompute)"
         );
     }
 
