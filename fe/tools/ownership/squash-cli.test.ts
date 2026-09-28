@@ -66,6 +66,8 @@ it.each(cases)('audits $label through both CLI entry points', ({
         cwd: repository, encoding: 'utf8',
         env: {
           PATH: process.env.PATH,
+          // The checkers mkdtemp under os.tmpdir(); without TMPDIR it falls back to /tmp.
+          ...(process.env.TMPDIR === undefined ? {} : { TMPDIR: process.env.TMPDIR }),
           OWNERSHIP_EVENT_NAME: 'push', OWNERSHIP_BASE_SHA: base, OWNERSHIP_HEAD_SHA: head,
           OWNERSHIP_PUSH_FORCED: 'false', GITHUB_REPOSITORY: 'fixture/repo',
         },
