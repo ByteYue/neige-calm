@@ -180,6 +180,11 @@
        in both themes, which is the unit the ladder is defined in. */
     background: var(--surface-rail);
     overflow: auto;
+
+    /* `.userRow` is pinned over the bottom of this scrollport, so a row
+       scrolled into view (the current track, a restored or tabbed-to focus)
+       has to stop above it rather than behind it. */
+    scroll-padding-block-end: calc(var(--space-4) + var(--control-h) + var(--space-7));
   }
 
   /* The existing compact breakpoint is also the mobile presentation boundary:
@@ -622,11 +627,31 @@
     background: var(--overlay-hover);
   }
 
+  /*
+   * Pinned to the bottom of `.rail`'s scrollport, so a long Areas list scrolls
+   * underneath it instead of pushing the account menu out of view. `auto`
+   * still parks it at the bottom when the list is short.
+   *
+   * Sticky insets are resolved against the scrollport minus the rail's own
+   * padding, so `0` would park the row one rail padding above the bottom edge
+   * with rows showing through beneath it. The row instead takes that padding
+   * over: a negative inset and margin of the same size, and its own padding
+   * in their place, so its fill reaches the edge and the avatar stays where it
+   * sat before. The rail fill hides rows scrolling behind it. The z-index
+   * makes this row a stacking context that also holds
+   * `.menu`, which overhangs `.main` (always so in the collapsed 44px strip),
+   * so it is the menu's own `--z-overlay`: the menu keeps the rank it had
+   * before, and the row still clears the `--z-raised` area action buttons.
+   */
   .userRow {
-    margin-block-start: auto;
+    position: sticky;
+    inset-block-end: calc(-1 * var(--space-7));
+    z-index: var(--z-overlay);
+    margin-block: auto calc(-1 * var(--space-7));
     display: flex;
     align-items: center;
-    block-size: var(--control-h);
+    padding-block: var(--space-4) var(--space-7);
+    background: var(--surface-rail);
   }
 
   .menuWrap {
@@ -639,7 +664,19 @@
     inline-size: var(--control-h);
     block-size: var(--control-h);
     border-radius: var(--radius-pill);
-    background: var(--surface-chip);
+
+    /* The card fill, not `--surface-chip`: the chip sits one small step off
+       the rail and the avatar barely separated from it. `--surface-card` is
+       the far end of the surface ladder from `--surface-rail` in both themes. */
+    background: var(--surface-card);
+
+    /* The avatar sits inside the pinned row, i.e. inside the rail's own
+       `scroll-padding-block-end`, only `--space-7` off the bottom. Focusing it
+       (Tab, or the menu handing focus back) would otherwise scroll the Areas
+       list to clear that padding while the avatar itself never moves. This
+       margin takes back the rest of the padding, so where it is pinned already
+       counts as in view. */
+    scroll-margin-block-end: calc(-1 * (var(--space-4) + var(--control-h)));
     font-size: var(--text-xs);
     font-weight: var(--weight-medium);
     line-height: var(--leading-none);
