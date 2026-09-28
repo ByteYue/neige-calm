@@ -504,7 +504,7 @@ jobs:
         with:
           shared-key: rust-test
           cache-workspace-crates: true
-          save-if: true # TEMP(measure warm cache on this PR) — restore to github.event_name == 'push'
+          save-if: ${{ github.event_name == 'push' }}
 
       - uses: taiki-e/install-action@nextest
 
