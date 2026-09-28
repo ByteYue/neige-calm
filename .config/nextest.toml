@@ -90,7 +90,11 @@ include = [
 
 [[profile.ci.overrides]]
 # Start the known long tests first so they overlap each shard's short tests instead of
-# trailing them: trybuild probes compile a crate, the tailnet pair builds the Go helper,
-# and candidate_verification runs 20–150s tests.
-filter = 'test(/trybuild|^templates_privacy::|^planner_attachments_bound_dir_seam::|^tailnet::tests::tailnet_(disabled_host_reports|app_cancel_overtakes)|^candidate_verification::/)'
+# trailing them. Longest first: trybuild probes compile a crate and the tailnet pair builds
+# the Go helper (~3 min each on a hosted shard); candidate_verification runs 20-150s tests.
+filter = 'test(/trybuild|^templates_privacy::|^planner_attachments_bound_dir_seam::|^tailnet::tests::tailnet_(disabled_host_reports|app_cancel_overtakes)/)'
 priority = 100
+
+[[profile.ci.overrides]]
+filter = 'test(/^candidate_verification::/)'
+priority = 50
