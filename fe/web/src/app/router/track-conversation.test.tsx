@@ -330,6 +330,46 @@ describe('track conversations', () => {
     }
   });
 
+  it('Dismiss posts the item key', async () => {
+    let dismissed = false;
+    const { client, requests } = setup((request) => {
+      if (request.path === '/api/tracks/w1/activity/dismissals') {
+        dismissed = true;
+        return { status: 204, statusText: 'No Content', body: undefined };
+      }
+      return request.path === '/api/tracks/w1'
+        ? ok({
+            track: TRACK, can_resume: false,
+            cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
+            overlays: [trackActivityOverlay({ attention: 'failed', items: [
+              plannerDownItem('unexpected status 403 Forbidden', 5),
+              ...(dismissed ? [] : [askItem('Merge PR #1811 now, or hold it?', 4)]),
+            ] })],
+          })
+        : undefined;
+    });
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Dismiss: Planner asks: Merge PR #1811 now, or hold it?',
+    }));
+    await waitFor(() => expect(dismissed).toBe(true));
+    expect(requests.filter((request) => request.path === '/api/tracks/w1/activity/dismissals'))
+      .toEqual([expect.objectContaining({ method: 'POST', body: { key: 'ask:lifecycle:4' } })]);
+    /* No optimistic removal: the row stays until the projector's `overlay.set` refreshes the track. */
+    const notice = screen.getByRole('region', { name: 'Notifications' });
+    expect(within(notice).getAllByRole('listitem')).toHaveLength(2);
+    await act(() => {
+      const plan = invalidationPlanFor({ ev: 'overlay.set', data: {
+        id: 'activity-w1', plugin_id: 'kernel', entity_kind: 'track', entity_id: 'w1', kind: 'activity',
+        payload: {}, updated_at: 4,
+      } });
+      applyEventEffects(client, [{ type: 'invalidate', keys: plan.invalidate }]);
+      return Promise.resolve();
+    });
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Notifications' }))
+      .getAllByRole('listitem').map((row) => row.getAttribute('data-nc-notification-state'))).toEqual(['planner-down']));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('counts an ask and planner down as two notifications', async () => {
     setup((request) => request.path === '/api/tracks/w1'
       ? ok({

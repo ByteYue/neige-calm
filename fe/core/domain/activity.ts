@@ -1,6 +1,9 @@
 // Activity: the one vocabulary every indicator speaks. The kernel's `kernel/track/activity`
 // overlay is the only source of "in motion / waiting on a person / broken" for a track; nothing else gets folded in.
 
+import { z } from 'zod';
+import type { ApiOperation } from '../api/types.js';
+
 /** What an indicator can show. `quiet` renders nothing. */
 export type ActivityState = 'failed' | 'attention' | 'working' | 'unread' | 'quiet';
 
@@ -22,6 +25,20 @@ export type ActivityItem = Readonly<{
   text: string;
   atMs: number;
 }>;
+
+/**
+ * Dismiss one item: the kernel stores its key and the projector drops it, so the row goes when the
+ * overlay's `overlay.set` lands; there is no optimistic removal. `204` is the answer, idempotent;
+ * `404` means the track is gone. The same source happening again is a new key and shows again.
+ */
+export function dismissActivityItemOperation(trackId: string, key: string): ApiOperation<undefined> {
+  return {
+    method: 'POST',
+    path: `/api/tracks/${encodeURIComponent(trackId)}/activity/dismissals`,
+    body: { key },
+    responseSchema: z.undefined(),
+  };
+}
 
 /** The precedence, stated once: `failed > attention > working > unread > quiet`. */
 export function activityStateOf(

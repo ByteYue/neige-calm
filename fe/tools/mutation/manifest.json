@@ -1701,6 +1701,21 @@
     "why_more_than_one": "Only the two-kinds case reads a row's words through the route; the count and retired-row cases read the aside by its count or its presence, and the page suite renders rows without the route's mapping."
   },
   {
+    "mutation_id": "n1829-dismiss-not-posted",
+    "defends": [
+      "oracle:INV-APP-118"
+    ],
+    "target": "web/src/app/router/public.tsx",
+    "patch": "diff --git a/web/src/app/router/public.tsx b/web/src/app/router/public.tsx\n--- a/web/src/app/router/public.tsx\n+++ b/web/src/app/router/public.tsx\n@@ -2375,7 +2375,8 @@\n       onReply={plannerCard === undefined ? undefined : () => {\n         registry.requestOpen(plannerCard.id, { focusComposer: true });\n       }}\n-      onDismiss={(key) => trackMutations.dismissActivityItem(track.id, key)}\n+      /* MUT-1829-S3-1: Dismiss resolves without posting the key */\n+      onDismiss={() => Promise.resolve()}\n       onRenameTrack={(title) => trackMutations.patch(track.id, track.areaId, { title }).then(() => undefined)}\n       onResumeTrack={() => trackMutations.patch(track.id, track.areaId, { lifecycle: 'working' }).then(() => undefined)}\n       onDeleteTrack={(signal) => trackMutations.remove(track.id, track.areaId, signal).then(() => {\n",
+    "expected_red": [
+      "track conversations Dismiss posts the item key"
+    ],
+    "selection_paths": [
+      "web/src/app/router/track-conversation.test.tsx"
+    ],
+    "why_more_than_one": "Only the Dismiss case clicks Dismiss through the route; the other aside cases read the rows or click Reply, and the page suite renders rows without the route's wiring."
+  },
+  {
     "mutation_id": "s2b-today-launchpad-cards-empty",
     "defends": [
       "oracle:INV-APP-118"

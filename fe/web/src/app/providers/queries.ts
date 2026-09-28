@@ -24,6 +24,7 @@ import {
   staleRevBodySchema, trackReportSeriesOperation, type ResolvedSeries, type SeriesDetail,
 } from '../../../../core/domain/report-series.ts';
 import { trackSourceOperation, type TrackSourceDetail } from '../../../../core/domain/report-source.ts';
+import { dismissActivityItemOperation } from '../../../../core/domain/activity.ts';
 import {
   checkConnectorOperation, type ConnectorCheckResult,
   installConnectorOperation, installLocalPathOperation, patchPluginConfigOperation,
@@ -798,6 +799,8 @@ export type TrackMutations = Readonly<{
   createCard: (trackId: string, body: NewCardBody) => Promise<CardWire>;
   removeCard: (trackId: string, cardId: string, signal?: AbortSignal) => Promise<void>;
   remove: (trackId: string, areaId: string, signal?: AbortSignal) => Promise<void>;
+  /** Dismiss one notification item by its kernel key. Resolves on `204`, and on `404`: the track is gone. */
+  dismissActivityItem: (trackId: string, key: string) => Promise<void>;
 }>;
 
 export function useTrackMutations(transport: ApiTransportPort, unauthorized: UnauthorizedChannel): TrackMutations {
@@ -898,6 +901,12 @@ export function useTrackMutations(transport: ApiTransportPort, unauthorized: Una
       cancelThenInvalidate(client, queryKeys.overlaysByKind('track'));
     },
   });
+  /* No cache write and no invalidation: the projector's `overlay.set` is what drops the row, and a
+   * refetch fired now would race the recompute and read the item back. */
+  const dismissItem = useRecoveryMutation(transport, {
+    mutationFn: ({ trackId, key }: { trackId: string; key: string }, transport: ApiTransportPort) =>
+      runOperation(transport, dismissActivityItemOperation(trackId, key), unauthorized),
+  });
   const patchTrack = async (trackId: string, areaId: string, body: TrackPatchBody) =>
     toTrack(await patch.mutateAsync({ trackId, areaId, body }));
   async function createTrack(body: NewTrackBodyWithoutFirstMessage): Promise<Track>;
@@ -931,6 +940,14 @@ export function useTrackMutations(transport: ApiTransportPort, unauthorized: Una
     setPinned: (trackId, areaId, pinned, nowMs) =>
       patchTrack(trackId, areaId, { pinned_at: pinned ? nowMs : null }),
     remove: async (trackId, areaId, signal) => { await remove.mutateAsync({ trackId, areaId, signal }); },
+    dismissActivityItem: async (trackId, key) => {
+      try {
+        await dismissItem.mutateAsync({ trackId, key });
+      } catch (error) {
+        if (error instanceof ApiError && error.failure.kind === 'http' && error.failure.status === 404) return;
+        throw error;
+      }
+    },
   };
 }
 

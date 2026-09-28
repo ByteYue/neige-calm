@@ -2375,6 +2375,7 @@ function TrackRouteBody({
       onReply={plannerCard === undefined ? undefined : () => {
         registry.requestOpen(plannerCard.id, { focusComposer: true });
       }}
+      onDismiss={(key) => trackMutations.dismissActivityItem(track.id, key)}
       onRenameTrack={(title) => trackMutations.patch(track.id, track.areaId, { title }).then(() => undefined)}
       onResumeTrack={() => trackMutations.patch(track.id, track.areaId, { lifecycle: 'working' }).then(() => undefined)}
       onDeleteTrack={(signal) => trackMutations.remove(track.id, track.areaId, signal).then(() => {

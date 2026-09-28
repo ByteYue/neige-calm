@@ -82,8 +82,10 @@ export type TrackPageProps = Readonly<{
   /** Everything the kernel says is addressed to the user on this track, projected by
    *  the route from the activity overlay's items (`attentionItems`). */
   inputNotifications?: readonly TrackInputNotification[];
-  /** Reply: opens the Planner's composer. The one action of every row, an ask and planner down alike. */
+  /** Reply: opens the Planner's composer. The main action of every row, an ask and planner down alike. */
   onReply?: () => void;
+  /** Dismiss the row's item by its kernel key. The row stays until the overlay no longer lists it. */
+  onDismiss?: (key: string) => Promise<void>;
   /** The clock the rows' relative times read; the current time when omitted. */
   nowMs?: number;
   /** The route's conversation drawer is open. Input notifications compact
@@ -138,7 +140,7 @@ function taskInventorySummary(tasks: readonly ReportTaskRow[]): string | null {
 
 export function TrackPage({
   track, cards, tasks, openableCards, outlineItems = [], report, backlinks, conversationList, conversationAction,
-  onStartConversation, conversationOpen = false, mobilePanelObscured, inputNotifications = [], onReply, nowMs,
+  onStartConversation, conversationOpen = false, mobilePanelObscured, inputNotifications = [], onReply, onDismiss, nowMs,
   cardsAction, onCreateTask, recentFiles, onOpenCard, onDeleteCard, onOpenTask, onOpenOutline, board, onCloseBoard,
   panel = null, onOpenPanel, onClosePanel,
   mobileBackLabel = 'Pages', onMobileBack, mobileHeaderActionsHost = null, mobileHeaderTitleHost = null, mobileTitleReadView,
@@ -184,6 +186,7 @@ export function TrackPage({
 
   const deletion = useDeleteConfirm((_id, signal) => onDeleteTrack(signal));
   const resumeFeedback = useOperationFeedback();
+  const dismissFeedback = useOperationFeedback();
   const [resumePending, setResumePending] = useState(false);
   const notificationSignature = inputNotifications.map(({ key }) => key).join('|');
   const [noticeExpanded, setNoticeExpanded] = useState(inputNotifications.length > 0 && !conversationOpen);
@@ -570,15 +573,27 @@ export function TrackPage({
                         <span className={styles.needsInputNoticeDetail}>{PLANNER_DOWN_NEXT_STEP}</span>
                       )}
                     </span>
-                    {onReply !== undefined && (
-                      <button
-                        type="button"
-                        className={styles.needsInputAction}
-                        /* The text is part of the name: every row's button says Reply, and two buttons named alike are one button to a reader who cannot see the row. */
-                        aria-label={`Reply to the Planner: ${notificationGist(notification.text)}`}
-                        onClick={onReply}
-                      >Reply</button>
-                    )}
+                    <span className={styles.needsInputActions}>
+                      {onReply !== undefined && (
+                        <button
+                          type="button"
+                          className={styles.needsInputAction}
+                          /* The text is part of the name: every row's button says Reply, and two buttons named alike are one button to a reader who cannot see the row. */
+                          aria-label={`Reply to the Planner: ${notificationGist(notification.text)}`}
+                          onClick={onReply}
+                        >Reply</button>
+                      )}
+                      {onDismiss !== undefined && (
+                        <button
+                          type="button"
+                          className={styles.needsInputDismiss}
+                          aria-label={`Dismiss: ${NOTIFICATION_LABEL[notification.kind]}: ${notificationGist(notification.text)}`}
+                          onClick={() => {
+                            void dismissFeedback.run(onDismiss(notification.key), 'Could not dismiss this notification.');
+                          }}
+                        >Dismiss</button>
+                      )}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -611,6 +626,7 @@ export function TrackPage({
       />
       <OperationFeedback feedback={deletion.feedback} />
       <OperationFeedback feedback={resumeFeedback} />
+      <OperationFeedback feedback={dismissFeedback} />
     </section>
   );
 }
