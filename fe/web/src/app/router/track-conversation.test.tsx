@@ -348,9 +348,9 @@ describe('track conversations', () => {
           })
         : undefined;
     });
-    fireEvent.click(await screen.findByRole('button', {
-      name: 'Dismiss: Planner asks: Merge PR #1811 now, or hold it?',
-    }));
+    const askRow = within(await screen.findByRole('region', { name: 'Notifications' })).getAllByRole('listitem')
+      .find((row) => row.getAttribute('data-nc-notification-state') === 'ask');
+    fireEvent.click(within(askRow!).getByRole('button', { name: /^Dismiss: Planner asks: / }));
     await waitFor(() => expect(dismissed).toBe(true));
     expect(requests.filter((request) => request.path === '/api/tracks/w1/activity/dismissals'))
       .toEqual([expect.objectContaining({ method: 'POST', body: { key: 'ask:lifecycle:4' } })]);
