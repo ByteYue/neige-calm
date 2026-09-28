@@ -493,7 +493,7 @@
   },
   {
     "name": "calm.ratify.request",
-    "description_sha256": "e110e83486eecb7e96242df1ca819540d01f61791a24dd2f701c7d1475e66a52",
+    "description_sha256": "0b22e0fe18a1c52f1032962a6f536b4c62cbcadccee8a20cfba97da41c0630ed",
     "input_schema": {
       "properties": {
         "reason": {
@@ -2317,7 +2317,7 @@
   },
   {
     "name": "calm.user.notify",
-    "description_sha256": "b12adf50f53e88e98d860e49a006549d71334f01e9d0cbc6821ea2bf2ccce871",
+    "description_sha256": "e329dc052761f9fd0394e9e9d32458bb4dbce4ae7d74f996eb06023d02147e35",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
