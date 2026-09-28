@@ -11,6 +11,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 
 import { createPortal } from 'react-dom';
 import { useCompactViewport } from '../../../ui/viewport/public.ts';
 
+import { notificationPlainText } from '../../../../../core/domain/activity.ts';
 import { independentTaskUnavailableReason } from '../../../../../core/domain/independent-task.ts';
 import type { ReportOutlineItem, ReportTaskRow } from '../../../../../core/domain/report.ts';
 import {
@@ -61,9 +62,9 @@ const NOTIFICATION_ACTION = Object.freeze({
   'planner-down': Object.freeze({ hint: 'Open Planner', name: 'Open the Planner' }),
 } as const);
 
-/** The start of a row's text for its accessible name; the whole text is in the Planner conversation. */
+/** The start of a row's words, as plain text, for its accessible names; the whole text is in the Planner conversation. */
 function notificationGist(text: string): string {
-  const chars = [...text];
+  const chars = [...notificationPlainText(text)];
   return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : text;
 }
 

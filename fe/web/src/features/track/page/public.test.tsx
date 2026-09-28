@@ -203,7 +203,11 @@ describe('TrackPage header', () => {
     await userEvent.click(within(down).getByRole('button', {
       name: "Dismiss: Planner can't continue: 400: The 'gpt-6-astra' model requires a newer version of Codex.",
     }));
-    expect(within(ask).getByRole('button', { name: /^Dismiss: Needs your answer: Merge \*\*PR #1811\*\*/ }).title).toBe('Dismiss');
+    /* The names carry the words, not the markdown syntax. */
+    expect(within(ask).getByRole('button', {
+      name: 'Dismiss: Needs your answer: Merge PR #1811 now? hold it for the release ship it today Run deploy.sh after; s…',
+    }).title).toBe('Dismiss');
+    expect(within(ask).getByRole('button', { name: /^Answer the Planner: Merge PR #1811 now\? hold it/ })).toBeTruthy();
     expect(onDismiss).toHaveBeenCalledWith('planner_down:9');
   });
 

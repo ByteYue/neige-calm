@@ -3,6 +3,9 @@
 
 import { z } from 'zod';
 import type { ApiOperation } from '../api/types.js';
+import {
+  parse, type NormalizedBlock, type NormalizedInline,
+} from '../markdown/public.js';
 
 /** What an indicator can show. `quiet` renders nothing. */
 export type ActivityState = 'failed' | 'attention' | 'working' | 'unread' | 'quiet';
@@ -38,6 +41,40 @@ export function dismissActivityItemOperation(trackId: string, key: string): ApiO
     body: { key },
     responseSchema: z.undefined(),
   };
+}
+
+function inlinePlainText(nodes: readonly NormalizedInline[]): string {
+  return nodes.map((node): string => {
+    switch (node.type) {
+      case 'text': case 'inlineCode': return node.value;
+      case 'image': return node.alt;
+      case 'break': return ' ';
+      case 'html': return '';
+      case 'link': case 'delete': case 'emphasis': case 'strong': return inlinePlainText(node.children);
+    }
+  }).join('');
+}
+
+function blockPlainText(block: NormalizedBlock): string {
+  switch (block.type) {
+    case 'heading': case 'paragraph': return inlinePlainText(block.children);
+    case 'code': return block.value;
+    case 'blockquote': return block.children.map(blockPlainText).join(' ');
+    case 'list': return block.children.map((item) => item.children.map(blockPlainText).join(' ')).join(' ');
+    case 'table': return block.children
+      .map((row) => row.children.map((cell) => inlinePlainText(cell.children)).join(' ')).join(' ');
+    case 'html': case 'thematicBreak': return '';
+  }
+}
+
+/**
+ * An item's words as a reader hears them: the visible text of its markdown (no `**`, backticks or
+ * link syntax), whitespace collapsed. Parsed by `core/markdown`; the raw text when that fails.
+ */
+export function notificationPlainText(markdown: string): string {
+  const parsed = parse(markdown);
+  if (parsed.status !== 'ready') return markdown;
+  return parsed.value.children.map(blockPlainText).join(' ').replace(/\s+/g, ' ').trim();
 }
 
 /** The precedence, stated once: `failed > attention > working > unread > quiet`. */
