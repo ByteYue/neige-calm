@@ -312,6 +312,12 @@ pub struct ThreadLoadedListResponse {
     pub data: Vec<String>,
 }
 
+/// `thread/unsubscribe` response: `notLoaded`, `notSubscribed` or `unsubscribed`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ThreadUnsubscribeResponse {
+    pub status: String,
+}
+
 /// One page of `model/list`; `SharedCodexAppServer::model_list` drains the pages.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -918,6 +924,21 @@ impl CodexAppServer {
     pub async fn thread_loaded_list(&self) -> Result<Vec<String>> {
         let resp: ThreadLoadedListResponse = self.request("thread/loaded/list", json!({})).await?;
         Ok(resp.data)
+    }
+
+    /// `thread/unsubscribe` — drop THIS connection's subscription; codex unloads the thread
+    /// (and its MCP servers) once its last subscriber leaves. A later `thread/resume` reloads it.
+    pub async fn thread_unsubscribe(
+        &self,
+        thread_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<ThreadUnsubscribeResponse> {
+        self.request_until(
+            "thread/unsubscribe",
+            json!({ "threadId": thread_id }),
+            deadline,
+        )
+        .await
     }
 
     /// `turn/start` — returns the turn id quickly; the work streams as notifications. `selection` is required so every caller answers the model question out loud (`TurnModelSelection::inherit` for nothing to say).

@@ -5095,3 +5095,6 @@ async fn connect_to_a_silent_peer_fails_with_a_bounded_diagnostic() {
 
 #[path = "cases/shared_terminal_approval.rs"]
 mod terminal_approval;
+
+#[path = "cases/shared_codex_thread_release.rs"]
+mod thread_release;

@@ -922,3 +922,6 @@ async fn a_failed_area_delete_commit_keeps_the_active_turn_entry() {
         "#1553: a rollback must not run the committed-arm turn-state sweep"
     );
 }
+
+#[path = "track_delete_thread_release.rs"]
+mod thread_release;

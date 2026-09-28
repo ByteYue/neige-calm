@@ -1,5 +1,6 @@
-//! The terminal sweeper: one 30 s tick, two independent arms — the orphan arm reaps terminal rows whose card
-//! has no active worker session; the completed-track arm ends worker sessions still running on a completed or archived track.
+//! The terminal sweeper: one 30 s tick, three independent arms — the orphan arm reaps terminal rows whose card
+//! has no active worker session; the completed-track arm ends worker sessions still running on a completed or archived track;
+//! the thread arm releases shared codex threads whose session ended (#1853).
 
 use std::time::Duration;
 
@@ -89,7 +90,7 @@ pub fn spawn(state: AppState) {
     });
 }
 
-/// One sweep pass: the orphan arm, then the completed-track arm; integration tests drive it without the interval task.
+/// One sweep pass: the orphan arm, the completed-track arm, then the thread arm; integration tests drive it without the interval task.
 pub async fn sweep(state: &AppState) -> Result<()> {
     let orphans = state.repo.terminals_orphaned(ORPHAN_GRACE_SECONDS).await?;
     if !orphans.is_empty() {
@@ -122,6 +123,14 @@ pub async fn sweep(state: &AppState) -> Result<()> {
                  exited write: retried next tick; after it: the orphan arm converges)"
             );
         }
+    }
+
+    let released = state.shared_codex_appserver.release_ended_threads().await?;
+    if released > 0 {
+        tracing::info!(
+            count = released,
+            "terminal_sweeper: released shared codex threads whose session ended"
+        );
     }
     Ok(())
 }
