@@ -10,6 +10,7 @@ use crate::error::{CalmError, Result};
 use crate::event::{Event, EventScope};
 use crate::ids::{ActorId, TrackId};
 use crate::model::{Task, TaskStatus, Track, TrackLifecycle};
+use crate::track_report::ReportBlock;
 use calm_types::report_blocks::tasks::{PLANNER_DECLARATION_AUTHOR, TaskDeclaration};
 use calm_types::task_recovery::{TASK_IN_TRACK_ROUTE, TaskAttemptOrigin, TaskRecoveryConstraint};
 use sqlx::{Sqlite, Transaction};
@@ -165,7 +166,8 @@ pub(crate) async fn admit_contract_and_predecessor_tx(
             reason,
         )
     })?;
-    check_constraint_tx(tx, track, &previous.key, &constraint).await?;
+    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, track.id.as_str()).await?;
+    check_constraint_tx(tx, track, &blocks, &previous.key, &constraint).await?;
     require_recoverable_predecessor_tx(tx, previous).await?;
     // File-delivery input checks refuse with their own Conflict messages; at
     // this boundary they all mean the frozen input contract cannot be honoured.
@@ -206,8 +208,11 @@ pub(crate) async fn validate_frozen_contract_tx(tx: &mut Tx<'_>, task: &Task) ->
         return Err(conflict("frozen task context is stale"));
     }
     let constraint = claim_constraint_tx(tx, task).await?;
-    check_constraint_tx(tx, &track, &task.key, &constraint).await?;
-    Box::pin(crate::file_delivery::repair::validate_contract_tx(tx, task)).await?;
+    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, &task.track_id).await?;
+    check_constraint_tx(tx, &track, &blocks, &task.key, &constraint).await?;
+    if let Some(receipt) = crate::file_delivery::repair::for_task_tx(tx, task).await? {
+        crate::file_delivery::repair::check_contract(task, &receipt, &blocks)?;
+    }
     Ok(())
 }
 
@@ -259,10 +264,14 @@ async fn automation_policy_tx(tx: &mut Tx<'_>, track: &Track) -> Result<Option<S
     )
 }
 
-async fn declaration_tx(tx: &mut Tx<'_>, track: &Track, key: &str) -> Admission<TaskDeclaration> {
-    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, track.id.as_str()).await?;
+async fn declaration_tx(
+    tx: &mut Tx<'_>,
+    track: &Track,
+    blocks: &[ReportBlock],
+    key: &str,
+) -> Admission<TaskDeclaration> {
     let (declarations, diagnostics) =
-        calm_types::report_blocks::tasks::project_task_declarations(&blocks);
+        calm_types::report_blocks::tasks::project_task_declarations(blocks);
     let mut matching = declarations.into_iter().filter(|decl| decl.key == key);
     let declaration = matching.next().ok_or_else(|| {
         refuse(
@@ -324,9 +333,11 @@ async fn declaration_tx(tx: &mut Tx<'_>, track: &Track, key: &str) -> Admission<
     Ok(declaration)
 }
 
+/// `blocks` is `track`'s current report snapshot.
 pub(super) async fn check_constraint_tx(
     tx: &mut Tx<'_>,
     track: &Track,
+    blocks: &[ReportBlock],
     key: &str,
     constraint: &TaskRecoveryConstraint,
 ) -> Admission<()> {
@@ -338,7 +349,7 @@ pub(super) async fn check_constraint_tx(
             reason,
         )
     })?;
-    let declaration = declaration_tx(tx, track, key).await?;
+    let declaration = declaration_tx(tx, track, blocks, key).await?;
     let TaskRecoveryConstraint::V1 {
         refs,
         spawn,
@@ -399,9 +410,16 @@ pub(super) async fn check_constraint_tx(
                 ),
             ));
         }
-        let (_, blocks) =
-            crate::track_report::report_blocks_snapshot_tx(tx, frozen.track_id.as_str()).await?;
-        let block = blocks
+        let fetched;
+        let frozen_blocks = if frozen.track_id == track.id {
+            blocks
+        } else {
+            fetched = crate::track_report::report_blocks_snapshot_tx(tx, frozen.track_id.as_str())
+                .await?
+                .1;
+            &fetched
+        };
+        let block = frozen_blocks
             .iter()
             .find(|block| block.id == frozen.block_id)
             .ok_or_else(|| {
@@ -623,7 +641,8 @@ pub(crate) async fn check_recovery_attempt_tx(tx: &mut Tx<'_>, task_id: &str) ->
     }
     // declare-and-wait may be satisfied by an explicit current release; the initial Planner
     // retry limit was consumed at allocation admission.
-    check_constraint_tx(tx, &track, &allocation.key, &constraint).await?;
+    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, track.id.as_str()).await?;
+    check_constraint_tx(tx, &track, &blocks, &allocation.key, &constraint).await?;
     require_recoverable_predecessor_tx(tx, &previous).await
 }
 

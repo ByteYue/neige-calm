@@ -239,12 +239,21 @@ pub(crate) async fn validate_contract_tx(tx: &mut Tx<'_>, task: &Task) -> Result
     let Some(receipt) = for_task_tx(tx, task).await? else {
         return Ok(None);
     };
+    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, &task.track_id).await?;
+    check_contract(task, &receipt, &blocks)?;
+    Ok(Some(receipt))
+}
+/// `blocks` is the task's track's current report snapshot.
+pub(crate) fn check_contract(
+    task: &Task,
+    receipt: &Receipt,
+    blocks: &[crate::track_report::ReportBlock],
+) -> Result<()> {
     let derived = if task.key == receipt.repair.key {
         &receipt.repair
     } else {
         &receipt.reviewer
     };
-    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, &task.track_id).await?;
     let mut found = blocks.iter().filter(|b| b.payload["key"] == task.key);
     let block = found
         .next()
@@ -264,7 +273,7 @@ pub(crate) async fn validate_contract_tx(tx: &mut Tx<'_>, task: &Task) -> Result
             "derived repair task does not match its complete receipt contract",
         ));
     }
-    Ok(Some(receipt))
+    Ok(())
 }
 /// Check lineage once at the input/publication boundary, rather than recursively
 /// repeating the complete R1 evidence read for each nested frozen-contract check.

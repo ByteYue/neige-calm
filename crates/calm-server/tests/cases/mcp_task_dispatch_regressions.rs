@@ -216,7 +216,7 @@ async fn dispatch_invalid_current_declaration_never_claims_contract_match() {
         .unwrap();
     let mut invalid = block.payload.clone();
     invalid["priority"] = json!("invalid historical value");
-    // Emulate a malformed persisted CRDT from an older writer. The fields in
+    // Emulate a malformed persisted report from an older writer. The fields in
     // the execution-root partition are unchanged; schema invalidity must still
     // prevent a matching claim. The read exercises the production MCP snapshot.
     let mut doc = calm_server::track_report_doc::ReportDoc::from_payload(&p);
@@ -227,12 +227,17 @@ async fn dispatch_invalid_current_declaration_never_claims_contract_match() {
         &calm_types::report_blocks::render_fence("task", &invalid),
     )
     .unwrap();
-    sqlx::query("UPDATE cards SET body_crdt=?1 WHERE id=?2")
-        .bind(doc.to_bytes())
-        .bind(b.report_card_id.as_str())
-        .execute(&b.repo.sqlite_pool().unwrap())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE cards SET body_crdt=?1,payload=json_set(payload,'$.body',?2,'$.blocks',json(?3)) \
+         WHERE id=?4",
+    )
+    .bind(doc.to_bytes())
+    .bind(doc.project().unwrap().1)
+    .bind(serde_json::to_string(&doc.blocks_snapshot().unwrap()).unwrap())
+    .bind(b.report_card_id.as_str())
+    .execute(&b.repo.sqlite_pool().unwrap())
+    .await
+    .unwrap();
     let saved = counts(&b).await;
     let replay = dispatch(&b, args()).await.unwrap();
     assert_eq!(replay["current"]["contract_status"], "unavailable");
