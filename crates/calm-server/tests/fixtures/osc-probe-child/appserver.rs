@@ -366,13 +366,7 @@ async fn serve_conn(
     let thread_id = "fake-thread-0001";
     let turn_id = "fake-turn-0001";
 
-    loop {
-        // #1853: once `<sock>.stop-reading` exists, the next time this loop comes round the
-        // daemon stops reading for good, so a large enough request backs up the kernel's send.
-        if reads.sock.with_extension("stop-reading").exists() {
-            std::future::pending::<()>().await;
-        }
-        let Some(msg) = read.next().await else { break };
+    while let Some(msg) = read.next().await {
         let msg = msg.map_err(|e| format!("ws read: {e}"))?;
         let text = match msg {
             Message::Text(t) => t.to_string(),

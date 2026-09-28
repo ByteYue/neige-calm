@@ -258,17 +258,18 @@ impl SessionRepo for SqlxRepo {
             return Ok(Vec::new());
         }
         let wanted = serde_json::to_string(thread_ids)?;
-        // POSITIVE end only: a terminal row must exist. Anything not terminal counts as live.
+        // POSITIVE end only: an exited/failed row must exist. Anything else counts as live,
+        // `superseded` included: a failed forced-new-thread start restores the superseded row.
         let rows: Vec<String> = sqlx::query_scalar(
             r#"SELECT DISTINCT ended.thread_id
                  FROM json_each(?1) wanted
                  JOIN worker_sessions ended
                    ON ended.provider = 'codex' AND ended.thread_id = wanted.value
-                WHERE ended.state IN ('exited', 'failed', 'superseded')
+                WHERE ended.state IN ('exited', 'failed')
                   AND NOT EXISTS (
                       SELECT 1 FROM worker_sessions live
                        WHERE live.provider = 'codex' AND live.thread_id = wanted.value
-                         AND live.state NOT IN ('exited', 'failed', 'superseded'))
+                         AND live.state NOT IN ('exited', 'failed'))
                 ORDER BY ended.thread_id ASC"#,
         )
         .bind(wanted)

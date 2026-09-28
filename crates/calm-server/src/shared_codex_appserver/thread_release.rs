@@ -4,9 +4,8 @@
 //! thread, so releasing one whose Card is gone or whose session ended is safe.
 use super::*;
 
-/// Budget for one release pass, shared by every thread in it: a pass runs after a delete commits
-/// and on the sweeper tick (under `resume_replay_serial`), and a wedged daemon must hold neither
-/// for longer than this.
+/// Reply-wait budget for one release pass, shared by every thread in it: a pass runs after a
+/// delete commits and on the sweeper tick (under `resume_replay_serial`).
 const THREAD_UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl SharedCodexAppServer {
@@ -23,7 +22,7 @@ impl SharedCodexAppServer {
         self.unsubscribe_threads(thread_ids).await;
     }
 
-    /// Best effort, within one [`THREAD_UNSUBSCRIBE_TIMEOUT`] for the whole batch: a failure is
+    /// Best effort, with one [`THREAD_UNSUBSCRIBE_TIMEOUT`] for the whole batch: a failure is
     /// logged, with no connection there is nothing to unsubscribe, and the threads the budget
     /// does not reach are logged once and left loaded.
     pub(super) async fn unsubscribe_threads(&self, thread_ids: &[String]) {
@@ -49,23 +48,22 @@ impl SharedCodexAppServer {
                 unreached += 1;
                 continue;
             }
-            // The outer bound also covers the sink lock and the send, which `request_until`'s own
-            // deadline does not; cancelling a partial send poisons and shuts the connection.
-            let unsubscribe = client.thread_unsubscribe(thread_id, deadline);
-            match tokio::time::timeout_at(deadline, unsubscribe).await {
-                Ok(Ok(response)) => tracing::info!(
+            // The deadline bounds the reply waits (a reply timeout leaves the connection usable).
+            // Like every other RPC on the shared connection, a daemon that stops reading blocks
+            // the send itself; cancelling a partial send would poison the connection for good.
+            match client.thread_unsubscribe(thread_id, deadline).await {
+                Ok(response) => tracing::info!(
                     target: "shared_codex_daemon::release_thread",
                     %thread_id,
                     status = %response.status,
                     "released shared codex thread"
                 ),
-                Ok(Err(error)) => tracing::warn!(
+                Err(error) => tracing::warn!(
                     target: "shared_codex_daemon::release_thread",
                     %thread_id,
                     %error,
                     "thread/unsubscribe failed; codex may keep the thread loaded"
                 ),
-                Err(_elapsed) => unreached += 1,
             }
         }
         if unreached > 0 {
@@ -77,8 +75,8 @@ impl SharedCodexAppServer {
         }
     }
 
-    /// Release every cached thread whose session POSITIVELY ended (`codex_threads_ended`); a
-    /// thread no session row names yet stays.
+    /// Release every cached thread whose session POSITIVELY ended (`codex_threads_ended`:
+    /// exited or failed); a superseded thread, or one no session row names yet, stays.
     /// Holds `resume_replay_serial` from the read through the RPCs, so a system-error recovery,
     /// which revives a Failed row under the same lock, lands wholly before or after this pass.
     pub async fn release_ended_threads(&self) -> Result<usize> {
