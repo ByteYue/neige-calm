@@ -1568,9 +1568,13 @@ impl SharedCodexAppServer {
                 %card_id,
                 "dropped shared codex thread attribution for a deleted card"
             );
-            // Outside the serials: the RPC must not hold up thread starts or a respawn's replay.
-            self.unsubscribe_thread(thread_id).await;
         }
+        // Outside the serials: the RPCs must not hold up thread starts or a respawn's replay.
+        let thread_ids: Vec<String> = dropped
+            .iter()
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        self.unsubscribe_threads(&thread_ids).await;
         dropped.len()
     }
 

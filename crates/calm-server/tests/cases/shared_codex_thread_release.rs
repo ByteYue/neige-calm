@@ -171,3 +171,52 @@ async fn the_sweep_releases_only_threads_whose_session_positively_ended() {
     calm_server::terminal_sweeper::sweep(&state).await.unwrap();
     assert_eq!(unsubscribed_on_wire(&root), vec!["thread-ended"]);
 }
+
+/// A daemon that stops reading must not hold the sweep (and `resume_replay_serial`) past the
+/// pass budget: the unsubscribe frame is far larger than the socket buffers, so the send itself
+/// blocks, which `request_until`'s response deadline alone does not bound.
+#[tokio::test]
+async fn a_daemon_that_stops_reading_cannot_hold_a_release_pass_past_its_budget() {
+    let _guard = ENV_LOCK.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo().await;
+    let card = seed_card(&repo, 0).await;
+    let huge_thread = format!("thread-huge-{}", "x".repeat(4 * 1024 * 1024));
+    seed_runtime_thread(&repo, &card, &huge_thread).await;
+    let daemon = server(&root, repo.clone()).await;
+    daemon.start_or_takeover().await.unwrap();
+    let mut tx = repo.pool().begin().await.unwrap();
+    session_complete_for_card_tx(&mut tx, &card, WorkerSessionState::Exited)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // The fixture handles this one read, then never reads again.
+    let sock = root.path().join("run/codex-appserver.sock");
+    std::fs::write(sock.with_extension("stop-reading"), "1").unwrap();
+    daemon
+        .config_read(None, tokio::time::Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let released = tokio::time::timeout(Duration::from_secs(30), daemon.release_ended_threads())
+        .await
+        .expect("a release pass must end within its budget even when the send blocks")
+        .unwrap();
+    assert_eq!(released, 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(daemon.cached_card_for_thread(&huge_thread), None);
+    // The replay serial is free again: another pass takes it at once.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), daemon.release_ended_threads())
+            .await
+            .expect("resume_replay_serial must be released")
+            .unwrap(),
+        0
+    );
+}

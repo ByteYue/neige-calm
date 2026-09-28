@@ -4,46 +4,76 @@
 //! thread, so releasing one whose Card is gone or whose session ended is safe.
 use super::*;
 
-/// Per-call budget: a release runs after a delete commits and on the sweeper tick, and a wedged
-/// daemon must not hold either for the client's default 30 s per thread.
+/// Budget for one release pass, shared by every thread in it: a pass runs after a delete commits
+/// and on the sweeper tick (under `resume_replay_serial`), and a wedged daemon must hold neither
+/// for longer than this.
 const THREAD_UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl SharedCodexAppServer {
-    /// Drop `thread_id`'s attribution and unsubscribe the kernel connection from it. Best
-    /// effort: an RPC failure is logged, and with no connection there is nothing to unsubscribe.
-    /// The tombstone keeps a later `thread/started` for it from binding to a pending Card.
-    async fn release_thread(&self, thread_id: &str) {
-        self.thread_cache.remove(thread_id);
-        self.forgotten_threads.lock().await.remember(thread_id);
-        self.unsubscribe_thread(thread_id).await;
+    /// Drop the threads' attribution and unsubscribe the kernel connection from them. The
+    /// tombstone keeps a later `thread/started` for one from binding to a pending Card.
+    async fn release_threads(&self, thread_ids: &[String]) {
+        {
+            let mut forgotten = self.forgotten_threads.lock().await;
+            for thread_id in thread_ids {
+                self.thread_cache.remove(thread_id);
+                forgotten.remember(thread_id);
+            }
+        }
+        self.unsubscribe_threads(thread_ids).await;
     }
 
-    pub(super) async fn unsubscribe_thread(&self, thread_id: &str) {
+    /// Best effort, within one [`THREAD_UNSUBSCRIBE_TIMEOUT`] for the whole batch: a failure is
+    /// logged, with no connection there is nothing to unsubscribe, and the threads the budget
+    /// does not reach are logged once and left loaded.
+    pub(super) async fn unsubscribe_threads(&self, thread_ids: &[String]) {
+        if thread_ids.is_empty() {
+            return;
+        }
         #[cfg(feature = "fixtures")]
         if let Some(fake) = self.fake.as_ref() {
             fake.unsubscribed_threads
                 .lock()
                 .expect("fake unsubscribed threads mutex")
-                .push(thread_id.to_string());
+                .extend(thread_ids.iter().cloned());
             return;
         }
-        let Some(client) = self.running_client().await else {
+        let deadline = tokio::time::Instant::now() + THREAD_UNSUBSCRIBE_TIMEOUT;
+        let Ok(Some(client)) = tokio::time::timeout_at(deadline, self.running_client()).await
+        else {
             return;
         };
-        let deadline = tokio::time::Instant::now() + THREAD_UNSUBSCRIBE_TIMEOUT;
-        match client.thread_unsubscribe(thread_id, deadline).await {
-            Ok(response) => tracing::info!(
+        let mut unreached = 0_usize;
+        for thread_id in thread_ids {
+            if tokio::time::Instant::now() >= deadline {
+                unreached += 1;
+                continue;
+            }
+            // The outer bound also covers the sink lock and the send, which `request_until`'s own
+            // deadline does not; cancelling a partial send poisons and shuts the connection.
+            let unsubscribe = client.thread_unsubscribe(thread_id, deadline);
+            match tokio::time::timeout_at(deadline, unsubscribe).await {
+                Ok(Ok(response)) => tracing::info!(
+                    target: "shared_codex_daemon::release_thread",
+                    %thread_id,
+                    status = %response.status,
+                    "released shared codex thread"
+                ),
+                Ok(Err(error)) => tracing::warn!(
+                    target: "shared_codex_daemon::release_thread",
+                    %thread_id,
+                    %error,
+                    "thread/unsubscribe failed; codex may keep the thread loaded"
+                ),
+                Err(_elapsed) => unreached += 1,
+            }
+        }
+        if unreached > 0 {
+            tracing::warn!(
                 target: "shared_codex_daemon::release_thread",
-                %thread_id,
-                status = %response.status,
-                "released shared codex thread"
-            ),
-            Err(error) => tracing::warn!(
-                target: "shared_codex_daemon::release_thread",
-                %thread_id,
-                %error,
-                "thread/unsubscribe failed; codex may keep the thread loaded"
-            ),
+                unreached,
+                "thread/unsubscribe budget spent; codex may keep these threads loaded"
+            );
         }
     }
 
@@ -59,9 +89,7 @@ impl SharedCodexAppServer {
             .map(|entry| entry.key().clone())
             .collect();
         let ended = self.repo.codex_threads_ended(&cached).await?;
-        for thread_id in &ended {
-            self.release_thread(thread_id).await;
-        }
+        self.release_threads(&ended).await;
         Ok(ended.len())
     }
 
