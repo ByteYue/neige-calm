@@ -8,7 +8,7 @@ import { NEUTRAL_ACTIVITY } from '../../../../../core/domain/track.ts';
 import { deriveTrackPageView } from '../../../../../core/view/track-page.ts';
 import { useState } from '../../../ui/state/public.ts';
 import { Dialog } from '../../../ui/dialog/public.tsx';
-import { TrackPage, type TrackInputNotification, type TrackPageProps } from './public.tsx';
+import { PLANNER_DOWN_NEXT_STEP, TrackPage, type TrackInputNotification, type TrackPageProps } from './public.tsx';
 import { card, renderPage, track } from './test-fixtures.tsx';
 
 afterEach(cleanup);
@@ -169,6 +169,28 @@ describe('TrackPage header', () => {
     });
     expect(screen.getByRole('button', { name: `Reply to the Planner: ${'a'.repeat(80)}…` })).toBeTruthy();
     expect(screen.getByText(long)).toBeTruthy();
+  });
+
+  it('renders an item as markdown, and a planner-down row as its readable reason and the fixed sentence', () => {
+    renderPage({
+      inputNotifications: [
+        { key: 'ask:lifecycle:7', kind: 'ask', atMs: 2, text: 'Merge **PR #1811** now?\n\n- hold it for the release\n'
+          + '- ship it today\n\nRun `deploy.sh` after; see [the PR](https://example.com/pr/1811).' },
+        { key: 'planner_down:9', kind: 'planner-down', atMs: 1,
+          text: "400: The 'gpt-6-astra' model requires a newer version of Codex." },
+      ],
+      onReply: vi.fn(),
+    });
+    const [ask, down] = screen.getByRole('region', { name: 'Notifications' })
+      .querySelectorAll<HTMLElement>('[data-nc-notification-state]');
+    expect(within(ask).getByText('PR #1811').tagName).toBe('STRONG');
+    expect(within(ask).getAllByRole('listitem').map((item) => item.textContent))
+      .toEqual(['hold it for the release', 'ship it today']);
+    expect(within(ask).getByText('deploy.sh').tagName).toBe('CODE');
+    expect(within(ask).getByRole('link', { name: 'the PR' }).getAttribute('href')).toBe('https://example.com/pr/1811');
+    expect(down.getAttribute('data-nc-notification-state')).toBe('planner-down');
+    expect(within(down).getByText("400: The 'gpt-6-astra' model requires a newer version of Codex.")).toBeTruthy();
+    expect(within(down).getByText(PLANNER_DOWN_NEXT_STEP)).toBeTruthy();
   });
 
   it('reopens a collapsed center when another notification arrives', async () => {

@@ -4,6 +4,7 @@
 import { Button as AstryxButton } from '@astryxdesign/core/Button';
 import { DropdownMenu as AstryxDropdownMenu } from '@astryxdesign/core/DropdownMenu';
 import { getIcon as getAstryxIcon } from '@astryxdesign/core/Icon';
+import { Markdown } from '@astryxdesign/core/Markdown';
 import { MoreMenu as AstryxMoreMenu } from '@astryxdesign/core/MoreMenu';
 import { VisuallyHidden } from '@astryxdesign/core/VisuallyHidden';
 import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
@@ -559,7 +560,7 @@ export function TrackPage({
                     className={styles.needsInputNoticeItem}
                     data-nc-notification-state={notification.kind}
                   >
-                    <span className={styles.needsInputNoticeCopy}>
+                    <div className={styles.needsInputNoticeCopy}>
                       <span className={styles.needsInputNoticeMeta}>
                         <strong className={`${styles.needsInputNoticeSource} ${notification.kind === 'ask'
                           ? styles.needsInputNoticeAsk : styles.needsInputNoticeDown}`}
@@ -568,11 +569,14 @@ export function TrackPage({
                           {relativeTime(notification.atMs, nowMs ?? Date.now())}
                         </time>
                       </span>
-                      <span className={`${styles.needsInputNoticeDetail} ${styles.needsInputNoticeText}`}>{notification.text}</span>
+                      {/* The kernel's words are markdown, rendered as the chat renders a reply. */}
+                      <div className={`${styles.needsInputNoticeDetail} ${styles.needsInputNoticeText}`}>
+                        <Markdown density="compact" headingLevelStart={3}>{notification.text}</Markdown>
+                      </div>
                       {notification.kind === 'planner-down' && (
                         <span className={styles.needsInputNoticeDetail}>{PLANNER_DOWN_NEXT_STEP}</span>
                       )}
-                    </span>
+                    </div>
                     <span className={styles.needsInputActions}>
                       {onReply !== undefined && (
                         <button

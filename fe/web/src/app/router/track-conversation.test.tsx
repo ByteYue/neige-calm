@@ -298,7 +298,7 @@ describe('track conversations', () => {
           track: TRACK, can_resume: false,
           cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
           overlays: [trackActivityOverlay({ attention: 'failed', items: [
-            plannerDownItem('unexpected status 403 Forbidden', 5),
+            plannerDownItem('400: The gpt-6-astra model requires a newer version of Codex.', 5),
             askItem('Merge PR #1811 now, or hold it?', 4),
           ] })],
         })
@@ -308,13 +308,13 @@ describe('track conversations', () => {
     const rows = within(notice).getAllByRole('listitem');
     expect(rows.map((row) => row.getAttribute('data-nc-notification-state'))).toEqual(['planner-down', 'ask']);
     expect(within(rows[0]).getByText('Planner stopped')).toBeTruthy();
-    expect(within(rows[0]).getByText('unexpected status 403 Forbidden')).toBeTruthy();
+    expect(within(rows[0]).getByText('400: The gpt-6-astra model requires a newer version of Codex.')).toBeTruthy();
     expect(within(rows[0]).getByText('Fix the cause, then send the Planner a message to continue.')).toBeTruthy();
     expect(within(rows[1]).getByText('Planner asks')).toBeTruthy();
     expect(within(rows[1]).getByText('Merge PR #1811 now, or hold it?')).toBeTruthy();
     expect(within(rows[1]).queryByText('Fix the cause, then send the Planner a message to continue.')).toBeNull();
     /* Each row's Reply, on a fresh mount: the Planner's composer opens focused and the aside compacts beside it. */
-    for (const [index, text] of ['unexpected status 403 Forbidden', 'Merge PR #1811 now, or hold it?'].entries()) {
+    for (const [index, text] of ['400: The gpt-6-astra model requires a newer version of Codex.', 'Merge PR #1811 now, or hold it?'].entries()) {
       if (index > 0) {
         cleanup();
         window.history.pushState({}, '', `${APP_BASEPATH}/track/w1`);

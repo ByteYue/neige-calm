@@ -312,14 +312,11 @@
     font-size: var(--text-xs);
   }
 
-  /* The kernel's words can run long; three lines here, the whole text in the Planner conversation. */
+  /* The kernel's words, as markdown. Not clamped: there is no expand pattern to reach the rest, and
+     the list itself scrolls. */
   .needsInputNoticeText {
-    display: -webkit-box;
-    overflow: hidden;
+    min-inline-size: 0;
     overflow-wrap: anywhere;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
   }
 
   .needsInputNoticeList {

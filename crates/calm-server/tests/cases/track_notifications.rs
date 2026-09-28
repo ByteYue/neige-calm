@@ -766,3 +766,14 @@ async fn closed_notify_still_advances_activity() {
         "E2 counts every successful notify, open or not"
     );
 }
+
+// The planner-down text is the kernel's readable form of the upstream body codex embeds.
+#[tokio::test]
+async fn planner_down_text_is_the_readable_error() {
+    let f = fx().await;
+    let p = codex_planner(&f).await;
+    let body = r#"{"type":"error","status":400,"error":{"message":"Upgrade Codex."}}"#;
+    turn(&f, &p, "turn-1", "failed", Some(body)).await;
+    let a = f.recompute(&p.track).await;
+    assert_eq!(planner_down(&a)[0].text, "400: Upgrade Codex.");
+}
