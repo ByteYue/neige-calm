@@ -5,8 +5,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-usage='usage: scripts/run-ci-rust-nextest.sh {github-hosted|self-hosted} [--partition KIND:N/M]'
-if [ "$#" -ne 1 ] && { [ "$#" -ne 3 ] || [ "${2:-}" != --partition ]; }; then
+usage='usage: scripts/run-ci-rust-nextest.sh {github-hosted|self-hosted} [--archive-file FILE] [--partition KIND:N/M]'
+if [ "$#" -lt 1 ]; then
   echo "$usage" >&2
   exit 2
 fi

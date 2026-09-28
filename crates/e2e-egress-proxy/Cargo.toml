@@ -24,6 +24,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "e2e-egress-proxy"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 # CONNECT parsing + splice only: no rt "full", no TLS (end-to-end TLS is opaque

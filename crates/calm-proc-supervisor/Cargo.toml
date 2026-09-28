@@ -9,14 +9,17 @@ path = "src/lib.rs"
 [[bin]]
 name = "calm-proc-supervisor"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "proc-supervisor-ready-sleeper"
 path = "tests/fixtures/ready-sleeper/main.rs"
+test = false
 
 [[bin]]
 name = "proc-supervisor-foreground-job"
 path = "tests/fixtures/foreground-job/main.rs"
+test = false
 
 [features]
 default = []
