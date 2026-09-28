@@ -66,6 +66,8 @@ mod today_launchpad;
 
 #[path = "cases/today_summary.rs"]
 mod today_summary;
+#[path = "cases/track_activity_fixture.rs"]
+mod track_activity_fixture;
 #[path = "cases/track_activity_projection.rs"]
 mod track_activity_projection;
 #[path = "cases/track_claude_permissions_policy.rs"]
