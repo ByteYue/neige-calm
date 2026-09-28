@@ -163,8 +163,8 @@ async fn failed_initial_among(siblings: &[Value], declaration: Value) -> Fx {
     }
 }
 
-/// Edit the report's CRDT authority directly, leaving the derived payload
-/// cache alone: the snapshot readers prefer the CRDT.
+/// Edit the report's CRDT directly and rewrite its payload mirror in the same
+/// UPDATE, as the persist boundary does: the snapshot readers serve the mirror.
 async fn edit_report_crdt(
     pool: &sqlx::SqlitePool,
     track_id: &str,
@@ -178,12 +178,19 @@ async fn edit_report_crdt(
             .unwrap();
     let mut doc = crate::track_report_doc::ReportDoc::from_bytes(&bytes).unwrap();
     edit(&mut doc);
-    sqlx::query("UPDATE cards SET body_crdt=?1 WHERE id=?2")
-        .bind(doc.to_bytes())
-        .bind(&card_id)
-        .execute(pool)
-        .await
-        .unwrap();
+    let (_, body) = doc.project().unwrap();
+    let blocks = serde_json::to_string(&doc.blocks_snapshot().unwrap()).unwrap();
+    sqlx::query(
+        "UPDATE cards SET body_crdt=?1,\
+         payload=json_set(payload,'$.body',?2,'$.blocks',json(?3)) WHERE id=?4",
+    )
+    .bind(doc.to_bytes())
+    .bind(body)
+    .bind(blocks)
+    .bind(&card_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// A recovered (generation 2) attempt, claimed: `check_recovery_attempt_tx` passes as-is.

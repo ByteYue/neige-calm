@@ -1419,7 +1419,8 @@ async fn task_recovery_guidance_has_no_continuation_for_a_withdrawn_user_owned_d
     let (block_id, _) = declare(&boot, declaration("b", &[])).await;
     let b = current(&boot, "b").await;
     finish(&boot, &b, false).await;
-    // The Planner may not author a user-owned block: rewrite the CRDT authority directly.
+    // The Planner may not author a user-owned block: rewrite the CRDT and its payload mirror
+    // directly, in one UPDATE as the persist boundary does.
     let mut declared = declaration("b", &[]);
     declared["declared_by"] = json!("user");
     declared["ready"] = json!(false);
@@ -1437,12 +1438,19 @@ async fn task_recovery_guidance_has_no_continuation_for_a_withdrawn_user_owned_d
         &calm_types::report_blocks::render_fence("task", &declared),
     )
     .unwrap();
-    sqlx::query("UPDATE cards SET body_crdt=?1 WHERE id=?2")
-        .bind(doc.to_bytes())
-        .bind(&card_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    let (_, body) = doc.project().unwrap();
+    let blocks = serde_json::to_string(&doc.blocks_snapshot().unwrap()).unwrap();
+    sqlx::query(
+        "UPDATE cards SET body_crdt=?1,\
+         payload=json_set(payload,'$.body',?2,'$.blocks',json(?3)) WHERE id=?4",
+    )
+    .bind(doc.to_bytes())
+    .bind(body)
+    .bind(blocks)
+    .bind(&card_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE tasks SET declared_by='user' WHERE id=?1")
         .bind(&b.id)
         .execute(&pool)

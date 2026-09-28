@@ -12,6 +12,7 @@ use crate::ids::{ActorId, TrackId};
 use crate::model::{Task, TaskStatus, Track, TrackLifecycle};
 use calm_types::report_blocks::tasks::{PLANNER_DECLARATION_AUTHOR, TaskDeclaration};
 use calm_types::task_recovery::{TASK_IN_TRACK_ROUTE, TaskAttemptOrigin, TaskRecoveryConstraint};
+use calm_types::track_report::ReportBlock;
 use sqlx::{Sqlite, Transaction};
 
 type Tx<'a> = Transaction<'a, Sqlite>;
@@ -206,8 +207,11 @@ pub(crate) async fn validate_frozen_contract_tx(tx: &mut Tx<'_>, task: &Task) ->
         return Err(conflict("frozen task context is stale"));
     }
     let constraint = claim_constraint_tx(tx, task).await?;
-    check_constraint_tx(tx, &track, &task.key, &constraint).await?;
-    Box::pin(crate::file_delivery::repair::validate_contract_tx(tx, task)).await?;
+    let blocks = check_constraint_tx(tx, &track, &task.key, &constraint).await?;
+    Box::pin(crate::file_delivery::repair::validate_contract_against_tx(
+        tx, task, &blocks,
+    ))
+    .await?;
     Ok(())
 }
 
@@ -259,10 +263,14 @@ async fn automation_policy_tx(tx: &mut Tx<'_>, track: &Track) -> Result<Option<S
     )
 }
 
-async fn declaration_tx(tx: &mut Tx<'_>, track: &Track, key: &str) -> Admission<TaskDeclaration> {
-    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, track.id.as_str()).await?;
+async fn declaration_tx(
+    tx: &mut Tx<'_>,
+    track: &Track,
+    key: &str,
+    blocks: &[ReportBlock],
+) -> Admission<TaskDeclaration> {
     let (declarations, diagnostics) =
-        calm_types::report_blocks::tasks::project_task_declarations(&blocks);
+        calm_types::report_blocks::tasks::project_task_declarations(blocks);
     let mut matching = declarations.into_iter().filter(|decl| decl.key == key);
     let declaration = matching.next().ok_or_else(|| {
         refuse(
@@ -324,12 +332,14 @@ async fn declaration_tx(tx: &mut Tx<'_>, track: &Track, key: &str) -> Admission<
     Ok(declaration)
 }
 
+/// Returns the `track` report snapshot it read, so a caller validating more of the same
+/// contract in this transaction does not read it again.
 pub(super) async fn check_constraint_tx(
     tx: &mut Tx<'_>,
     track: &Track,
     key: &str,
     constraint: &TaskRecoveryConstraint,
-) -> Admission<()> {
+) -> Admission<Vec<ReportBlock>> {
     constraint.validate(track.id.as_str()).map_err(|reason| {
         refuse(
             RefusalSite::InnerConstraintShapeInvalid,
@@ -338,7 +348,8 @@ pub(super) async fn check_constraint_tx(
             reason,
         )
     })?;
-    let declaration = declaration_tx(tx, track, key).await?;
+    let (_, blocks) = crate::track_report::report_blocks_snapshot_tx(tx, track.id.as_str()).await?;
+    let declaration = declaration_tx(tx, track, key, &blocks).await?;
     let TaskRecoveryConstraint::V1 {
         refs,
         spawn,
@@ -399,9 +410,16 @@ pub(super) async fn check_constraint_tx(
                 ),
             ));
         }
-        let (_, blocks) =
-            crate::track_report::report_blocks_snapshot_tx(tx, frozen.track_id.as_str()).await?;
-        let block = blocks
+        let foreign;
+        let frozen_blocks = if frozen.track_id == track.id {
+            &blocks
+        } else {
+            foreign = crate::track_report::report_blocks_snapshot_tx(tx, frozen.track_id.as_str())
+                .await?
+                .1;
+            &foreign
+        };
+        let block = frozen_blocks
             .iter()
             .find(|block| block.id == frozen.block_id)
             .ok_or_else(|| {
@@ -426,7 +444,7 @@ pub(super) async fn check_constraint_tx(
             ));
         }
     }
-    Ok(())
+    Ok(blocks)
 }
 
 /// Prepared isolated executions require their retained namespace stop proof; any other

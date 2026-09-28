@@ -227,12 +227,20 @@ async fn dispatch_invalid_current_declaration_never_claims_contract_match() {
         &calm_types::report_blocks::render_fence("task", &invalid),
     )
     .unwrap();
-    sqlx::query("UPDATE cards SET body_crdt=?1 WHERE id=?2")
-        .bind(doc.to_bytes())
-        .bind(b.report_card_id.as_str())
-        .execute(&b.repo.sqlite_pool().unwrap())
-        .await
-        .unwrap();
+    // The CRDT and its payload mirror change in one UPDATE, as the persist boundary writes them.
+    let (_, body) = doc.project().unwrap();
+    let blocks = serde_json::to_string(&doc.blocks_snapshot().unwrap()).unwrap();
+    sqlx::query(
+        "UPDATE cards SET body_crdt=?1,\
+         payload=json_set(payload,'$.body',?2,'$.blocks',json(?3)) WHERE id=?4",
+    )
+    .bind(doc.to_bytes())
+    .bind(body)
+    .bind(blocks)
+    .bind(b.report_card_id.as_str())
+    .execute(&b.repo.sqlite_pool().unwrap())
+    .await
+    .unwrap();
     let saved = counts(&b).await;
     let replay = dispatch(&b, args()).await.unwrap();
     assert_eq!(replay["current"]["contract_status"], "unavailable");
