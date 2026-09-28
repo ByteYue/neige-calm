@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-# Drift detector for the append seam: a text scan over `events.rs`, `decision_gate.rs` and one repository census. It catches somebody widening the seam without knowing it exists; it does not catch a workaround and proves nothing about what `rustc` compiles (the compile-time half is the `Authorized` capability, the escape probe and the trybuild test).
+# Drift detector for the append seam: a text scan over `events.rs`, `decision_gate.rs` and one repository census. It catches somebody widening the seam without knowing it exists; it does not catch a workaround and proves nothing about what `rustc` compiles (the compile-time half is the `Authorized` capability and the escape probe).
 # Known gaps: proc-macros/`build.rs`; anything needing a lexer (only whole-line `//` comments are stripped, raw strings must stay legal); S1 is a census, not a classifier; E5 compares binding NAMES, not transactions.
 
 # Every pinned list is a `sort`ed blob compared as text; a UTF-8 locale ignores `|` while C compares it as a byte, which made this gate RED on CI on the unmodified file.

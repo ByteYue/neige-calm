@@ -77,6 +77,18 @@ pub struct StagingFd(OwnedFd);
 #[derive(Debug)]
 pub struct BoundFd(OwnedFd);
 
+/// Compile-time fence: `StagingFd: From<BoundFd>` would let a bound directory reach `unlink_staged`. If that impl
+/// exists, both blanket impls below apply, the `_` cannot be inferred, and the crate fails to build.
+const _: fn() = || {
+    trait AmbiguousIfFromBound<A> {
+        fn check() {}
+    }
+    impl<T> AmbiguousIfFromBound<()> for T {}
+    struct FromBound;
+    impl<T: From<BoundFd>> AmbiguousIfFromBound<FromBound> for T {}
+    let _ = <StagingFd as AmbiguousIfFromBound<_>>::check;
+};
+
 #[derive(Debug)]
 pub struct CardDirs {
     staging: StagingFd,

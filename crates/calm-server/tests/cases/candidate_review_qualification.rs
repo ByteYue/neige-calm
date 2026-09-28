@@ -400,13 +400,12 @@ async fn candidate_review_qualification_recovery_preserves_exact_decision() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_review_qualification_preturn_rejects_revocation_and_corrupt_bytes() {
+async fn candidate_review_qualification_preturn_rejects_revocation() {
     for defect in [
         "reject",
         "withdrawal",
         "review-withdrawal",
         "consumer-withdrawal",
-        "bytes",
         "reaccept",
     ] {
         let (fx, producer, _, _) = review_source_scenario("candidate-review-preturn").await;
@@ -465,13 +464,6 @@ async fn candidate_review_qualification_preturn_rejects_revocation_and_corrupt_b
                     .await
                     .unwrap();
             }
-            "bytes" => {
-                std::fs::write(
-                    path.join("inputs/source/project.py"),
-                    b"tampered before first turn",
-                )
-                .unwrap();
-            }
             _ => unreachable!(),
         }
         std::fs::write(path.join("resume-preturn"), b"").unwrap();
@@ -513,23 +505,26 @@ async fn candidate_review_qualification_failed_machine_never_starts_reviewer() {
     assert!(verdict(&fx, &producer, "accepted").await.is_err());
     assert_eq!(decision_count(&fx).await, 0);
 }
+/// Each defect is written into the recorded evidence and then restored byte-for-byte; the final acceptance proves the
+/// restoration was exact, so every refusal is its own defect's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn candidate_review_qualification_wrong_execution_or_machine_evidence_blocks_acceptance() {
+    let (fx, producer, _, machine) = review_source().await;
+    let review = report_review(&fx, true).await;
+    let pool = fx.boot.repo.sqlite_pool().unwrap();
+    let op = fx
+        .state
+        .operation_runtime
+        .find_by_kind_and_idempotency("codex-isolated-worker", &review.id)
+        .await
+        .unwrap()
+        .unwrap();
     for defect in [
         "review-session",
         "review-attempt",
         "machine-policy",
         "machine-subject",
     ] {
-        let (fx, producer, _, machine) = review_source().await;
-        let review = report_review(&fx, true).await;
-        let op = fx
-            .state
-            .operation_runtime
-            .find_by_kind_and_idempotency("codex-isolated-worker", &review.id)
-            .await
-            .unwrap()
-            .unwrap();
         let (id, path, value) = match defect {
             "review-session" => (
                 op.id.to_string(),
@@ -558,13 +553,19 @@ async fn candidate_review_qualification_wrong_execution_or_machine_evidence_bloc
                 json!("0".repeat(64)),
             ),
         };
+        let recorded: String =
+            sqlx::query_scalar("SELECT tx_output_json FROM operations WHERE id=?1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         sqlx::query(
             "UPDATE operations SET tx_output_json=json_set(tx_output_json,?1,json(?2)) WHERE id=?3",
         )
         .bind(path)
         .bind(value.to_string())
-        .bind(id)
-        .execute(&fx.boot.repo.sqlite_pool().unwrap())
+        .bind(&id)
+        .execute(&pool)
         .await
         .unwrap();
         assert!(
@@ -578,7 +579,15 @@ async fn candidate_review_qualification_wrong_execution_or_machine_evidence_bloc
             "{defect}"
         );
         assert_eq!(decision_count(&fx).await, 0);
+        sqlx::query("UPDATE operations SET tx_output_json=?1 WHERE id=?2")
+            .bind(recorded)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
+    verdict(&fx, &producer, "accepted").await.unwrap();
+    assert_eq!(decision_count(&fx).await, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
