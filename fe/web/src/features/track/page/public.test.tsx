@@ -8,7 +8,7 @@ import { NEUTRAL_ACTIVITY } from '../../../../../core/domain/track.ts';
 import { deriveTrackPageView } from '../../../../../core/view/track-page.ts';
 import { useState } from '../../../ui/state/public.ts';
 import { Dialog } from '../../../ui/dialog/public.tsx';
-import { PLANNER_DOWN_NEXT_STEP, TrackPage, type TrackInputNotification, type TrackPageProps } from './public.tsx';
+import { TrackPage, type TrackInputNotification, type TrackPageProps } from './public.tsx';
 import { card, renderPage, track } from './test-fixtures.tsx';
 
 afterEach(cleanup);
@@ -132,7 +132,7 @@ describe('TrackPage header', () => {
     expect(onCloseBoard).toHaveBeenCalledOnce();
   });
 
-  it('turns a Planner ask into a bottom-right notification whose one action is Reply', async () => {
+  it('turns a Planner ask into a bottom-right notification whose whole row answers it', async () => {
     const onReply = vi.fn();
     const now = 1_790_000_000_000;
     renderPage({
@@ -145,11 +145,14 @@ describe('TrackPage header', () => {
     const notice = screen.getByRole('region', { name: 'Notifications' });
     expect(screen.getByRole('status', { name: 'Input notifications' }).textContent)
       .toBe('1 notification needs your attention.');
-    expect(notice.textContent).toContain('Notifications');
-    expect(notice.textContent).toContain('1 waiting on you');
+    expect(within(notice).getByText('Waiting on you').tagName).toBe('STRONG');
+    expect(within(notice).getByText('Waiting on you').nextElementSibling?.textContent).toBe('1');
     const row = within(notice).getByRole('listitem');
     expect(row.getAttribute('data-nc-notification-state')).toBe('ask');
-    expect(row.textContent).toBe('Planner asks3mMerge PR #1811 now, or hold it?Reply');
+    /* Meta line (label, time, the hover hint), then the body; no text buttons. */
+    expect(row.textContent).toBe('Needs your answer3mAnswer →Merge PR #1811 now, or hold it?');
+    expect(within(row).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
+      .toEqual(['Answer the Planner: Merge PR #1811 now, or hold it?']);
     expect(screen.queryByText('Needs input')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Collapse notifications' }));
     expect(notice.getAttribute('data-nc-notification-mode')).toBe('compact');
@@ -157,21 +160,22 @@ describe('TrackPage header', () => {
     expect(notice.textContent).toContain('1');
     await userEvent.click(screen.getByRole('button', { name: 'Open 1 notification' }));
     expect(notice.getAttribute('data-nc-notification-mode')).toBe('expanded');
-    await userEvent.click(screen.getByRole('button', { name: 'Reply to the Planner: Merge PR #1811 now, or hold it?' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Answer the Planner: Merge PR #1811 now, or hold it?' }));
     expect(onReply).toHaveBeenCalledOnce();
   });
 
-  it('names a Reply by the first 80 characters of its text', () => {
+  it('names a row by the first 80 characters of its text', () => {
     const long = `${'a'.repeat(80)}${'b'.repeat(40)}`;
     renderPage({
       inputNotifications: [{ key: 'planner_down:9', kind: 'planner-down', text: long, atMs: 1 }],
       onReply: vi.fn(),
     });
-    expect(screen.getByRole('button', { name: `Reply to the Planner: ${'a'.repeat(80)}…` })).toBeTruthy();
+    expect(screen.getByRole('button', { name: `Open the Planner: ${'a'.repeat(80)}…` })).toBeTruthy();
     expect(screen.getByText(long)).toBeTruthy();
   });
 
-  it('renders an item as markdown, and a planner-down row as its readable reason and the fixed sentence', () => {
+  it('renders an item as markdown under a plain-words label, and nests no control inside another', async () => {
+    const onDismiss = vi.fn(() => Promise.resolve());
     renderPage({
       inputNotifications: [
         { key: 'ask:lifecycle:7', kind: 'ask', atMs: 2, text: 'Merge **PR #1811** now?\n\n- hold it for the release\n'
@@ -180,6 +184,7 @@ describe('TrackPage header', () => {
           text: "400: The 'gpt-6-astra' model requires a newer version of Codex." },
       ],
       onReply: vi.fn(),
+      onDismiss,
     });
     const [ask, down] = screen.getByRole('region', { name: 'Notifications' })
       .querySelectorAll<HTMLElement>('[data-nc-notification-state]');
@@ -190,7 +195,13 @@ describe('TrackPage header', () => {
     expect(within(ask).getByRole('link', { name: 'the PR' }).getAttribute('href')).toBe('https://example.com/pr/1811');
     expect(down.getAttribute('data-nc-notification-state')).toBe('planner-down');
     expect(within(down).getByText("400: The 'gpt-6-astra' model requires a newer version of Codex.")).toBeTruthy();
-    expect(within(down).getByText(PLANNER_DOWN_NEXT_STEP)).toBeTruthy();
+    expect(within(ask).getByText('Needs your answer')).toBeTruthy();
+    expect(within(down).getByText("Planner can't continue")).toBeTruthy();
+    expect(down.textContent).not.toContain('Fix the cause');
+    /* The row button is empty and stretched over the row; the × and the link are its siblings, not its children. */
+    expect(ask.querySelectorAll('button button, button a, a button')).toHaveLength(0);
+    await userEvent.click(within(down).getByRole('button', { name: 'Dismiss' }));
+    expect(onDismiss).toHaveBeenCalledWith('planner_down:9');
   });
 
   it('reopens a collapsed center when another notification arrives', async () => {
@@ -228,7 +239,7 @@ describe('TrackPage header', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Add notification' }));
     expect(screen.getByRole('region', { name: 'Notifications' })
       .getAttribute('data-nc-notification-mode')).toBe('expanded');
-    expect(screen.getByText('2 waiting on you')).toBeTruthy();
+    expect(screen.getByText('Waiting on you').nextElementSibling?.textContent).toBe('2');
     expect(screen.getByRole('status', { name: 'Input notifications' }).textContent)
       .toBe('2 notifications need your attention.');
   });

@@ -640,8 +640,9 @@
     `trackActivityState` / `isWorking` / `needsUserAttention` / `hasFailed`），不得从 lifecycle、
     会话状态或任务 token 自行推导 attention / failed / working；
     声明例外：打开抽屉那一行的本地 in-flight spinner 与 `phase==='wedged'` 的本地 `failed`（设计 §5.3）。
-    Track 页的 Notifications 侧条每项一行，显示内核给的原话（`items[].text`，以 chat 回复的同一 markdown 渲染器渲染）；`Reply`
-    打开 Planner 输入框（ask 与 planner down 同一动作）；`Dismiss` 把该项的 `key` 发给
+    Track 页的 Notifications 侧条每项一行：注释行（只有色点带颜色的平实标签与时间）在上，正文是内核给的原话
+    （`items[].text`，以 chat 回复的同一 markdown 渲染器渲染；planner down 截 3 行）；点整行即回复，
+    打开 Planner 输入框（ask 与 planner down 同一动作）；行右上角的 × 即 Dismiss，把该项的 `key` 发给
     `POST /api/tracks/{id}/activity/dismissals`，行在 overlay 更新后才消失（不做乐观删除），
     同一来源再次发生是新 key、重新出现；Today 页头的第二个数是 `isWorking` 的计数，「Open」分组才是 lifecycle 阶段。
     `unread` 只来自按数据库身份（`DATABASE_ID_KEY`）作用域的回执与 `activityAt` / `lastTurnCompletedAt`
@@ -652,7 +653,7 @@
     当「在动」、用 lifecycle ∨ `anyCardNeedsInput` 当「等你」，与内核从持久行算出的结论不一致；判定收敛到内核一处
     （`track_activity.rs`），FE 只解码 overlay。第二套推导必然再度分叉。
   source: fe/core/domain/activity.ts:16-52; fe/core/domain/track.ts:145-190,506-526;
-    fe/web/src/app/router/public.tsx:1866-1878,2373-2378; fe/web/src/features/track/page/public.tsx:7,45-65,86-89,557-602,633;
+    fe/web/src/app/router/public.tsx:1866-1878,2373-2378; fe/web/src/features/track/page/public.tsx:7,45-68,90-93,557-605,636;
     fe/web/src/app/providers/queries.ts:904-909,943-950;
     fe/web/src/features/today/public.tsx:137-138,256-257;
     fe/web/src/app/providers/ui-preferences.tsx:69-105; fe/web/src/ui/activity-indicator/activity-indicator.module.css:7-8;
@@ -660,14 +661,15 @@
     fe/web/src/systems/cards/builtins/terminal-card.tsx:12-87;
     fe/web/src/app/shell/mobile-tracks.tsx:73-89; fe/web/src/app/shell/public.tsx:353
   authoritative_test: fe/core/domain/activity.test.ts:10-40; fe/core/domain/track.test.ts:183-219,222-284;
-    fe/web/src/app/router/track-conversation.test.tsx:295-388; fe/web/src/features/today/public.test.tsx:46-65;
+    fe/web/src/app/router/track-conversation.test.tsx:295-389; fe/web/src/features/today/public.test.tsx:46-65;
     fe/web/src/app/router/today-activity.test.tsx:82-88;
     fe/web/src/features/track/row/public.test.tsx:124-176; fe/web/src/app/providers/ui-preferences.test.tsx:112-157;
     fe/web/src/app/shell/mobile-tracks.test.tsx:95-146; fe/web/src/app/shell/responsive.contract.test.tsx:104-123;
     fe/web/src/ui/activity-indicator/activity-indicator.browser.test.tsx:56-77;
-    fe/web/src/features/chat/list/public.test.tsx:32-88; fe/web/src/app/router/track-conversation.test.tsx:1909-1994;
+    fe/web/src/features/chat/list/public.test.tsx:32-88; fe/web/src/app/router/track-conversation.test.tsx:1910-1995;
     fe/web/src/app/router/today-conversation.test.tsx:188-211; fe/web/src/features/chat/thread/public.test.tsx:534-599;
-    fe/web/src/features/track/page/public.test.tsx:135-194,271-341; fe/web/src/features/track/page/mobile-projection.test.tsx:255-283;
+    fe/web/src/features/track/page/public.test.tsx:135-205,282-352;
+    fe/web/src/features/track/page/header-lifecycle.browser.test.tsx:82-176; fe/web/src/features/track/page/mobile-projection.test.tsx:255-283;
     fe/core/view/track-page.test.ts:239-266; fe/web/src/app/router/track-cards-panel.test.tsx:391-416;
     fe/web/src/systems/cards/builtins/terminal-lifecycle.test.tsx:95-111;
     fe/web/src/systems/cards/builtins/terminal-head-activity.test.tsx:48-75

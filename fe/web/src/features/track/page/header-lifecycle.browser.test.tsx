@@ -79,22 +79,100 @@ describe('the track lifecycle status in the page header', () => {
     expect(paintedRgb(getComputedStyle(actions).color)).toEqual(paintedRgb(text2));
   });
 
-  it('floats a Planner ask at the viewport corner with a direct action', async () => {
+  it('floats a Planner ask at the viewport corner; the whole row answers it and its × dismisses it', async () => {
     await browserPage.viewport(1200, 800);
     const onReply = vi.fn();
-    renderPage({ inputNotifications: plannerNotification, onReply });
+    const onDismiss = vi.fn(() => Promise.resolve());
+    renderPage({
+      inputNotifications: [{
+        key: 'ask:lifecycle:1', kind: 'ask', atMs: Date.now(),
+        text: 'Merge PR #1811 now? See [the PR](https://example.com/pr/1811).',
+      }],
+      onReply,
+      onDismiss,
+    });
 
     const notice = document.querySelector<HTMLElement>('[data-nc-needs-input-notice]')!;
-    const review = document.querySelector<HTMLButtonElement>('[aria-label^="Reply to the Planner"]')!;
     const noticeBox = notice.getBoundingClientRect();
-    expect(review.innerText).toBe('Reply');
-    expect(review.getBoundingClientRect().height).toBeGreaterThanOrEqual(32);
     expect(window.innerWidth - noticeBox.right).toBeGreaterThanOrEqual(20);
     expect(window.innerWidth - noticeBox.right).toBeLessThanOrEqual(28);
     expect(window.innerHeight - noticeBox.bottom).toBeGreaterThanOrEqual(20);
     expect(window.innerHeight - noticeBox.bottom).toBeLessThanOrEqual(28);
-    await userEvent.click(review);
+
+    const row = notice.querySelector<HTMLElement>('[data-nc-notification-state="ask"]')!;
+    const open = row.querySelector<HTMLButtonElement>('[aria-label^="Answer the Planner: "]')!;
+    const dismiss = row.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!;
+    const link = row.querySelector<HTMLAnchorElement>('a')!;
+    const time = row.querySelector<HTMLElement>('time')!;
+    const hint = [...row.querySelectorAll<HTMLElement>('[aria-hidden="true"]')].find((el) => el.textContent === 'Answer →')!;
+    /* The row button covers the whole row inside its divider; the body text is under it, the link and
+       the × are above it. */
+    const rowBox = row.getBoundingClientRect();
+    const openBox = open.getBoundingClientRect();
+    const inner = [rowBox.left + row.clientLeft, rowBox.top + row.clientTop, row.clientWidth, row.clientHeight];
+    [openBox.left, openBox.top, openBox.width, openBox.height]
+      .forEach((edge, i) => expect(Math.abs(edge - inner[i])).toBeLessThan(1));
+    const centre = (el: Element) => {
+      const box = el.getBoundingClientRect();
+      return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    };
+    expect(centre(row.querySelector(':scope > div')!.firstElementChild!)).toBe(open);
+    expect(centre(link)).toBe(link);
+    expect(centre(dismiss)?.closest('button')).toBe(dismiss);
+
+    /* At rest: the time shows, the hint and the × do not. Hovering swaps them. */
+    expect(getComputedStyle(time).visibility).toBe('visible');
+    expect(getComputedStyle(hint).visibility).toBe('hidden');
+    expect(getComputedStyle(dismiss).opacity).toBe('0');
+    await userEvent.hover(open);
+    expect(getComputedStyle(time).visibility).toBe('hidden');
+    expect(getComputedStyle(hint).visibility).toBe('visible');
+    expect(getComputedStyle(dismiss).opacity).toBe('1');
+    expect(getComputedStyle(open).cursor).toBe('pointer');
+
+    await userEvent.click(open);
     expect(onReply).toHaveBeenCalledOnce();
+    await userEvent.click(dismiss);
+    expect(onDismiss).toHaveBeenCalledWith('ask:lifecycle:1');
+    expect(onReply).toHaveBeenCalledOnce();
+  });
+
+  it('clamps a planner-down reason to three lines and never an ask', async () => {
+    await browserPage.viewport(1200, 800);
+    const long = Array.from({ length: 12 }, (_, i) => `Line ${i} of a long upstream error body.`).join(' ');
+    renderPage({
+      inputNotifications: [
+        { key: 'ask:notify:1', kind: 'ask', atMs: 2, text: long },
+        { key: 'planner_down:2', kind: 'planner-down', atMs: 1, text: long },
+      ],
+      onReply: vi.fn(),
+    });
+    /* A row's body is its one direct `div` child. */
+    const lines = (body: HTMLElement) => body.getBoundingClientRect().height / parseFloat(getComputedStyle(body).lineHeight);
+    const down = document.querySelector<HTMLElement>('[data-nc-notification-state="planner-down"] > div')!;
+    const ask = document.querySelector<HTMLElement>('[data-nc-notification-state="ask"] > div')!;
+    expect(lines(down)).toBeGreaterThan(2.5);
+    expect(lines(down)).toBeLessThanOrEqual(3.05);
+    expect(lines(ask)).toBeGreaterThan(3.5);
+  });
+
+  it('keeps three type steps: the title largest, the body at body size, the meta line smallest', async () => {
+    await browserPage.viewport(1200, 800);
+    renderPage({
+      inputNotifications: [{ key: 'ask:notify:1', kind: 'ask', atMs: 1, text: '# Heading\n\nRun `deploy.sh` now?' }],
+      onReply: vi.fn(),
+    });
+    const notice = document.querySelector<HTMLElement>('[data-nc-needs-input-notice]')!;
+    const row = notice.querySelector<HTMLElement>('[data-nc-notification-state]')!;
+    const size = (el: Element) => getComputedStyle(el).fontSize;
+    const tokens = getComputedStyle(document.documentElement);
+    const token = (name: string) => tokens.getPropertyValue(name).trim();
+    expect(size([...notice.querySelectorAll('strong')].find((el) => el.textContent === 'Waiting on you')!)).toBe(token('--text-md'));
+    expect(size(row.querySelector('h3')!)).toBe(token('--text-base'));
+    expect(getComputedStyle(row.querySelector('h3')!).fontWeight).toBe(token('--weight-semibold'));
+    expect(size(row.querySelector('code')!)).toBe(token('--text-xs'));
+    expect(size(row.querySelector('time')!)).toBe(token('--text-xs'));
+    expect(size(row.querySelector(':scope > div')!.querySelector('h3')!.nextElementSibling!)).toBe(token('--text-base'));
   });
 
   it('compacts an input notification beside an open conversation drawer', async () => {

@@ -292,14 +292,14 @@ describe('track conversations', () => {
     await screen.findByRole('button', { name: 'Conversation Assistant' });
   });
 
-  it('both notification kinds show the kernel\'s words and Reply opens the Planner composer', async () => {
+  it('both notification kinds show the kernel\'s words and a row click opens the Planner composer', async () => {
     const mount = () => setup((request) => request.path === '/api/tracks/w1'
       ? ok({
           track: TRACK, can_resume: false,
           cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
           overlays: [trackActivityOverlay({ attention: 'failed', items: [
             plannerDownItem('400: The gpt-6-astra model requires a newer version of Codex.', 5),
-            askItem('Merge PR #1811 now, or hold it?', 4),
+            askItem('Merge **PR #1811** now, or hold it?', 4),
           ] })],
         })
       : undefined);
@@ -307,20 +307,21 @@ describe('track conversations', () => {
     const notice = await screen.findByRole('region', { name: 'Notifications' });
     const rows = within(notice).getAllByRole('listitem');
     expect(rows.map((row) => row.getAttribute('data-nc-notification-state'))).toEqual(['planner-down', 'ask']);
-    expect(within(rows[0]).getByText('Planner stopped')).toBeTruthy();
+    expect(within(rows[0]).getByText("Planner can't continue")).toBeTruthy();
     expect(within(rows[0]).getByText('400: The gpt-6-astra model requires a newer version of Codex.')).toBeTruthy();
-    expect(within(rows[0]).getByText('Fix the cause, then send the Planner a message to continue.')).toBeTruthy();
-    expect(within(rows[1]).getByText('Planner asks')).toBeTruthy();
-    expect(within(rows[1]).getByText('Merge PR #1811 now, or hold it?')).toBeTruthy();
-    expect(within(rows[1]).queryByText('Fix the cause, then send the Planner a message to continue.')).toBeNull();
-    /* Each row's Reply, on a fresh mount: the Planner's composer opens focused and the aside compacts beside it. */
-    for (const [index, text] of ['400: The gpt-6-astra model requires a newer version of Codex.', 'Merge PR #1811 now, or hold it?'].entries()) {
+    expect(within(rows[1]).getByText('Needs your answer')).toBeTruthy();
+    expect(within(rows[1]).getByText('PR #1811').tagName).toBe('STRONG');
+    expect(within(rows[1]).getByText('PR #1811').parentElement?.textContent).toBe('Merge PR #1811 now, or hold it?');
+    /* Each row's click, on a fresh mount: the Planner's composer opens focused and the aside compacts beside it. */
+    for (const [index, [state, name]] of ([['planner-down', /^Open the Planner: /], ['ask', /^Answer the Planner: /]] as const).entries()) {
       if (index > 0) {
         cleanup();
         window.history.pushState({}, '', `${APP_BASEPATH}/track/w1`);
         mount();
       }
-      fireEvent.click(await screen.findByRole('button', { name: `Reply to the Planner: ${text}` }));
+      const row = within(await screen.findByRole('region', { name: 'Notifications' })).getAllByRole('listitem')
+        .find((candidate) => candidate.getAttribute('data-nc-notification-state') === state);
+      fireEvent.click(within(row!).getByRole('button', { name }));
       expect(await screen.findByRole('complementary', { name: 'Planner chat' })).toBeTruthy();
       await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' })).toBe(document.activeElement));
       expect(screen.getByRole('region', { name: 'Notifications' })
@@ -350,7 +351,7 @@ describe('track conversations', () => {
     });
     const askRow = within(await screen.findByRole('region', { name: 'Notifications' })).getAllByRole('listitem')
       .find((row) => row.getAttribute('data-nc-notification-state') === 'ask');
-    fireEvent.click(within(askRow!).getByRole('button', { name: /^Dismiss: Planner asks: / }));
+    fireEvent.click(within(askRow!).getByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(dismissed).toBe(true));
     expect(requests.filter((request) => request.path === '/api/tracks/w1/activity/dismissals'))
       .toEqual([expect.objectContaining({ method: 'POST', body: { key: 'ask:lifecycle:4' } })]);
@@ -382,7 +383,7 @@ describe('track conversations', () => {
       : undefined);
 
     const notice = await screen.findByRole('region', { name: 'Notifications' });
-    expect(within(notice).getByText('2 waiting on you')).toBeTruthy();
+    expect(within(notice).getByText('Waiting on you').nextElementSibling?.textContent).toBe('2');
     fireEvent.click(within(notice).getByRole('button', { name: 'Collapse notifications' }));
     expect(await screen.findByRole('button', { name: 'Open 2 notifications' })).toBeTruthy();
   });

@@ -52,12 +52,16 @@ export type TrackInputNotification = Readonly<{
   atMs: number;
 }>;
 
-/** What a planner-down row adds after the reason: sending the Planner a message is what makes it continue. */
-export const PLANNER_DOWN_NEXT_STEP = 'Fix the cause, then send the Planner a message to continue.';
+/** A row's meta line: what kind of thing is waiting, in plain words; only its dot carries colour. */
+const NOTIFICATION_LABEL = Object.freeze({ ask: 'Needs your answer', 'planner-down': "Planner can't continue" } as const);
 
-const NOTIFICATION_LABEL = Object.freeze({ ask: 'Planner asks', 'planner-down': 'Planner stopped' } as const);
+/** What clicking a row does, as its hover hint and as the start of its accessible name. */
+const NOTIFICATION_ACTION = Object.freeze({
+  ask: Object.freeze({ hint: 'Answer →', name: 'Answer the Planner' }),
+  'planner-down': Object.freeze({ hint: 'Open Planner →', name: 'Open the Planner' }),
+} as const);
 
-/** The start of a row's text for its Reply button's name; the whole text is in the Planner conversation. */
+/** The start of a row's text for its accessible name; the whole text is in the Planner conversation. */
 function notificationGist(text: string): string {
   const chars = [...text];
   return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : text;
@@ -83,7 +87,7 @@ export type TrackPageProps = Readonly<{
   /** Everything the kernel says is addressed to the user on this track, projected by
    *  the route from the activity overlay's items (`attentionItems`). */
   inputNotifications?: readonly TrackInputNotification[];
-  /** Reply: opens the Planner's composer. The main action of every row, an ask and planner down alike. */
+  /** Opens the Planner's composer: what a click anywhere on a row does, an ask and planner down alike. */
   onReply?: () => void;
   /** Dismiss the row's item by its kernel key. The row stays until the overlay no longer lists it. */
   onDismiss?: (key: string) => Promise<void>;
@@ -538,13 +542,9 @@ export function TrackPage({
           {noticePanelOpen ? (
             <>
               <span className={styles.needsInputNoticeHeader}>
-                <span className={styles.needsInputNoticeIcon}><Icon name="notification" /></span>
-                <span className={styles.needsInputNoticeCopy}>
-                  <strong className={styles.needsInputNoticeTitle}>Notifications</strong>
-                  <span className={styles.needsInputNoticeDetail}>
-                    {inputNotifications.length} waiting on you
-                  </span>
-                </span>
+                <span className={styles.needsInputNoticeIcon}><Icon name="notification" size="sm" /></span>
+                <strong className={styles.needsInputNoticeTitle}>Waiting on you</strong>
+                <span className={styles.needsInputCount}>{inputNotifications.length}</span>
                 <button
                   type="button"
                   className={styles.needsInputCollapse}
@@ -557,47 +557,50 @@ export function TrackPage({
                 {inputNotifications.map((notification) => (
                   <li
                     key={notification.key}
-                    className={styles.needsInputNoticeItem}
+                    className={`${styles.notice} ${onReply === undefined ? '' : styles.noticeActionable}`}
                     data-nc-notification-state={notification.kind}
                   >
-                    <div className={styles.needsInputNoticeCopy}>
-                      <span className={styles.needsInputNoticeMeta}>
-                        <strong className={`${styles.needsInputNoticeSource} ${notification.kind === 'ask'
-                          ? styles.needsInputNoticeAsk : styles.needsInputNoticeDown}`}
-                        >{NOTIFICATION_LABEL[notification.kind]}</strong>
-                        <time className={styles.needsInputNoticeTime} dateTime={new Date(notification.atMs).toISOString()}>
+                    {/* The whole row is the reply: a button stretched over it, so nothing interactive nests
+                        inside another; the × and the body's links sit above it. */}
+                    {onReply !== undefined && (
+                      <button
+                        type="button"
+                        className={styles.noticeOpen}
+                        aria-label={`${NOTIFICATION_ACTION[notification.kind].name}: ${notificationGist(notification.text)}`}
+                        onClick={onReply}
+                      />
+                    )}
+                    <span className={styles.noticeMeta}>
+                      <span
+                        className={`${styles.noticeDot} ${notification.kind === 'ask' ? styles.noticeDotAsk : styles.noticeDotDown}`}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.noticeLabel}>{NOTIFICATION_LABEL[notification.kind]}</span>
+                      <span className={styles.noticeWhen}>
+                        <time className={styles.noticeTime} dateTime={new Date(notification.atMs).toISOString()}>
                           {relativeTime(notification.atMs, nowMs ?? Date.now())}
                         </time>
+                        {onReply !== undefined && (
+                          <span className={styles.noticeHint} aria-hidden="true">{NOTIFICATION_ACTION[notification.kind].hint}</span>
+                        )}
                       </span>
-                      {/* The kernel's words are markdown, rendered as the chat renders a reply. */}
-                      <div className={`${styles.needsInputNoticeDetail} ${styles.needsInputNoticeText}`}>
-                        <Markdown density="compact" headingLevelStart={3}>{notification.text}</Markdown>
-                      </div>
-                      {notification.kind === 'planner-down' && (
-                        <span className={styles.needsInputNoticeDetail}>{PLANNER_DOWN_NEXT_STEP}</span>
-                      )}
-                    </div>
-                    <span className={styles.needsInputActions}>
-                      {onReply !== undefined && (
-                        <button
-                          type="button"
-                          className={styles.needsInputAction}
-                          /* The text is part of the name: every row's button says Reply, and two buttons named alike are one button to a reader who cannot see the row. */
-                          aria-label={`Reply to the Planner: ${notificationGist(notification.text)}`}
-                          onClick={onReply}
-                        >Reply</button>
-                      )}
-                      {onDismiss !== undefined && (
-                        <button
-                          type="button"
-                          className={styles.needsInputDismiss}
-                          aria-label={`Dismiss: ${NOTIFICATION_LABEL[notification.kind]}: ${notificationGist(notification.text)}`}
-                          onClick={() => {
-                            void dismissFeedback.run(onDismiss(notification.key), 'Could not dismiss this notification.');
-                          }}
-                        >Dismiss</button>
-                      )}
                     </span>
+                    {/* The kernel's words are markdown, rendered as the chat renders a reply. An ask is read whole;
+                        a failure is clamped, its full text is in the Planner conversation. */}
+                    <div className={`${styles.noticeBody} ${notification.kind === 'planner-down' ? styles.noticeBodyClamped : ''}`}>
+                      <Markdown density="compact" headingLevelStart={3}>{notification.text}</Markdown>
+                    </div>
+                    {onDismiss !== undefined && (
+                      <button
+                        type="button"
+                        className={styles.noticeDismiss}
+                        aria-label="Dismiss"
+                        title="Dismiss"
+                        onClick={() => {
+                          void dismissFeedback.run(onDismiss(notification.key), 'Could not dismiss this notification.');
+                        }}
+                      ><Icon name="close" size="sm" /></button>
+                    )}
                   </li>
                 ))}
               </ul>
