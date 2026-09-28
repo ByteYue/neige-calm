@@ -16,8 +16,7 @@ use calm_server::model::{CardRole, TrackLifecycle, now_ms};
 use calm_server::session_projection_repo::{WorkerSessionKind, WorkerSessionState};
 use calm_server::terminal_renderer::TerminalRendererRegistry;
 use calm_server::track_activity::{
-    ActivityItem, ActivityPayload, Attention, CardState, NotificationSource,
-    TrackActivityProjector,
+    ActivityItem, ActivityPayload, Attention, CardState, NotificationSource, TrackActivityProjector,
 };
 use calm_server::track_lifecycle::{
     apply_requested_transition_in_tx, auto_transition_if_current_in_tx,
@@ -46,7 +45,12 @@ async fn planner(f: &Fx, name: &str, kind: WorkerSessionKind) -> Planner {
     let track = f.track(name).await;
     f.set_lifecycle(&track, TrackLifecycle::Working).await;
     let card = f
-        .card(&track, &format!("card-planner-{name}"), "planner", CardRole::Planner)
+        .card(
+            &track,
+            &format!("card-planner-{name}"),
+            "planner",
+            CardRole::Planner,
+        )
         .await;
     let ws = f
         .session(
@@ -87,10 +91,9 @@ async fn transition(f: &Fx, track: &str, to: TrackLifecycle, actor: ActorId, mes
         &f.write,
         move |tx| {
             Box::pin(async move {
-                let events =
-                    apply_requested_transition_in_tx(tx, &track_id, to, &writer, message)
-                        .await?
-                        .expect("a real lifecycle edge");
+                let events = apply_requested_transition_in_tx(tx, &track_id, to, &writer, message)
+                    .await?
+                    .expect("a real lifecycle edge");
                 Ok(((), events.into_iter().map(|e| (scope.clone(), e)).collect()))
             })
         },
@@ -290,7 +293,10 @@ async fn leaving_blocked_closes_an_earlier_notify_ask() {
     assert_eq!(f.recompute(&p.track).await.items.len(), 2);
     unblock(&f, &p).await;
     let a = f.recompute(&p.track).await;
-    assert!(a.items.is_empty(), "L closes the notify sent before it: {a:?}");
+    assert!(
+        a.items.is_empty(),
+        "L closes the notify sent before it: {a:?}"
+    );
 }
 
 // Row 4a.
@@ -324,7 +330,10 @@ async fn notify_after_a_closed_block_is_an_ask() {
     assert_eq!(a.items.len(), 1, "{a:?}");
     assert_eq!(a.items[0].source, NotificationSource::Ask);
     assert_eq!(a.items[0].key, format!("ask:notify:{row}"));
-    assert_eq!(a.items[0].text, "Question call-1?", "trimmed as the tool trims it");
+    assert_eq!(
+        a.items[0].text, "Question call-1?",
+        "trimmed as the tool trims it"
+    );
 }
 
 // Row 6.
@@ -350,7 +359,11 @@ async fn assistant_send_does_not_close_the_ask() {
     notify(&f, &p, "call-1").await;
     send(&f, &p.track, &assistant, ActorId::User).await;
     let a = f.recompute(&p.track).await;
-    assert_eq!(asks(&a).len(), 1, "a send to an assistant card is no reply: {a:?}");
+    assert_eq!(
+        asks(&a).len(),
+        1,
+        "a send to an assistant card is no reply: {a:?}"
+    );
 }
 
 // Row 8.
@@ -503,7 +516,14 @@ async fn assistant_failed_turn_is_not_planner_down() {
             1_000,
         )
         .await;
-    turn_on(&f, (&p.track, &assistant, &ws), "turn-a", "failed", Some("boom")).await;
+    turn_on(
+        &f,
+        (&p.track, &assistant, &ws),
+        "turn-a",
+        "failed",
+        Some("boom"),
+    )
+    .await;
     let a = f.recompute(&p.track).await;
     assert!(a.items.is_empty(), "{a:?}");
     assert_eq!(a.attention, Attention::None);
@@ -606,7 +626,14 @@ async fn kernel_review(f: &Fx, track: &str) {
 async fn reviewing_is_status_only() {
     let f = fx().await;
     let p = codex_planner(&f).await;
-    transition(&f, &p.track, TrackLifecycle::Reviewing, p.actor(), "done here").await;
+    transition(
+        &f,
+        &p.track,
+        TrackLifecycle::Reviewing,
+        p.actor(),
+        "done here",
+    )
+    .await;
     let a = f.recompute(&p.track).await;
     assert!(a.items.is_empty(), "a Planner's reviewing: {a:?}");
     assert_eq!(a.attention, Attention::None);
@@ -701,7 +728,11 @@ async fn missing_text_drops_only_that_item() {
     let ask = notify(&f, &p, "call-1").await;
     turn(&f, &p, "turn-1", "failed", None).await;
     let a = f.recompute(&p.track).await;
-    assert_eq!(a.items.len(), 1, "only the textless planner down goes: {a:?}");
+    assert_eq!(
+        a.items.len(),
+        1,
+        "only the textless planner down goes: {a:?}"
+    );
     assert_eq!(a.items[0].key, format!("ask:notify:{ask}"));
     assert_eq!(a.attention, Attention::Input);
     assert_eq!(f.stored(&p.track).await, Some(a), "the overlay is written");

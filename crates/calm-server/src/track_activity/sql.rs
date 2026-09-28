@@ -252,7 +252,10 @@ pub(crate) async fn evidence(
 
 /// N0–N3 — the rows of the two notification sources, five autocommit statements. N0: the track's one
 /// Planner card (a unique index); without one there is no notify row, no last turn and no U.
-pub(crate) async fn notification_rows(pool: &SqlitePool, track_id: &str) -> Result<NotificationRows> {
+pub(crate) async fn notification_rows(
+    pool: &SqlitePool,
+    track_id: &str,
+) -> Result<NotificationRows> {
     // N1 — the newest edge into `blocked` (`events.id` is monotone, so it orders the edges).
     let blocked_edge = sqlx::query(
         "SELECT id, at, json_extract(payload, '$.agent_message') AS message FROM events \

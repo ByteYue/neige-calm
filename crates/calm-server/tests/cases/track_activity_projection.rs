@@ -10,9 +10,7 @@ use calm_server::db::write_with_event_typed;
 use calm_server::event::{EditAuthor, Event, EventScope, TrackUpdatedPayload};
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::model::{CardRole, Overlay, TrackLifecycle, now_ms};
-use calm_server::session_projection_repo::{
-    AgentProvider, WorkerSessionKind, WorkerSessionState,
-};
+use calm_server::session_projection_repo::{AgentProvider, WorkerSessionKind, WorkerSessionState};
 use calm_server::terminal_renderer::TerminalRendererRegistry;
 use calm_server::track_activity::sql::{
     E1_HARNESS_TURN_COMPLETED_SQL, N3_PLANNER_TRANSCRIPT_SQL, SessionRow,
@@ -537,7 +535,10 @@ async fn superseded_failed_attempt_session_is_not_actionable() {
     assert_eq!(f.task_status(&Fx::task_id(&t, "build")).await.0, "failed");
 
     let p = f.recompute(&t).await;
-    assert!(p.cards.is_empty(), "(1) A's failed session is fenced: {p:?}");
+    assert!(
+        p.cards.is_empty(),
+        "(1) A's failed session is fenced: {p:?}"
+    );
     assert!(!p.working);
     assert_eq!(p.activity_at_ms, Some(8_000));
 
@@ -617,7 +618,11 @@ async fn done_track_failed_attempt_is_quiet() {
     let (worker, ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
     f.exit_session(&ws, WorkerSessionState::Failed, 4_500).await;
     let before = f.recompute(&t).await;
-    assert_eq!(card_state(&before, &worker), Some(CardState::Failed), "{before:?}");
+    assert_eq!(
+        card_state(&before, &worker),
+        Some(CardState::Failed),
+        "{before:?}"
+    );
 
     f.set_lifecycle(&t, TrackLifecycle::Done).await;
     let p = f.recompute(&t).await;
@@ -642,7 +647,11 @@ async fn archived_track_failed_attempt_is_quiet() {
     f.set_lifecycle(&t, TrackLifecycle::Working).await;
     let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
     let before = f.recompute(&t).await;
-    assert_eq!(card_state(&before, &worker), Some(CardState::Failed), "{before:?}");
+    assert_eq!(
+        card_state(&before, &worker),
+        Some(CardState::Failed),
+        "{before:?}"
+    );
 
     f.archive(&t, 5_000).await;
     let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM tracks WHERE id = ?1")
@@ -655,7 +664,10 @@ async fn archived_track_failed_attempt_is_quiet() {
         "archiving does not touch the lifecycle"
     );
     let p = f.recompute(&t).await;
-    assert!(p.cards.is_empty(), "archived ⇒ the failed card verdict goes: {p:?}");
+    assert!(
+        p.cards.is_empty(),
+        "archived ⇒ the failed card verdict goes: {p:?}"
+    );
     assert!(!p.working);
 }
 
@@ -1219,7 +1231,10 @@ async fn high_water_mark_survives_an_unparseable_stored_payload() {
         "the conclusions come from the rows, not the old row"
     );
     assert_eq!(stored.attention, Attention::None);
-    assert!(stored.items.is_empty() && stored.cards.is_empty(), "{stored:?}");
+    assert!(
+        stored.items.is_empty() && stored.cards.is_empty(),
+        "{stored:?}"
+    );
 }
 
 /// A change writes exactly one `overlay.set` with the track scope.
