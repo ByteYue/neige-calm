@@ -51,18 +51,26 @@ struct Boot {
 
 /// "Exactly `want`": poll `count` until it reaches `want` (a long deadline, so a slow delivery is not misread), then
 /// leave a stray extra copy a short settle to land and report the final count. An absence costs the settle, not the
-/// positive deadline.
+/// positive deadline. The count is not monotonic: an issuance drains the queue and awaits before its turn is recorded,
+/// so a sample below `want` after the settle resumes the poll inside the same deadline.
 async fn settled<F, Fut>(want: usize, count: F) -> usize
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = usize>,
 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while count().await < want && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    let until_want = || async {
+        loop {
+            let seen = count().await;
+            if seen >= want || std::time::Instant::now() >= deadline {
+                return seen;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    };
+    until_want().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    count().await
+    until_want().await
 }
 
 /// A real git repository the user owns, the shape `PATCH /api/tracks/{id}` accepts as an attached workspace.
