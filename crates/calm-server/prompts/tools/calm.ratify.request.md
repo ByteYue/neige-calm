@@ -1,1 +1,1 @@
-Planner-only: request human ratification for the current track. Emits `ratify.requested` and applies `working -> blocked` in the same atomic write. The planner must perform any preceding `reviewing -> working` transition separately.
+Planner-only: request human ratification for the current track. Emits `ratify.requested` and applies `working -> blocked` in the same atomic write. The planner must perform any preceding `reviewing -> working` transition separately. `reason` is shown to the user verbatim as the question; write it for a person.
