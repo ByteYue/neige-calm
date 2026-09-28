@@ -1245,10 +1245,10 @@ async fn ensure_live_planner_harness(
             "no recoverable planner harness session for card {card_id}; reset to start a session",
         ))
     };
-    let runtime = super::planner_recovery::candidate(s, card_id, human_send)
-        .await?
-        .ok_or_else(dormant)?;
-    if runtime.status != WorkerSessionState::Failed
+    // Unlocked fast path only: its reads can straddle a racing Send's recovery commit, so a miss
+    // here is not dormancy (#1820); only the locked re-check below answers 409.
+    if let Some(runtime) = super::planner_recovery::candidate(s, card_id, human_send).await?
+        && runtime.status != WorkerSessionState::Failed
         && let Some(harness) = s.harness.get(&runtime.id)
     {
         return Ok((runtime, harness, None));

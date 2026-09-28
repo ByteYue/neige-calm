@@ -198,10 +198,19 @@ async fn template_startup_recipe_snapshot_survives_source_edits_and_reset() {
     assert_eq!(status, StatusCode::OK, "{reset}");
     let (status, sent) = b.send_planner_input(card, "Continue after reset").await;
     assert_eq!(status, StatusCode::OK, "{sent}");
+    // The reset harness accepted the text: queued or already in a turn, whichever the timing gave.
+    let harness = b
+        .state
+        .harness
+        .get(&sent["worker_session_id"].as_str().unwrap().to_owned())
+        .expect("the reset harness is registered");
+    let pending = serde_json::to_string(&harness.snapshot().await.pending_observations()).unwrap();
     assert!(
-        b.started_turn_text("Continue after reset")
-            .await
-            .contains("Continue after reset")
+        pending.contains("Continue after reset")
+            || b.started_turn_text("Continue after reset")
+                .await
+                .contains("Continue after reset"),
+        "{pending}"
     );
     let starts = b
         .state

@@ -697,7 +697,8 @@ async fn signal_readback_settles_from_an_answer_painted_just_before_the_stop_hoo
         &terminal,
         "prestop-1",
         "prestop:hey",
-        json!({"wait_for":"signal"}),
+        // settle_ms well past the 50 ms paint-to-Stop gap, so a slow hook cannot make it `already`.
+        json!({"wait_for":"signal","settle_ms":600}),
     )
     .await;
     assert_eq!(receipt(&answered)["outcome"], "written", "{answered}");
@@ -761,10 +762,10 @@ async fn signal_readback_reports_none_after_repaint_ms_and_skipped_when_disabled
         "{skipped}"
     );
     assert_eq!(skipped["wait"]["settled"], false);
-    assert_eq!(
-        skipped["wait"]["signal_at_ms"], skipped["wait"]["waited_ms"],
-        "{skipped}"
-    );
+    // Two clock reads: the wait returns at the signal, give or take a millisecond tick.
+    let signal_at = skipped["wait"]["signal_at_ms"].as_u64().unwrap();
+    let waited = skipped["wait"]["waited_ms"].as_u64().unwrap();
+    assert!((signal_at..=signal_at + 5).contains(&waited), "{skipped}");
     // settle_ms is accepted in signal mode and only bounds the quiet window.
     let tuned = submit(
         &h,

@@ -725,7 +725,23 @@ async fn planner_input_accepts_plain_chat_but_rejects_unmarked_pty_codex() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
-    assert_eq!(harness.snapshot().await.pending_observations().len(), 1);
+    // The accepted text is queued or already handed to a turn; which one is timing.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let pending =
+            serde_json::to_string(&harness.snapshot().await.pending_observations()).unwrap();
+        let started =
+            serde_json::to_string(&boot.state.shared_codex_appserver.started_turns_for_test())
+                .unwrap();
+        if pending.contains("hello chat") || started.contains("hello chat") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "accepted chat text reached neither the queue nor a turn: {pending} {started}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     boot.state.harness.remove(&runtime_id);
     harness.shutdown().await.unwrap();
 }

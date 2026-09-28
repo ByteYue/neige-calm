@@ -52,8 +52,9 @@ struct RewriteRun {
 }
 
 async fn rewrite_five_times_behind_a_hung_call() -> RewriteRun {
-    let fx = SeriesFixture::boot(started(Duration::from_millis(800))).await;
-    // Block X occupies the lane: the plugin never answers its call, so the lane is busy until the 800ms timeout.
+    let fx = SeriesFixture::boot(started(Duration::from_secs(3))).await;
+    // Block X occupies the lane: the plugin never answers its call, so the lane is busy until the 3s timeout
+    // (long enough that the five rewrites below land behind it on a loaded runner).
     let x = fx
         .write_series_block(json!({ "source": SOURCE, "series": ["US:X"], "as_of": "2026-09-10" }))
         .await;

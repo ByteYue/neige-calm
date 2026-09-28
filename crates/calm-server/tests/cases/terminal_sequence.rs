@@ -81,8 +81,17 @@ fn edit() -> Value {
 async fn sequence_is_one_write_with_the_concatenated_bytes_in_order() {
     let h = Harness::start().await;
     // Raw mode without echo: the only bytes on the screen are what cat -v
-    // prints for what it received (ESC as ^[, DEL as ^?).
-    let terminal = open_claimed(&h, "stty raw -echo; exec cat -v", "sequence-bytes").await;
+    // prints for what it received (ESC as ^[, DEL as ^?). Type only after READY:
+    // before `stty` lands, the cooked tty echoes and edits the bytes itself.
+    let opened = h
+        .ok(
+            "calm.terminal.open",
+            json!({"program":"stty raw -echo; echo READY; exec cat -v","request_id":"sequence-bytes","claim":true,"wait_for":"text","wait_text":["READY"],"wait_ms":5000}),
+        )
+        .await;
+    assert_eq!(opened["claim"]["status"], "claimed", "{opened}");
+    assert_eq!(opened["wait"]["outcome"], "matched", "{opened}");
+    let terminal = opened["terminal_id"].as_str().unwrap().to_owned();
     let before = h
         .interaction()
         .input_ack_sequence(&terminal)
