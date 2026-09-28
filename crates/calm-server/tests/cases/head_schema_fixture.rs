@@ -58,6 +58,7 @@ const POST_0067_MIGRATION_NAMES: &[&str] = &[
     "0118_worktree_reclaim_indexes.sql",
     "0119_report_tags.sql",
     "0120_track_worktree.sql",
+    "0121_activity_dismissals.sql",
 ];
 
 #[test]

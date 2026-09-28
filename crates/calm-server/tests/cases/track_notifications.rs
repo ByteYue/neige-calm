@@ -3,9 +3,10 @@
 //! turn failed). Every row is written through its production writer; each case asserts the payload
 //! the projector computes. One test per row of the design's producer × state matrix (§7).
 //!
-//! Fixture sources are fixed so the mutation red sets hold: only rows 3, 3b, 4a and 5 ever leave
-//! `blocked`; rows 2 and 19 enter it and never leave; rows 5–8 are notify-only, and only row 5 has
-//! an ended blocked stretch. Do not add a leaving edge to 2 or 19.
+//! Fixture sources are fixed so the mutation red sets hold: only rows 3, 3b, 4a, 4b and 5 ever leave
+//! `blocked`; rows 2, 18 and 19 enter it and never leave; rows 5–8 are notify-only, and only row 5
+//! has an ended blocked stretch. Do not add a leaving edge to 2, 18 or 19. Rows 4b, 18, 20 and 21
+//! (Dismiss) are in `track_notification_dismissals.rs`.
 
 use std::time::Duration;
 
@@ -16,7 +17,8 @@ use calm_server::model::{CardRole, TrackLifecycle, now_ms};
 use calm_server::session_projection_repo::{WorkerSessionKind, WorkerSessionState};
 use calm_server::terminal_renderer::TerminalRendererRegistry;
 use calm_server::track_activity::{
-    ActivityItem, ActivityPayload, Attention, CardState, NotificationSource, TrackActivityProjector,
+    ActivityItem, ActivityPayload, ActivityWake, Attention, CardState, NotificationSource,
+    TrackActivityProjector,
 };
 use calm_server::track_lifecycle::{
     apply_requested_transition_in_tx, auto_transition_if_current_in_tx,
@@ -29,10 +31,10 @@ use serde_json::json;
 use super::track_activity_fixture::{Fx, fx};
 
 /// A track in `working` with its one Planner card and that card's harness session.
-struct Planner {
-    track: String,
-    card: String,
-    ws: String,
+pub(crate) struct Planner {
+    pub(crate) track: String,
+    pub(crate) card: String,
+    pub(crate) ws: String,
 }
 
 impl Planner {
@@ -66,7 +68,7 @@ async fn planner(f: &Fx, name: &str, kind: WorkerSessionKind) -> Planner {
     Planner { track, card, ws }
 }
 
-async fn codex_planner(f: &Fx) -> Planner {
+pub(crate) async fn codex_planner(f: &Fx) -> Planner {
     planner(f, "p", WorkerSessionKind::SharedPlanner).await
 }
 
@@ -103,12 +105,12 @@ async fn transition(f: &Fx, track: &str, to: TrackLifecycle, actor: ActorId, mes
 }
 
 /// The Planner moves its track to `blocked` with `message` (what `calm.ratify.request` also does).
-async fn block(f: &Fx, p: &Planner, message: &str) {
+pub(crate) async fn block(f: &Fx, p: &Planner, message: &str) {
     transition(f, &p.track, TrackLifecycle::Blocked, p.actor(), message).await;
 }
 
 /// The Planner moves its track out of `blocked`.
-async fn unblock(f: &Fx, p: &Planner) {
+pub(crate) async fn unblock(f: &Fx, p: &Planner) {
     transition(f, &p.track, TrackLifecycle::Working, p.actor(), "resuming").await;
 }
 
@@ -184,18 +186,24 @@ async fn turn_on(
     .await
 }
 
-async fn turn(f: &Fx, p: &Planner, turn_id: &str, status: &str, error: Option<&str>) -> i64 {
+pub(crate) async fn turn(
+    f: &Fx,
+    p: &Planner,
+    turn_id: &str,
+    status: &str,
+    error: Option<&str>,
+) -> i64 {
     turn_on(f, (&p.track, &p.card, &p.ws), turn_id, status, error).await
 }
 
-fn asks(p: &ActivityPayload) -> Vec<&ActivityItem> {
+pub(crate) fn asks(p: &ActivityPayload) -> Vec<&ActivityItem> {
     p.items
         .iter()
         .filter(|i| i.source == NotificationSource::Ask)
         .collect()
 }
 
-fn planner_down(p: &ActivityPayload) -> Vec<&ActivityItem> {
+pub(crate) fn planner_down(p: &ActivityPayload) -> Vec<&ActivityItem> {
     p.items
         .iter()
         .filter(|i| i.source == NotificationSource::PlannerDown)
@@ -214,13 +222,14 @@ async fn newest_block_event(f: &Fx, track: &str) -> (i64, i64) {
     .unwrap()
 }
 
-/// A second projector over the same repo, run as the production loop; returns once its boot sweep
-/// has written a row satisfying `seeded`, so every later change can only arrive by a wake-up.
-async fn running_loop(
+/// A second projector over the same repo, run as the production loop, and its in-process wake;
+/// returns once its boot sweep has written a row satisfying `seeded`, so every later change can
+/// only arrive by a wake-up.
+pub(crate) async fn running_loop(
     f: &Fx,
     track: &str,
     seeded: impl Fn(&ActivityPayload) -> bool,
-) -> tokio::task::JoinHandle<()> {
+) -> (tokio::task::JoinHandle<()>, ActivityWake) {
     let looped = TrackActivityProjector::new(
         f.repo_dyn.clone(),
         f.events.clone(),
@@ -229,9 +238,10 @@ async fn running_loop(
         TerminalRendererRegistry::new(),
     )
     .expect("sqlite-backed repo");
+    let wake = looped.wake();
     let task = tokio::spawn(looped.run());
     f.await_stored(track, "the boot sweep's row", seeded).await;
-    task
+    (task, wake)
 }
 
 // Row 1.
@@ -418,7 +428,7 @@ async fn failed_planner_turn_is_planner_down() {
 async fn system_error_row_after_the_wedged_phase_wakes_the_projector() {
     let f = fx().await;
     let p = codex_planner(&f).await;
-    let loop_task = running_loop(&f, &p.track, |a| a.items.is_empty()).await;
+    let (loop_task, _) = running_loop(&f, &p.track, |a| a.items.is_empty()).await;
 
     f.exit_session(&p.ws, WorkerSessionState::Failed, now_ms())
         .await;
@@ -709,7 +719,7 @@ async fn user_send_wakes_the_projector() {
     let f = fx().await;
     let p = codex_planner(&f).await;
     block(&f, &p, "Which region?").await;
-    let loop_task = running_loop(&f, &p.track, |a| asks(a).len() == 1).await;
+    let (loop_task, _) = running_loop(&f, &p.track, |a| asks(a).len() == 1).await;
     send(&f, &p.track, &p.card, ActorId::User).await;
     let a = f
         .await_stored(&p.track, "the ask closed by the send's wake-up", |a| {
@@ -755,4 +765,15 @@ async fn closed_notify_still_advances_activity() {
         Some(at),
         "E2 counts every successful notify, open or not"
     );
+}
+
+// The planner-down text is the kernel's readable form of the upstream body codex embeds.
+#[tokio::test]
+async fn planner_down_text_is_the_readable_error() {
+    let f = fx().await;
+    let p = codex_planner(&f).await;
+    let body = r#"{"type":"error","status":400,"error":{"message":"Upgrade Codex."}}"#;
+    turn(&f, &p, "turn-1", "failed", Some(body)).await;
+    let a = f.recompute(&p.track).await;
+    assert_eq!(planner_down(&a)[0].text, "400: Upgrade Codex.");
 }

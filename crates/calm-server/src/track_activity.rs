@@ -1,6 +1,7 @@
 //! The `kernel/track/activity` projector: one overlay row per track (`working`, `attention`,
 //! `activity_at_ms`), recomputed on every wake-up from durable rows plus one in-process value — the
-//! renderer registry's last-output instant of each interactive PTY card; bus events are only wake-ups.
+//! renderer registry's last-output instant of each interactive PTY card; bus events and the
+//! [`ActivityWake`] channel are only wake-ups.
 
 pub mod notifications;
 pub mod sql;
@@ -278,6 +279,24 @@ pub fn fold(track_id: &str, rows: &TrackRows) -> Fold {
     }
 }
 
+/// The in-process wake-up for a write that emits no event: a Dismiss (#1829) sends its track id and
+/// the projector recomputes that track. Best effort: a send nobody receives (no projector runs) is
+/// dropped, and the 30 s tick still converges.
+#[derive(Debug, Clone)]
+pub struct ActivityWake(mpsc::UnboundedSender<String>);
+
+impl ActivityWake {
+    /// A wake no projector receives: the repo is not sqlite-backed, or the state was built without
+    /// a projector. Every send is dropped.
+    pub fn detached() -> Self {
+        Self(mpsc::unbounded_channel().0)
+    }
+
+    pub fn wake(&self, track_id: &str) {
+        let _ = self.0.send(track_id.to_string());
+    }
+}
+
 pub struct TrackActivityProjector {
     repo: Arc<dyn Repo>,
     pool: sqlx::SqlitePool,
@@ -287,6 +306,9 @@ pub struct TrackActivityProjector {
     /// The in-process carrier of every interactive PTY card's last output; built before the
     /// projector is spawned.
     renderer: Arc<TerminalRendererRegistry>,
+    /// The sending half of [`Self::wake`]'s channel; held so the receive arm never sees it closed.
+    wake: ActivityWake,
+    wake_rx: mpsc::UnboundedReceiver<String>,
 }
 
 /// What one recomputation did.
@@ -326,6 +348,7 @@ impl TrackActivityProjector {
         renderer: Arc<TerminalRendererRegistry>,
     ) -> Option<Self> {
         let pool = repo.sqlite_pool()?;
+        let (wake_tx, wake_rx) = mpsc::unbounded_channel();
         Some(Self {
             repo,
             pool,
@@ -333,7 +356,14 @@ impl TrackActivityProjector {
             write,
             harness,
             renderer,
+            wake: ActivityWake(wake_tx),
+            wake_rx,
         })
+    }
+
+    /// The handle a writer that emits no event uses to wake this projector's loop.
+    pub fn wake(&self) -> ActivityWake {
+        self.wake.clone()
     }
 
     /// Read every input of one track: the durable rows plus the two in-process witnesses (live harness
@@ -563,10 +593,10 @@ impl TrackActivityProjector {
         }
     }
 
-    /// The projector loop: a boot sweep, then bus wake-ups, the two PTY edges and the tick in one
-    /// `select!` (serial; the wake channel is an unbounded FIFO, so an edge that lands during a
-    /// recomputation queues instead of being lost).
-    pub async fn run(self) {
+    /// The projector loop: a boot sweep, then bus wake-ups, the two PTY edges, the [`ActivityWake`]
+    /// sends and the tick in one `select!` (serial; both wake channels are unbounded FIFOs, so a
+    /// wake-up that lands during a recomputation queues instead of being lost).
+    pub async fn run(mut self) {
         let mut rx = self.bus.subscribe();
         // This clone stays alive for the loop's lifetime so the receive arm can never observe a
         // closed channel.
@@ -609,24 +639,36 @@ impl TrackActivityProjector {
                         );
                     }
                 }
+                Some(track_id) = self.wake_rx.recv() => {
+                    if let Err(e) = self.recompute_track(&track_id).await {
+                        tracing::warn!(
+                            track_id = %track_id,
+                            error = %e,
+                            "track_activity: in-process wake recompute failed"
+                        );
+                    }
+                }
             }
         }
     }
 }
 
-/// Spawn the projector task. At the boot sweep the harness registry is still empty (run loops are
-/// installed by `boot_harnesses` later), so harness rows read `working=false` on the first pass, and
-/// the renderer registry is empty until a card's WS reattaches its PTY.
+/// Spawn the projector task and return its [`ActivityWake`]. At the boot sweep the harness registry
+/// is still empty (run loops are installed by `boot_harnesses` later), so harness rows read
+/// `working=false` on the first pass, and the renderer registry is empty until a card's WS
+/// reattaches its PTY.
 pub fn spawn(
     repo: Arc<dyn Repo>,
     bus: EventBus,
     write: WriteContext,
     harness: HarnessRegistry,
     renderer: Arc<TerminalRendererRegistry>,
-) {
+) -> ActivityWake {
     let Some(projector) = TrackActivityProjector::new(repo, bus, write, harness, renderer) else {
         tracing::warn!("track_activity: repo is not sqlite-backed; projector not started");
-        return;
+        return ActivityWake::detached();
     };
+    let wake = projector.wake();
     tokio::spawn(projector.run());
+    wake
 }

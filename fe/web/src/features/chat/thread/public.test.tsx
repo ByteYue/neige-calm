@@ -117,14 +117,16 @@ describe('ChatThread', () => {
     expect(container.querySelector('[data-nc-turn="agent"]')).toBeNull();
   });
 
-  it('states a failed turn with its message and a plain-language reason', () => {
+  it('states a failed turn in the kernel\'s readable words, keeps the raw message as its tooltip, and gives a reason', () => {
+    const raw = '{"type":"error","status":400,"error":{"message":"The conversation exceeded the model\'s context window."}}';
     const { container } = render(
       <ChatThread cards={{}} stalled={false}
         conversation={conversation()}
         turns={[
           turn({ id: 'you-1', text: 'Summarise everything.' }),
           turnOutcome({
-            status: 'failed', message: 'The conversation exceeded the model\'s context window.',
+            status: 'failed', message: raw,
+            text: '400: The conversation exceeded the model\'s context window.',
             code: 'contextWindowExceeded',
           }),
         ]}
@@ -133,8 +135,9 @@ describe('ChatThread', () => {
     const outcome = container.querySelector('[data-nc-turn-outcome="failed"]') as HTMLElement;
     expect(outcome.getAttribute('data-nc-turn')).toBe('outcome');
     expect(screen.getByRole('status').textContent).toBe('Failed');
-    expect(outcome.querySelector('[data-nc-turn-outcome-message]')?.textContent)
-      .toBe('The conversation exceeded the model\'s context window.');
+    const line = outcome.querySelector('[data-nc-turn-outcome-message]');
+    expect(line?.textContent).toBe('400: The conversation exceeded the model\'s context window.');
+    expect(line?.getAttribute('title')).toBe(raw);
     expect(outcome.querySelector('[data-nc-turn-outcome-hint]')?.textContent)
       .toBe('The conversation no longer fits in the model’s context window.');
     expect(container.querySelector('[data-nc-turn="agent"]')).toBeNull();

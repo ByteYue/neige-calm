@@ -15,11 +15,11 @@ use utoipa::ToSchema;
 /// Diagnostic only on the wire, but `neige-app`'s `compute_verdict` compares it against
 /// the installed release, so a REST contract break must bump it.
 ///
-/// #1822 bumps `"12"` -> `"13"`: a Claude Planner's `GET /api/models` catalog is the CLI's live
-/// list, and `source: "built_in"` is gone. A new bundle's schema rejects an older kernel's
-/// `built_in` answer, so a web-only update onto such a kernel must be refused; an older bundle's
-/// schema rejects the new answer (a `null` effort description, `default_source: "claude_cli"`),
-/// so `WEB_COMPAT_VERSION` moves too.
+/// #1829 bumps `"13"` -> `"14"` for two contract changes: `POST /api/tracks/{id}/activity/dismissals`
+/// is new, and the transcript wire (`GET /api/cards/{id}/harness/items`) gains a required
+/// `turn_error_text`. A bundle of this revision must not be paired with an older kernel, which
+/// answers Dismiss 404 and sends rows without the field. Older bundles call neither and ignore the
+/// extra field, so `WEB_COMPAT_VERSION` does not move.
 pub use calm_types::compatibility::REST_API_VERSION as API_VERSION;
 
 /// Monotonically increasing frontend compatibility floor. Must equal `WEB_COMPAT_VERSION`

@@ -1,6 +1,6 @@
 //! Shared REST contract/capability revision for the kernel and upgrade checks.
 
-// Revision 13 (#1822): `GET /api/models` answers a Claude Planner's catalog as the CLI's live
-// list (`source: "live"`, `default_source: "claude_cli"`); `source: "built_in"` is gone, which a
-// bundle of this revision's schema rejects from an older kernel; preflight refuses the pairing.
-pub const REST_API_VERSION: &str = "13";
+// Revision 14 (#1829): `POST /api/tracks/{id}/activity/dismissals` is new, and the transcript wire
+// gains a required `turn_error_text`; a bundle of this revision would get 404 for Dismiss and reject
+// an older kernel's transcript rows, so preflight refuses the pairing.
+pub const REST_API_VERSION: &str = "14";

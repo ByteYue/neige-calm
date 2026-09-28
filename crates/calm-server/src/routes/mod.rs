@@ -9,6 +9,7 @@ mod application;
 pub use application::application_router;
 pub use application::public_mobile_router;
 
+pub mod activity_dismissals;
 pub mod agent_providers;
 pub mod area_folders;
 pub mod areas;
@@ -59,6 +60,7 @@ pub fn protected_router() -> Router<AppState> {
         .merge(areas::router())
         .merge(area_folders::router())
         .merge(tracks::router())
+        .merge(activity_dismissals::router())
         .merge(track_conversations::router())
         .merge(track_previews::router())
         .merge(track_report_blocks::router())

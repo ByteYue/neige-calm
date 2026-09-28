@@ -163,6 +163,8 @@ const harnessItemSchema: z.ZodType<HarnessItem> = z.object({
   thread_id: z.string(), turn_id: z.string().nullable(), item_uuid: z.string().nullable(),
   item_type: z.string().nullable(), method: z.string(), params: z.string(), created_at_ms: z.number(),
   input_segments: z.array(harnessInputSegmentSchema).optional(),
+  /* Required and nullable: the kernel always sends it, `null` on a row with no turn error. */
+  turn_error_text: z.string().nullable(),
 });
 
 const harnessPhaseSchema = z.enum([
@@ -926,6 +928,8 @@ export type ConversationTurnOutcome = Readonly<{
   status: TurnOutcomeStatus;
   /** codex's own `error.message`, verbatim. Only a `failed` turn carries one. */
   message?: string;
+  /** The kernel's readable form of `message` (`turn_error_text`): what the Failed line shows. */
+  text?: string;
   /** `error.codexErrorInfo` as one token: the bare enum string or, for the object form, its single key. */
   code?: string;
   /**
@@ -1149,6 +1153,7 @@ export function transcriptRowToTurnOutcome(item: HarnessItem): ConversationTurnO
   const base = {
     id: `outcome-${item.id}`, author: 'turn' as const, turnId, atMs: item.created_at_ms,
     ...(message === undefined ? {} : { message }),
+    ...(item.turn_error_text === null ? {} : { text: item.turn_error_text }),
     ...(code === undefined ? {} : { code }),
   };
   if (wireStatus === 'completed' || wireStatus === 'interrupted' || wireStatus === 'failed') {

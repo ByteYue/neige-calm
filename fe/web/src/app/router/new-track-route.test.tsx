@@ -1193,7 +1193,7 @@ describe('the sentence is delivered by the create, and the track opens on it', (
       templates: TEMPLATES,
       plannerItems: [{
         id: 1, worker_session_id: 'r', card_id: 'card-planner', track_id: 'w-new', thread_id: 't',
-        turn_id: null, item_uuid: 'entry-0001', item_type: 'userMessage', method: 'item/completed',
+        turn_id: null, turn_error_text: null, item_uuid: 'entry-0001', item_type: 'userMessage', method: 'item/completed',
         params: JSON.stringify({
           item: { id: 'entry-0001', clientId: 'entry-0001', type: 'userMessage', content: [{ type: 'text', text: 'User says:\nRead it' }] },
           _projection: true,

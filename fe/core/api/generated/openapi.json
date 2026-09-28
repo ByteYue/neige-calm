@@ -4957,6 +4957,81 @@
         }
       }
     },
+    "/api/tracks/{id}/activity/dismissals": {
+      "post": {
+        "tags": [
+          "tracks"
+        ],
+        "summary": "Dismiss one notification item. Idempotent: a key already dismissed keeps its first time. No event\nis written; the projector is woken in-process and its `overlay.set` is what the client sees.",
+        "operationId": "dismiss_activity_item",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Track id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DismissActivityItemRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Dismissed (or already dismissed)"
+          },
+          "400": {
+            "description": "The key is not an item key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The actor is not the authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Track not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/tracks/{id}/backlinks": {
       "get": {
         "tags": [
@@ -8176,6 +8251,19 @@
           }
         }
       },
+      "DismissActivityItemRequest": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The item's `key` as the activity overlay lists it: `ask:lifecycle:<id>`, `ask:notify:<id>`\nor `planner_down:<id>`. Whether the item is still open is not checked."
+          }
+        },
+        "additionalProperties": false
+      },
       "EditPlannerInputBody": {
         "type": "object",
         "required": [
@@ -8586,7 +8674,8 @@
           "thread_id",
           "method",
           "params",
-          "created_at_ms"
+          "created_at_ms",
+          "turn_error_text"
         ],
         "properties": {
           "card_id": {
@@ -8632,6 +8721,13 @@
           },
           "track_id": {
             "type": "string"
+          },
+          "turn_error_text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A `turn/completed` row's `error.message` in words a person reads (#1829), reduced by the\nkernel; `params` keeps the raw message. `null` on every row without one."
           },
           "turn_id": {
             "type": [

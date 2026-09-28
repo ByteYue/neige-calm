@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   activityLabelOf, activityNameBit, activityStateOf, attentionOfCard, cardActivityOf, cardActivityState,
-  type ActivityState, type AttentionKind, type CardActivity,
+  notificationPlainText, type ActivityState, type AttentionKind, type CardActivity,
 } from './activity.js';
 
 const ATTENTION: readonly AttentionKind[] = ['none', 'input', 'failed'];
@@ -86,5 +86,18 @@ describe('card verdicts as indicator states', () => {
     ['working', 'working'], ['input', 'attention'], ['failed', 'failed'],
   ])('shows a %s card as %s, never as unread', (card, expected) => {
     expect(cardActivityState(card)).toBe(expected);
+  });
+});
+
+describe('notificationPlainText', () => {
+  it('keeps the visible words of markdown and drops its syntax', () => {
+    expect(notificationPlainText('Before I dispatch I need **one decision**:\n\n- keep `legacy_orders`\n'
+      + '- drop it\n\nContext: [PR #1811](https://example.com/pr/1811).'))
+      .toBe('Before I dispatch I need one decision: keep legacy_orders drop it Context: PR #1811.');
+  });
+
+  it('leaves plain text as it is', () => {
+    expect(notificationPlainText("400: The 'gpt-6-astra' model requires a newer version of Codex."))
+      .toBe("400: The 'gpt-6-astra' model requires a newer version of Codex.");
   });
 });

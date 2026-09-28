@@ -245,120 +245,236 @@
   .needsInputNoticeIcon {
     display: grid;
     place-items: center;
-    inline-size: var(--control-h-lg);
-    block-size: var(--control-h-lg);
+    inline-size: var(--control-h-sm);
+    block-size: var(--control-h-sm);
     border-radius: var(--radius-pill);
     background: var(--accent-soft);
     color: var(--accent);
   }
 
+  /* One line: bell, title, count, collapse. */
   .needsInputNoticeHeader {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-4);
-  }
-
-  .needsInputNoticeCopy {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    min-inline-size: 0;
+    align-items: center;
+    gap: var(--space-3);
+    padding-inline-start: var(--space-2);
   }
 
+  /* Three type steps in the panel: the title is the largest (--text-md), the kernel's words are
+     body text (--text-base), the meta line and the count are annotation (--text-xs). */
   .needsInputNoticeTitle {
     color: var(--text);
-    font-size: var(--text-base);
+    font-size: var(--text-md);
     font-weight: var(--weight-semibold);
     line-height: var(--leading-tight);
   }
 
-  .needsInputNoticeSource {
-    overflow: hidden;
-    color: var(--text);
-    font-size: var(--text-base);
-    font-weight: var(--weight-medium);
-    line-height: var(--leading-tight);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  .needsInputNoticeDetail {
-    color: var(--text-3);
+  .needsInputCount {
+    display: grid;
+    place-items: center;
+    min-inline-size: var(--control-h-sm);
+    padding-inline: var(--space-2);
+    border-radius: var(--radius-pill);
+    background: var(--accent-soft);
+    color: var(--accent);
     font-size: var(--text-xs);
-    font-weight: var(--weight-normal);
-    line-height: var(--leading-snug);
-  }
-
-  .needsInputNoticeMeta {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--space-2);
-    min-inline-size: 0;
-  }
-
-  .needsInputNoticeAsk {
-    color: var(--warn);
-  }
-
-  .needsInputNoticeDown {
-    color: var(--error);
-  }
-
-  .needsInputNoticeTime {
-    flex: none;
-    color: var(--text-3);
-    font-size: var(--text-xs);
-  }
-
-  /* The kernel's words can run long; three lines here, the whole text in the Planner conversation. */
-  .needsInputNoticeText {
-    display: -webkit-box;
-    overflow: hidden;
-    overflow-wrap: anywhere;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
+    font-weight: var(--weight-semibold);
+    line-height: var(--control-h-sm);
   }
 
   .needsInputNoticeList {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
-    max-block-size: min(22rem, 45vh);
+    max-block-size: min(26rem, 55vh);
     padding: 0;
     overflow: auto;
     list-style: none;
   }
 
-  .needsInputNoticeItem {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-4);
-    padding-block-start: var(--space-4);
+  /* One notification. The meta line is annotation (small, muted; only the dot is coloured); the
+     kernel's words are the content. The whole row is the reply: `.noticeOpen` is a button stretched
+     over it, and the × and the body's links are lifted above that button so they stay their own
+     targets. The inline-end padding keeps the meta line clear of the ×. */
+  .notice {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-6) calc(var(--control-h-sm) + var(--space-4)) var(--space-6) var(--space-5);
     border-block-start: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
   }
 
-  .needsInputAction {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-block-size: var(--control-h-lg);
-    padding-inline: var(--space-5);
+  .noticeActionable:hover,
+  .noticeActionable:has(> .noticeOpen:focus-visible) {
+    background: var(--overlay-hover);
+  }
+
+  .noticeOpen {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
     border-radius: var(--radius-sm);
-    background: var(--accent);
-    color: var(--text-on-accent);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-semibold);
-    line-height: var(--leading-none);
+    background: none;
     cursor: pointer;
   }
 
-  .needsInputAction:hover,
-  .needsInputAction:focus-visible {
-    background: color-mix(in oklab, var(--accent) 88%, var(--text));
+  .noticeOpen:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .noticeMeta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-inline-size: 0;
+    color: var(--text-3);
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+  }
+
+  /* The same colour language as the rail's track dots. */
+  .noticeDot {
+    flex: none;
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: var(--radius-pill);
+  }
+
+  .noticeDotAsk {
+    background: var(--warn);
+  }
+
+  .noticeDotDown {
+    background: var(--error);
+  }
+
+  .noticeLabel {
+    display: grid;
+    min-inline-size: 0;
+    font-weight: var(--weight-medium);
+  }
+
+  .noticeLabelText,
+  .noticeAction {
+    grid-area: 1 / 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  /* The row's action, in the label's place: accent, no arrow (nothing on this line points at the ×). */
+  .noticeAction {
+    color: var(--accent);
+    visibility: hidden;
+  }
+
+  /* Only where there is hover: a touch row keeps its label, and the row itself is the tap target. */
+  @media (hover: hover) {
+    .noticeActionable:hover .noticeLabelText,
+    .noticeActionable:has(> .noticeOpen:focus-visible) .noticeLabelText {
+      visibility: hidden;
+    }
+
+    .noticeActionable:hover .noticeAction,
+    .noticeActionable:has(> .noticeOpen:focus-visible) .noticeAction {
+      visibility: visible;
+    }
+  }
+
+  /* The time stays; the × takes the corner after it. */
+  .noticeTime {
+    flex: none;
+    margin-inline-start: auto;
+  }
+
+  /* The body is body text, below the panel title. Astryx's `Markdown` is sized through the variables
+     it documents (as the chat's `.reply` does), scoped to this wrapper so the chat is untouched:
+     paragraphs and list items at --text-base, headings never larger than semibold body text, inline
+     code at --text-xs in the code font, links in the accent colour. */
+  .noticeBody {
+    --text-body-size: var(--text-base);
+    --text-body-leading: var(--leading-snug);
+    --text-heading-1-size: var(--text-base);
+    --text-heading-2-size: var(--text-base);
+    --text-heading-3-size: var(--text-base);
+    --text-heading-4-size: var(--text-base);
+    --text-heading-5-size: var(--text-base);
+    --text-heading-6-size: var(--text-base);
+    --text-heading-1-weight: var(--weight-semibold);
+    --text-heading-2-weight: var(--weight-semibold);
+    --text-heading-3-weight: var(--weight-semibold);
+    --text-heading-4-weight: var(--weight-semibold);
+    --text-heading-5-weight: var(--weight-semibold);
+    --text-heading-6-weight: var(--weight-semibold);
+    --text-heading-1-leading: var(--leading-snug);
+    --text-heading-2-leading: var(--leading-snug);
+    --text-heading-3-leading: var(--leading-snug);
+    --text-heading-4-leading: var(--leading-snug);
+    --text-heading-5-leading: var(--leading-snug);
+    --text-heading-6-leading: var(--leading-snug);
+    --text-code-size: var(--text-xs);
+    --font-family-code: var(--font-code);
+    --color-text-primary: var(--text);
+    --color-text-accent: var(--accent);
+
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-size: var(--text-base);
+    font-weight: var(--weight-normal);
+    line-height: var(--leading-snug);
+  }
+
+  /* A link in the body opens the link, not the row. */
+  .noticeBody a {
+    position: relative;
+    z-index: 2;
+  }
+
+  /* A failure reads in three lines; its full text is in the Planner conversation. An ask is never
+     clamped: the whole question has to be readable. */
+  .noticeBodyClamped {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+
+  .noticeDismiss {
+    position: absolute;
+    inset-block-start: var(--space-4);
+    inset-inline-end: var(--space-3);
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    inline-size: var(--control-h-sm);
+    block-size: var(--control-h-sm);
+    border-radius: var(--radius-pill);
+    color: var(--text-3);
+    cursor: pointer;
+    opacity: 0;
+  }
+
+  .noticeDismiss:hover,
+  .noticeDismiss:focus-visible {
+    background: var(--overlay-hover);
+    color: var(--text);
+  }
+
+  .notice:hover .noticeDismiss,
+  .notice:focus-within .noticeDismiss {
+    opacity: 1;
+  }
+
+  /* Touch has no hover: the × is always there. */
+  @media (hover: none) {
+    .noticeDismiss {
+      opacity: 1;
+    }
   }
 
   .needsInputCollapse,
@@ -375,6 +491,7 @@
   .needsInputCollapse {
     inline-size: var(--control-h-lg);
     block-size: var(--control-h-lg);
+    margin-inline-start: auto;
   }
 
   .needsInputCollapse:hover,

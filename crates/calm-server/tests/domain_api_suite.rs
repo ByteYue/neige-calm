@@ -76,6 +76,8 @@ mod track_claude_permissions_policy;
 mod track_conversations;
 #[path = "cases/track_delete_thread_cache.rs"]
 mod track_delete_thread_cache;
+#[path = "cases/track_notification_dismissals.rs"]
+mod track_notification_dismissals;
 #[path = "cases/track_notifications.rs"]
 mod track_notifications;
 #[path = "cases/track_projection_policy_patch.rs"]
@@ -86,6 +88,8 @@ mod track_workspace_materialize;
 mod track_workspace_recycle;
 #[path = "cases/track_workspace_repoint.rs"]
 mod track_workspace_repoint;
+#[path = "cases/turn_error_text_wire.rs"]
+mod turn_error_text_wire;
 #[path = "cases/version.rs"]
 mod version;
 

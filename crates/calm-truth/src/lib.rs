@@ -14,6 +14,7 @@ pub mod event_bus;
 pub mod events_prune;
 pub mod mcp_auth;
 pub mod model;
+pub mod readable_error_text;
 pub mod role_gate;
 pub mod session_projection_lookup;
 pub mod session_projection_repo;

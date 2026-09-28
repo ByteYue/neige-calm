@@ -1660,7 +1660,8 @@
     "patch": "diff --git a/web/src/app/router/public.tsx b/web/src/app/router/public.tsx\n--- a/web/src/app/router/public.tsx\n+++ b/web/src/app/router/public.tsx\n@@ -2054,10 +2054,15 @@\n         activity: cardActivityOf(track, slot.card.id),\n       }));\n   }, [cardRegistry, cards, track]);\n-  const inputNotifications = useMemo(\n-    () => trackNotifications(track.attentionItems),\n-    [track.attentionItems],\n-  );\n+  // MUT-1722-S2B-9: the aside reads the per-card `kernel/card/status` rows again\n+  const inputNotifications = useMemo((): readonly TrackInputNotification[] => overlays.flatMap((overlay) => {\n+    if (overlay.plugin_id !== 'kernel' || overlay.entity_kind !== 'card' || overlay.kind !== 'status') return [];\n+    const state = (overlay.payload as { state?: unknown } | null)?.state;\n+    if (state !== 'AwaitingInput' && state !== 'Errored') return [];\n+    return [{ key: `status:${overlay.entity_id}`, kind: state === 'AwaitingInput' ? 'ask' : 'planner-down',\n+      text: state === 'AwaitingInput' ? 'Requires input to continue.' : 'Stopped with an error and needs attention.',\n+      atMs: overlay.updated_at }];\n+  }), [overlays]);\n   /* Stable across renders that do not change the overlays, so a live table is\n      not handed a new resolver identity on every keystroke elsewhere. */\n   const resolveLiveTable = useCallback(\n",
     "expected_red": [
       "degraded workspace reads stay usable prefers track-detail overlays to the neutral workspace fallback",
-      "track conversations both notification kinds show the kernel's words and Reply opens the Planner composer",
+      "track conversations Dismiss posts the item key",
+      "track conversations both notification kinds show the kernel's words and a row click opens the Planner composer",
       "track conversations counts an ask and planner down as two notifications",
       "track conversations ignores a retired kernel/card/status row and a plugin-authored activity row"
     ],
@@ -1668,7 +1669,7 @@
       "web/src/app/router/read-fallbacks.contract.test.tsx",
       "web/src/app/router/track-conversation.test.tsx"
     ],
-    "why_more_than_one": "Reading the retired per-card status rows again instead of activity.items empties the aside for every fixture that carries its items in the activity overlay and fills it for the fixture that carries a retired status row: the two-kinds Reply case, the ask-plus-planner-down count case, the retired-row case and the read-fallbacks detail case all move."
+    "why_more_than_one": "Reading the retired per-card status rows again instead of activity.items empties the aside for every fixture that carries its items in the activity overlay and fills it for the fixture that carries a retired status row: the two-kinds Reply case, the Dismiss case, the ask-plus-planner-down count case, the retired-row case and the read-fallbacks detail case all move."
   },
   {
     "mutation_id": "n1829-decoder-accepts-v1",
@@ -1686,19 +1687,42 @@
     "why_more_than_one": "Only the v1 case feeds a schemaVersion 1 row; every other activity fixture in the file is v2 (or not an activity payload at all) and decodes the same whether or not v1 is accepted."
   },
   {
-    "mutation_id": "n1829-row-fixed-copy",
+    "mutation_id": "n1829-row-placeholder-text",
+    "defends": [
+      "oracle:INV-APP-118"
+    ],
+    "target": "web/src/features/track/page/public.tsx",
+    "patch": "diff --git a/web/src/features/track/page/public.tsx b/web/src/features/track/page/public.tsx\n--- a/web/src/features/track/page/public.tsx\n+++ b/web/src/features/track/page/public.tsx\n@@ -588,7 +588,8 @@\n                     {/* The kernel's words are markdown, rendered as the chat renders a reply. An ask is read whole;\n                         a failure is clamped, its full text is in the Planner conversation. */}\n                     <div className={`${styles.noticeBody} ${notification.kind === 'planner-down' ? styles.noticeBodyClamped : ''}`}>\n-                      <Markdown density=\"compact\" headingLevelStart={3}>{notification.text}</Markdown>\n+                      {/* MUT-1829-S3-2: the row shows a fixed placeholder instead of the kernel's words */}\n+                      <Markdown density=\"compact\" headingLevelStart={3}>{'The Planner needs you.'}</Markdown>\n                     </div>\n                     {onDismiss !== undefined && (\n                       <button\n",
+    "expected_red": [
+      "TrackPage header turns a Planner ask into a bottom-right notification whose whole row answers it",
+      "TrackPage header names a row by the first 80 characters of its text",
+      "TrackPage header renders an item as markdown under a plain-words label, and nests no control inside another",
+      "track conversations both notification kinds show the kernel's words and a row click opens the Planner composer",
+      "the track lifecycle status in the page header floats a Planner ask at the viewport corner; the whole row answers it and its × dismisses it",
+      "the track lifecycle status in the page header clamps a planner-down reason to three lines and never an ask",
+      "the track lifecycle status in the page header keeps three type steps: the title largest, the body at body size, the meta line smallest"
+    ],
+    "selection_paths": [
+      "web/src/features/track/page/public.test.tsx",
+      "web/src/features/track/page/header-lifecycle.browser.test.tsx",
+      "web/src/app/router/track-conversation.test.tsx"
+    ],
+    "why_more_than_one": "Every case that reads a row's body reddens: the page cases read its text, its markdown and a link in it; the route's two-kinds case reads the kernel's words; the browser cases hit-test a link in the body, measure an ask body longer than three lines, and size the body's heading and code. Cases that only count rows, click the × or read the header stay green."
+  },
+  {
+    "mutation_id": "n1829-dismiss-not-posted",
     "defends": [
       "oracle:INV-APP-118"
     ],
     "target": "web/src/app/router/public.tsx",
-    "patch": "diff --git a/web/src/app/router/public.tsx b/web/src/app/router/public.tsx\n--- a/web/src/app/router/public.tsx\n+++ b/web/src/app/router/public.tsx\n@@ -1872,7 +1872,8 @@\n   return items.map((item): TrackInputNotification => ({\n     key: item.key,\n     kind: item.source === 'ask' ? 'ask' : 'planner-down',\n-    text: item.text,\n+    // MUT-1829-S1-2: the row says a fixed sentence instead of the kernel's words\n+    text: item.source === 'ask' ? 'The Planner is waiting on you.' : 'The Planner stopped and needs attention.',\n     atMs: item.atMs,\n   }));\n }\n",
+    "patch": "diff --git a/web/src/app/router/public.tsx b/web/src/app/router/public.tsx\n--- a/web/src/app/router/public.tsx\n+++ b/web/src/app/router/public.tsx\n@@ -2375,7 +2375,8 @@\n       onReply={plannerCard === undefined ? undefined : () => {\n         registry.requestOpen(plannerCard.id, { focusComposer: true });\n       }}\n-      onDismiss={(key) => trackMutations.dismissActivityItem(track.id, key)}\n+      /* MUT-1829-S3-1: Dismiss resolves without posting the key */\n+      onDismiss={() => Promise.resolve()}\n       onRenameTrack={(title) => trackMutations.patch(track.id, track.areaId, { title }).then(() => undefined)}\n       onResumeTrack={() => trackMutations.patch(track.id, track.areaId, { lifecycle: 'working' }).then(() => undefined)}\n       onDeleteTrack={(signal) => trackMutations.remove(track.id, track.areaId, signal).then(() => {\n",
     "expected_red": [
-      "track conversations both notification kinds show the kernel's words and Reply opens the Planner composer"
+      "track conversations Dismiss posts the item key"
     ],
     "selection_paths": [
       "web/src/app/router/track-conversation.test.tsx"
     ],
-    "why_more_than_one": "Only the two-kinds case reads a row's words through the route; the count and retired-row cases read the aside by its count or its presence, and the page suite renders rows without the route's mapping."
+    "why_more_than_one": "Only the Dismiss case clicks Dismiss through the route; the other aside cases read the rows or click Reply, and the page suite renders rows without the route's wiring."
   },
   {
     "mutation_id": "s2b-today-launchpad-cards-empty",

@@ -501,6 +501,7 @@ describe('a failed turn in a real engine', () => {
     const failed: ConversationTurnOutcome = {
       id: 'outcome-1', author: 'turn', turnId: 'turn-1', status: 'failed',
       message: 'The conversation exceeded the model\'s context window and the request was rejected before any output was produced.',
+      text: 'The conversation exceeded the model\'s context window and the request was rejected before any output was produced.',
       code: 'contextWindowExceeded', atMs: 0,
     };
     const completed: ConversationTurnOutcome = {
@@ -515,7 +516,7 @@ describe('a failed turn in a real engine', () => {
     expect(outcome.dataset['ncTurnOutcome']).toBe('failed');
     expect(outcome.querySelector('[role="status"]')?.textContent).toBe('Failed');
     const message = outcome.querySelector<HTMLElement>('[data-nc-turn-outcome-message]')!;
-    expect(message.textContent).toBe(failed.message);
+    expect(message.textContent).toBe(failed.text);
     const label = outcome.querySelector<HTMLElement>('[role="status"]')!;
     const labelBox = label.getBoundingClientRect();
     const messageBox = message.getBoundingClientRect();

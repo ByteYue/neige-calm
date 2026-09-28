@@ -250,8 +250,9 @@ pub(crate) async fn evidence(
     })
 }
 
-/// N0–N3 — the rows of the two notification sources, five autocommit statements. N0: the track's one
-/// Planner card (a unique index); without one there is no notify row, no last turn and no U.
+/// N0–N4 — the rows of the two notification sources and the dismissed keys, six autocommit
+/// statements. N0: the track's one Planner card (a unique index); without one there is no notify
+/// row, no last turn and no U.
 pub(crate) async fn notification_rows(
     pool: &SqlitePool,
     track_id: &str,
@@ -276,6 +277,14 @@ pub(crate) async fn notification_rows(
          WHERE scope_track = ?1 AND kind = 'track.lifecycle_changed' \
            AND json_extract(payload, '$.from') = 'blocked'";
     let left_blocked_at = max_ms(pool, left_blocked, track_id).await?;
+    // N4 — the keys the user dismissed (primary key prefix).
+    let dismissed =
+        sqlx::query_scalar("SELECT item_key FROM activity_dismissals WHERE track_id = ?1")
+            .bind(track_id)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
 
     let planner_card: Option<String> =
         sqlx::query_scalar("SELECT id FROM cards WHERE track_id = ?1 AND role = 'planner'")
@@ -286,6 +295,7 @@ pub(crate) async fn notification_rows(
         return Ok(NotificationRows {
             blocked_edge,
             left_blocked_at,
+            dismissed,
             ..NotificationRows::default()
         });
     };
@@ -325,5 +335,6 @@ pub(crate) async fn notification_rows(
         user_sent_at,
         notifies,
         last_turn,
+        dismissed,
     })
 }

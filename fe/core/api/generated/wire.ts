@@ -272,7 +272,12 @@ export type HarnessInputSegment = { presentation: HarnessInputPresentation, text
  */
 attachments: Array<PlannerAttachment>, };
 
-export type HarnessItem = { id: number, worker_session_id: string, card_id: CardId, track_id: TrackId, thread_id: string, turn_id: string | null, item_uuid: string | null, item_type: string | null, method: string, params: string, input_segments?: Array<HarnessInputSegment>, created_at_ms: number, };
+export type HarnessItem = { id: number, worker_session_id: string, card_id: CardId, track_id: TrackId, thread_id: string, turn_id: string | null, item_uuid: string | null, item_type: string | null, method: string, params: string, input_segments?: Array<HarnessInputSegment>, created_at_ms: number, 
+/**
+ * A `turn/completed` row's `error.message` in words a person reads (#1829), reduced by the
+ * kernel; `params` keeps the raw message. `null` on every row without one.
+ */
+turn_error_text: string | null, };
 
 export type HarnessPhaseTag = "pending_thread_start" | "idle" | "issuing_turn" | "issuing_interrupt" | "turn_running" | "turn_completed" | "resumed" | "wedged";
 

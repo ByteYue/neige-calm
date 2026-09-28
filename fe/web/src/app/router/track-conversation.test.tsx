@@ -87,7 +87,7 @@ function receiptStorage(): UiPreferenceStorage {
 function harnessMessage(id: number, itemType: string, item: unknown) {
   return {
     id, worker_session_id: 'r', card_id: ASSISTANT_CARD.id, track_id: 'w1', thread_id: 't',
-    turn_id: null, item_uuid: null, item_type: itemType, method: 'item/completed',
+    turn_id: null, turn_error_text: null, item_uuid: null, item_type: itemType, method: 'item/completed',
     params: JSON.stringify({ item, completedAtMs: id }), created_at_ms: id,
   };
 }
@@ -292,14 +292,14 @@ describe('track conversations', () => {
     await screen.findByRole('button', { name: 'Conversation Assistant' });
   });
 
-  it('both notification kinds show the kernel\'s words and Reply opens the Planner composer', async () => {
+  it('both notification kinds show the kernel\'s words and a row click opens the Planner composer', async () => {
     const mount = () => setup((request) => request.path === '/api/tracks/w1'
       ? ok({
           track: TRACK, can_resume: false,
           cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
           overlays: [trackActivityOverlay({ attention: 'failed', items: [
-            plannerDownItem('unexpected status 403 Forbidden', 5),
-            askItem('Merge PR #1811 now, or hold it?', 4),
+            plannerDownItem('400: The gpt-6-astra model requires a newer version of Codex.', 5),
+            askItem('Merge **PR #1811** now, or hold it?', 4),
           ] })],
         })
       : undefined);
@@ -307,20 +307,21 @@ describe('track conversations', () => {
     const notice = await screen.findByRole('region', { name: 'Notifications' });
     const rows = within(notice).getAllByRole('listitem');
     expect(rows.map((row) => row.getAttribute('data-nc-notification-state'))).toEqual(['planner-down', 'ask']);
-    expect(within(rows[0]).getByText('Planner stopped')).toBeTruthy();
-    expect(within(rows[0]).getByText('unexpected status 403 Forbidden')).toBeTruthy();
-    expect(within(rows[0]).getByText('Fix the cause, then send the Planner a message to continue.')).toBeTruthy();
-    expect(within(rows[1]).getByText('Planner asks')).toBeTruthy();
-    expect(within(rows[1]).getByText('Merge PR #1811 now, or hold it?')).toBeTruthy();
-    expect(within(rows[1]).queryByText('Fix the cause, then send the Planner a message to continue.')).toBeNull();
-    /* Each row's Reply, on a fresh mount: the Planner's composer opens focused and the aside compacts beside it. */
-    for (const [index, text] of ['unexpected status 403 Forbidden', 'Merge PR #1811 now, or hold it?'].entries()) {
+    expect(within(rows[0]).getByText("Planner can't continue")).toBeTruthy();
+    expect(within(rows[0]).getByText('400: The gpt-6-astra model requires a newer version of Codex.')).toBeTruthy();
+    expect(within(rows[1]).getByText('Needs your answer')).toBeTruthy();
+    expect(within(rows[1]).getByText('PR #1811').tagName).toBe('STRONG');
+    expect(within(rows[1]).getByText('PR #1811').parentElement?.textContent).toBe('Merge PR #1811 now, or hold it?');
+    /* Each row's click, on a fresh mount: the Planner's composer opens focused and the aside compacts beside it. */
+    for (const [index, [state, name]] of ([['planner-down', /^Open the Planner: /], ['ask', /^Answer the Planner: /]] as const).entries()) {
       if (index > 0) {
         cleanup();
         window.history.pushState({}, '', `${APP_BASEPATH}/track/w1`);
         mount();
       }
-      fireEvent.click(await screen.findByRole('button', { name: `Reply to the Planner: ${text}` }));
+      const row = within(await screen.findByRole('region', { name: 'Notifications' })).getAllByRole('listitem')
+        .find((candidate) => candidate.getAttribute('data-nc-notification-state') === state);
+      fireEvent.click(within(row!).getByRole('button', { name }));
       expect(await screen.findByRole('complementary', { name: 'Planner chat' })).toBeTruthy();
       await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' })).toBe(document.activeElement));
       expect(screen.getByRole('region', { name: 'Notifications' })
@@ -328,6 +329,46 @@ describe('track conversations', () => {
       expect(screen.getByRole('region', { name: 'Notifications' }).querySelector('strong')).toBeNull();
       expect(window.location.search).not.toContain('card=');
     }
+  });
+
+  it('Dismiss posts the item key', async () => {
+    let dismissed = false;
+    const { client, requests } = setup((request) => {
+      if (request.path === '/api/tracks/w1/activity/dismissals') {
+        dismissed = true;
+        return { status: 204, statusText: 'No Content', body: undefined };
+      }
+      return request.path === '/api/tracks/w1'
+        ? ok({
+            track: TRACK, can_resume: false,
+            cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
+            overlays: [trackActivityOverlay({ attention: 'failed', items: [
+              plannerDownItem('unexpected status 403 Forbidden', 5),
+              ...(dismissed ? [] : [askItem('Merge PR #1811 now, or hold it?', 4)]),
+            ] })],
+          })
+        : undefined;
+    });
+    const askRow = within(await screen.findByRole('region', { name: 'Notifications' })).getAllByRole('listitem')
+      .find((row) => row.getAttribute('data-nc-notification-state') === 'ask');
+    fireEvent.click(within(askRow!).getByRole('button', { name: /^Dismiss: Needs your answer: / }));
+    await waitFor(() => expect(dismissed).toBe(true));
+    expect(requests.filter((request) => request.path === '/api/tracks/w1/activity/dismissals'))
+      .toEqual([expect.objectContaining({ method: 'POST', body: { key: 'ask:lifecycle:4' } })]);
+    /* No optimistic removal: the row stays until the projector's `overlay.set` refreshes the track. */
+    const notice = screen.getByRole('region', { name: 'Notifications' });
+    expect(within(notice).getAllByRole('listitem')).toHaveLength(2);
+    await act(() => {
+      const plan = invalidationPlanFor({ ev: 'overlay.set', data: {
+        id: 'activity-w1', plugin_id: 'kernel', entity_kind: 'track', entity_id: 'w1', kind: 'activity',
+        payload: {}, updated_at: 4,
+      } });
+      applyEventEffects(client, [{ type: 'invalidate', keys: plan.invalidate }]);
+      return Promise.resolve();
+    });
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Notifications' }))
+      .getAllByRole('listitem').map((row) => row.getAttribute('data-nc-notification-state'))).toEqual(['planner-down']));
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('counts an ask and planner down as two notifications', async () => {
@@ -342,7 +383,7 @@ describe('track conversations', () => {
       : undefined);
 
     const notice = await screen.findByRole('region', { name: 'Notifications' });
-    expect(within(notice).getByText('2 waiting on you')).toBeTruthy();
+    expect(within(notice).getByText('Waiting on you').nextElementSibling?.textContent).toBe('2');
     fireEvent.click(within(notice).getByRole('button', { name: 'Collapse notifications' }));
     expect(await screen.findByRole('button', { name: 'Open 2 notifications' })).toBeTruthy();
   });

@@ -264,7 +264,7 @@ describe('CONVERSATION_STATE_SOURCE', () => {
 function item(overrides: Partial<HarnessItem> = {}): HarnessItem {
   return {
     id: 7, worker_session_id: 'runtime', card_id: 'card', track_id: 'track', thread_id: 'thread',
-    turn_id: 'turn', item_uuid: 'item', item_type: 'agentMessage', method: 'item/completed',
+    turn_id: 'turn', turn_error_text: null, item_uuid: 'item', item_type: 'agentMessage', method: 'item/completed',
     params: JSON.stringify({ completedAtMs: 99, item: { text: 'answer' } }), created_at_ms: 50,
     ...overrides,
   };
@@ -309,7 +309,7 @@ describe('transcriptRowToMessages', () => {
 
   it('renders the kernel-written projection of a drained user message as the reader\'s own line', () => {
     const projection = item({
-      item_type: 'userMessage', turn_id: null, item_uuid: 'entry-0001',
+      item_type: 'userMessage', turn_id: null, turn_error_text: null, item_uuid: 'entry-0001',
       params: JSON.stringify({
         item: {
           id: 'entry-0001', clientId: 'entry-0001', type: 'userMessage',
@@ -455,7 +455,7 @@ describe('transcriptRowToMessages', () => {
 describe('harnessItemToActivity', () => {
   const row = (overrides: Partial<HarnessItem>): HarnessItem => ({
     id: 7, worker_session_id: 'runtime', card_id: 'card', track_id: 'track', thread_id: 'thread',
-    turn_id: 'turn', item_uuid: 'uuid', item_type: 'commandExecution', method: 'item/completed',
+    turn_id: 'turn', turn_error_text: null, item_uuid: 'uuid', item_type: 'commandExecution', method: 'item/completed',
     params: '{}', created_at_ms: 50, ...overrides,
   });
 
@@ -696,7 +696,7 @@ describe('buildTranscript', () => {
     entry.author === 'activity' ? entry.verb : entry.author === 'turn' ? entry.status : entry.text;
   const row = (id: number, itemType: string, method: string, item: unknown, uuid = `u${id}`): HarnessItem => ({
     id, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn',
-    item_uuid: uuid, item_type: itemType, method,
+    turn_error_text: null, item_uuid: uuid, item_type: itemType, method,
     params: JSON.stringify({ completedAtMs: 1000 + id, item }), created_at_ms: 1000 + id,
   });
 
@@ -771,7 +771,7 @@ describe('buildTranscript', () => {
   it('renders nothing for a method the transcript does not understand', () => {
     const unknownRow = (method: string, overrides: Partial<HarnessItem> = {}): HarnessItem => ({
       id: 2, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn',
-      item_uuid: null, item_type: null, method,
+      turn_error_text: null, item_uuid: null, item_type: null, method,
       params: JSON.stringify({
         threadId: 't', turnId: 'turn-plan-1', explanation: null,
         plan: [{ step: 'audit', status: 'inProgress' }, { step: 'ship', status: 'pending' }],
@@ -797,9 +797,9 @@ describe('buildTranscript', () => {
   });
 
   it('renders a turn/completed row as a turn outcome, in row order', () => {
-    const outcomeRow = (id: number, turn: unknown) => ({
+    const outcomeRow = (id: number, turn: unknown, text: string | null = null) => ({
       id, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: `turn-${id}`,
-      item_uuid: null, item_type: null, method: 'turn/completed',
+      turn_error_text: text, item_uuid: null, item_type: null, method: 'turn/completed',
       params: JSON.stringify(turn), created_at_ms: 1000 + id,
     });
     const entries = buildTranscript([
@@ -810,7 +810,7 @@ describe('buildTranscript', () => {
       outcomeRow(5, {
         id: 'turn-5', status: 'failed',
         error: { message: 'Context window exceeded', codexErrorInfo: 'contextWindowExceeded' },
-      }),
+      }, 'Context window exceeded'),
     ]);
     expect(entries.map((entry) => entry.author)).toEqual(['you', 'agent', 'turn', 'you', 'turn']);
     expect(entries[2]).toEqual({
@@ -818,7 +818,7 @@ describe('buildTranscript', () => {
     });
     expect(entries[4]).toEqual({
       id: 'outcome-5', author: 'turn', turnId: 'turn-5', status: 'failed',
-      message: 'Context window exceeded', code: 'contextWindowExceeded', atMs: 1005,
+      message: 'Context window exceeded', text: 'Context window exceeded', code: 'contextWindowExceeded', atMs: 1005,
     });
   });
 
@@ -827,7 +827,7 @@ describe('buildTranscript', () => {
       row(1, 'reasoning', 'item/completed', { text: 'hmm' }),
       {
         id: 2, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn-2',
-        item_uuid: null, item_type: null, method: 'turn/completed',
+        turn_error_text: null, item_uuid: null, item_type: null, method: 'turn/completed',
         params: JSON.stringify({ id: 'turn-2', status: 'failed', error: { message: 'boom' } }),
         created_at_ms: 1002,
       },
@@ -849,9 +849,20 @@ describe('buildTranscript', () => {
 describe('transcriptRowToTurnOutcome', () => {
   const outcome = (params: unknown, overrides: { turn_id?: string | null; method?: string } = {}) => ({
     id: 9, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn-9',
-    item_uuid: null, item_type: null, method: 'turn/completed',
+    turn_error_text: null, item_uuid: null, item_type: null, method: 'turn/completed',
     params: typeof params === 'string' ? params : JSON.stringify(params), created_at_ms: 5000,
     ...overrides,
+  });
+
+  it('carries the kernel\'s readable text beside codex\'s raw message', () => {
+    const raw = '{"type":"error","status":400,"error":{"message":"Upgrade Codex."}}';
+    expect(transcriptRowToTurnOutcome({
+      ...outcome({ id: 'turn-9', status: 'failed', error: { message: raw } }),
+      turn_error_text: '400: Upgrade Codex.',
+    })).toEqual({
+      id: 'outcome-9', author: 'turn', turnId: 'turn-9', status: 'failed', atMs: 5000,
+      message: raw, text: '400: Upgrade Codex.',
+    });
   });
 
   it.each(['completed', 'interrupted', 'failed'] as const)('parses a %s turn', (status) => {
@@ -944,17 +955,17 @@ describe('mergeTranscript', () => {
       entry.author === 'activity' ? entry.verb : entry.author === 'turn' ? entry.status : entry.text;
     const userRow = (id: number, text: string) => ({
       id, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn-1',
-      item_uuid: `u${id}`, item_type: 'userMessage', method: 'item/completed',
+      turn_error_text: null, item_uuid: `u${id}`, item_type: 'userMessage', method: 'item/completed',
       params: JSON.stringify({ completedAtMs: 1000 + id, item: { content: [{ text }] } }), created_at_ms: 1000 + id,
     });
     const thoughtRow = (id: number) => ({
       id, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn-1',
-      item_uuid: `u${id}`, item_type: 'reasoning', method: 'item/completed',
+      turn_error_text: null, item_uuid: `u${id}`, item_type: 'reasoning', method: 'item/completed',
       params: JSON.stringify({ completedAtMs: 1000 + id, item: { text: 'hmm' } }), created_at_ms: 1000 + id,
     });
     const stoppedRow = (id: number) => ({
       id, worker_session_id: 'r', card_id: 'c', track_id: 'w', thread_id: 't', turn_id: 'turn-1',
-      item_uuid: null, item_type: null, method: 'turn/completed',
+      turn_error_text: null, item_uuid: null, item_type: null, method: 'turn/completed',
       params: JSON.stringify({ id: 'turn-1', status: 'interrupted' }), created_at_ms: 1000 + id,
     });
     const beforeTheRow = [userRow(1, 'go'), thoughtRow(2), stoppedRow(3)];
