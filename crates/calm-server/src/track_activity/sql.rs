@@ -4,6 +4,7 @@
 
 use sqlx::{Row, SqlitePool};
 
+use super::notifications::{BlockedEdge, LastTurn, NotificationRows, NotifyRow};
 use crate::error::Result;
 use crate::isolated_codex::lookup::isolated_card_exists_sql;
 
@@ -15,14 +16,28 @@ pub const E1_HARNESS_TURN_COMPLETED_SQL: &str = concat!(
     ") FROM cards c WHERE c.track_id = ?1"
 );
 
-/// E2 — a successful `calm.user.notify`: the completed MCP tool call row (`item/completed` only).
-/// A row whose `item.error` is set or whose `item.status` is `failed` is not evidence.
-pub const E2_USER_NOTIFY_SQL: &str = "SELECT MAX(h.created_at_ms) FROM harness_items h \
-     WHERE h.card_id IN (SELECT id FROM cards WHERE track_id = ?1) \
-       AND h.method = 'item/completed' AND h.item_type = 'mcpToolCall' \
-       AND json_extract(h.params, '$.item.tool') = 'calm.user.notify' \
-       AND json_extract(h.params, '$.item.error') IS NULL \
-       AND COALESCE(json_extract(h.params, '$.item.status'), '') <> 'failed'";
+/// N3 — the Planner card's transcript, one statement with two arms (`?1` = the Planner card):
+/// every successful `calm.user.notify` call (the completed MCP tool call row; a row whose
+/// `item.error` is set or whose `item.status` is `failed` is not one), and the newest `turn/completed`
+/// row that is not `interrupted`. `NOT MATERIALIZED` keeps both arms on
+/// `idx_transcript_card_method_created_at`; a `const` so the plan test runs THIS text.
+/// E2 is the `MAX` of the notify arm, uncut by any close rule.
+pub const N3_PLANNER_TRANSCRIPT_SQL: &str = "WITH h AS NOT MATERIALIZED ( \
+       SELECT id, method, item_type, params, created_at_ms FROM harness_items WHERE card_id = ?1) \
+     SELECT 'notify' AS arm, id, created_at_ms, \
+            json_extract(params, '$.item.arguments.text') AS text, NULL AS status FROM h \
+      WHERE method = 'item/completed' AND item_type = 'mcpToolCall' \
+        AND json_extract(params, '$.item.tool') = 'calm.user.notify' \
+        AND json_extract(params, '$.item.error') IS NULL \
+        AND COALESCE(json_extract(params, '$.item.status'), '') <> 'failed' \
+     UNION ALL \
+     SELECT * FROM ( \
+       SELECT 'turn' AS arm, id, created_at_ms, \
+              json_extract(params, '$.error.message') AS text, \
+              json_extract(params, '$.status') AS status FROM h \
+        WHERE method = 'turn/completed' \
+          AND COALESCE(json_extract(params, '$.status'), '') <> 'interrupted' \
+        ORDER BY created_at_ms DESC, id DESC LIMIT 1)";
 
 /// `tracks` row slice the fold needs.
 #[derive(Debug, Clone)]
@@ -108,16 +123,6 @@ pub(crate) async fn track_row(pool: &SqlitePool, track_id: &str) -> Result<Optio
         updated_at: r.get("updated_at"),
         archived_at: r.get("archived_at"),
     }))
-}
-
-/// The planner's last completed turn: max of `last_turn_completed_ms` over every session of a
-/// planner card of the track (superseded ones included, so a restart does not reset it); `NULL` if none.
-pub const PLANNER_LAST_TURN_SQL: &str = "SELECT MAX(ws.last_turn_completed_ms) \
-     FROM worker_sessions ws JOIN cards c ON c.id = ws.card_id \
-    WHERE ws.track_id = ?1 AND c.role = 'planner'";
-
-pub(crate) async fn planner_last_turn(pool: &SqlitePool, track_id: &str) -> Result<Option<i64>> {
-    max_ms(pool, PLANNER_LAST_TURN_SQL, track_id).await
 }
 
 /// W — the current attempt of every task of the track (superseded attempts are not in `current_tasks`).
@@ -219,9 +224,14 @@ async fn max_ms(pool: &SqlitePool, sql: &str, track_id: &str) -> Result<Option<i
     Ok(row.try_get::<Option<i64>, _>(0)?)
 }
 
-/// E1, E2, E4, E7 — four autocommit `MAX` statements. E3 is computed from the W rows by the caller;
-/// the interactive PTY card's last output is read from the renderer registry, not from a row.
-pub(crate) async fn evidence(pool: &SqlitePool, track_id: &str) -> Result<Evidence> {
+/// E1, E4, E7 — three autocommit `MAX` statements; E2 is the caller's `MAX` over the N3 notify rows
+/// it already read. E3 is computed from the W rows by the caller; the interactive PTY card's last
+/// output is read from the renderer registry, not from a row.
+pub(crate) async fn evidence(
+    pool: &SqlitePool,
+    track_id: &str,
+    e2_user_notify: Option<i64>,
+) -> Result<Evidence> {
     // E4 — a lifecycle edge NOT driven by the user (`track.*` is never pruned;
     // `events.actor` is the `ActorId` JSON).
     let e4 = "SELECT MAX(at) FROM events \
@@ -234,8 +244,83 @@ pub(crate) async fn evidence(pool: &SqlitePool, track_id: &str) -> Result<Eviden
                  AND json_extract(payload, '$.author') <> 'user'";
     Ok(Evidence {
         e1_harness_turn_completed: max_ms(pool, E1_HARNESS_TURN_COMPLETED_SQL, track_id).await?,
-        e2_user_notify: max_ms(pool, E2_USER_NOTIFY_SQL, track_id).await?,
+        e2_user_notify,
         e4_agent_lifecycle_edge: max_ms(pool, e4, track_id).await?,
         e7_agent_report_edit: max_ms(pool, e7, track_id).await?,
+    })
+}
+
+/// N0–N3 — the rows of the two notification sources, five autocommit statements. N0: the track's one
+/// Planner card (a unique index); without one there is no notify row, no last turn and no U.
+pub(crate) async fn notification_rows(pool: &SqlitePool, track_id: &str) -> Result<NotificationRows> {
+    // N1 — the newest edge into `blocked` (`events.id` is monotone, so it orders the edges).
+    let blocked_edge = sqlx::query(
+        "SELECT id, at, json_extract(payload, '$.agent_message') AS message FROM events \
+          WHERE scope_track = ?1 AND kind = 'track.lifecycle_changed' \
+            AND json_extract(payload, '$.to') = 'blocked' \
+          ORDER BY id DESC LIMIT 1",
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|r| BlockedEdge {
+        event_id: r.get("id"),
+        at_ms: r.get("at"),
+        message: r.get("message"),
+    });
+    // N1b — L: the newest edge out of `blocked`, whoever wrote it.
+    let left_blocked = "SELECT MAX(at) FROM events \
+         WHERE scope_track = ?1 AND kind = 'track.lifecycle_changed' \
+           AND json_extract(payload, '$.from') = 'blocked'";
+    let left_blocked_at = max_ms(pool, left_blocked, track_id).await?;
+
+    let planner_card: Option<String> =
+        sqlx::query_scalar("SELECT id FROM cards WHERE track_id = ?1 AND role = 'planner'")
+            .bind(track_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(planner_card) = planner_card else {
+        return Ok(NotificationRows {
+            blocked_edge,
+            left_blocked_at,
+            ..NotificationRows::default()
+        });
+    };
+    // N2 — U: the newest message the USER sent to the Planner card (an AI-header send and a send to
+    // an assistant card are not replies).
+    let user_sent = "SELECT MAX(at) FROM events \
+         WHERE kind = 'harness.user_message.enqueued' AND scope_card = ?1 \
+           AND json_extract(actor, '$.kind') = 'User'";
+    let user_sent_at = max_ms(pool, user_sent, &planner_card).await?;
+
+    let mut notifies = Vec::new();
+    let mut last_turn = None;
+    for r in sqlx::query(N3_PLANNER_TRANSCRIPT_SQL)
+        .bind(&planner_card)
+        .fetch_all(pool)
+        .await?
+    {
+        let (row_id, at_ms, text) = (r.get("id"), r.get("created_at_ms"), r.get("text"));
+        if r.get::<&str, _>("arm") == "notify" {
+            notifies.push(NotifyRow {
+                row_id,
+                at_ms,
+                text,
+            });
+        } else {
+            last_turn = Some(LastTurn {
+                row_id,
+                at_ms,
+                status: r.get("status"),
+                error_message: text,
+            });
+        }
+    }
+    Ok(NotificationRows {
+        blocked_edge,
+        left_blocked_at,
+        user_sent_at,
+        notifies,
+        last_turn,
     })
 }

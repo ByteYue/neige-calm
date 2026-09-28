@@ -49,8 +49,8 @@ pub(crate) struct Fx {
     pub(crate) pool: sqlx::SqlitePool,
     pub(crate) events: EventBus,
     pub(crate) write: WriteContext,
-    role_cache: CardRoleCache,
-    area_cache: TrackAreaCache,
+    pub(crate) role_cache: CardRoleCache,
+    pub(crate) area_cache: TrackAreaCache,
     pub(crate) harness: HarnessRegistry,
     pub(crate) projector: TrackActivityProjector,
     pub(crate) area_id: String,
@@ -153,17 +153,6 @@ impl Fx {
                     ..Default::default()
                 },
             )
-            .await
-            .unwrap();
-    }
-
-    /// The planner's last completed turn (P) as a direct column write: the feeder's own writer refuses a
-    /// superseded row, and `superseded_planner_turn_still_ages` needs the value on exactly such a row.
-    pub(crate) async fn planner_turn_completed(&self, session_id: &str, at_ms: Option<i64>) {
-        sqlx::query("UPDATE worker_sessions SET last_turn_completed_ms = ?1 WHERE id = ?2")
-            .bind(at_ms)
-            .bind(session_id)
-            .execute(&self.pool)
             .await
             .unwrap();
     }

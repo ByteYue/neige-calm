@@ -76,6 +76,8 @@ mod track_claude_permissions_policy;
 mod track_conversations;
 #[path = "cases/track_delete_thread_cache.rs"]
 mod track_delete_thread_cache;
+#[path = "cases/track_notifications.rs"]
+mod track_notifications;
 #[path = "cases/track_projection_policy_patch.rs"]
 mod track_projection_policy_patch;
 #[path = "cases/track_workspace_materialize.rs"]

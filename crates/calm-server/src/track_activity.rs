@@ -2,6 +2,7 @@
 //! `activity_at_ms`), recomputed on every wake-up from durable rows plus one in-process value — the
 //! renderer registry's last-output instant of each interactive PTY card; bus events are only wake-ups.
 
+pub mod notifications;
 pub mod sql;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -24,6 +25,8 @@ use crate::state::WriteContext;
 use crate::terminal_renderer::TerminalRendererRegistry;
 use crate::track_lifecycle::track_get_tx;
 use calm_truth::validation::{KERNEL_OVERLAY_PLUGIN_ID, OVERLAY_ACTIVITY_SCHEMA_VERSION};
+pub use notifications::{ActivityItem, NotificationSource};
+use notifications::{NotificationRows, notifications};
 use sql::{SessionRow, TaskRow, TrackRow};
 use tokio::sync::mpsc;
 
@@ -38,40 +41,14 @@ pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// Output → quiet has no edge and is the tick's.
 pub const INTERACTIVE_OUTPUT_WINDOW: Duration = Duration::from_secs(5);
 
-/// `attention` — the fold of `items[]` (`failed > input > none`), kept redundantly so the rail need not scan the items.
+/// `attention` — the fold of `items[]` (a `planner_down` item ⇒ `failed`, else an `ask` ⇒ `input`), kept
+/// redundantly so the rail need not scan the items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Attention {
     None,
     Input,
     Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ItemKind {
-    Input,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ItemSource {
-    Card,
-    Task,
-    Session,
-    Lifecycle,
-}
-
-/// One attention source. `id` is the card id / task key / session id / track id by `source`;
-/// `at_ms` is taken from the column the evidence lives in so newest-first order is honest.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ActivityItem {
-    pub kind: ItemKind,
-    pub source: ItemSource,
-    pub id: String,
-    pub card_id: Option<String>,
-    pub at_ms: i64,
 }
 
 /// Per-card conclusion; the fold order is the derived `Ord` (`working < input < failed`).
@@ -124,8 +101,8 @@ pub struct TrackRows {
     pub output: HashMap<String, i64>,
     /// The instant the rows were read, for the output window.
     pub now_ms: i64,
-    /// P — the planner's last completed turn; `None` when no planner turn of the track has ever completed.
-    pub planner_last_turn: Option<i64>,
+    /// N0–N3 — what the two notification sources read.
+    pub notifications: NotificationRows,
 }
 
 /// The conclusions of one fold, before the high-water mark is merged in.
@@ -146,9 +123,9 @@ impl Fold {
     pub fn attention(&self) -> Attention {
         self.items
             .iter()
-            .map(|i| match i.kind {
-                ItemKind::Failed => Attention::Failed,
-                ItemKind::Input => Attention::Input,
+            .map(|i| match i.source {
+                NotificationSource::PlannerDown => Attention::Failed,
+                NotificationSource::Ask => Attention::Input,
             })
             .max()
             .unwrap_or(Attention::None)
@@ -167,7 +144,7 @@ pub fn interactive_pty_card(ws: &SessionRow) -> bool {
 
 /// A task-bound worker card whose current attempts are AT LEAST ONE row and ALL `done`, and whose
 /// session was minted no later than the last completion, does not turn `state='failed'` into a
-/// `failed` item: the exit verdict belongs to finished work. A card with NO current row is NOT suppressed.
+/// `failed` card verdict: the exit verdict belongs to finished work. A card with NO current row is NOT suppressed.
 fn failed_session_is_finished_work(session: &SessionRow, tasks: &[TaskRow]) -> bool {
     let rows: Vec<&TaskRow> = tasks
         .iter()
@@ -184,7 +161,6 @@ fn failed_session_is_finished_work(session: &SessionRow, tasks: &[TaskRow]) -> b
 
 pub fn fold(track_id: &str, rows: &TrackRows) -> Fold {
     let mut working = false;
-    let mut items: Vec<ActivityItem> = Vec::new();
     let mut cards: BTreeMap<String, CardState> = BTreeMap::new();
     // The cards with `working` evidence, kept apart from the max-collapsed `cards` slots: a `failed` / `input`
     // verdict out-ranks `working` in the slot, and the terminal-phase filter needs the working evidence back once those go.
@@ -208,10 +184,6 @@ pub fn fold(track_id: &str, rows: &TrackRows) -> Fold {
         raise(cards, card_id, CardState::Working);
     }
 
-    // Failure aging: a `task` / `session` failure counts only when it landed AFTER the planner's last
-    // completed turn (P `None` = never handled, so it counts). `lifecycle` and `input` items are not aged.
-    let failure_counts = |at_ms: i64| rows.planner_last_turn.is_none_or(|p| at_ms > p);
-
     // W — the task clause.
     for t in &rows.tasks {
         let is_child_track = t.child_track_id.is_some();
@@ -231,22 +203,11 @@ pub fn fold(track_id: &str, rows: &TrackRows) -> Fold {
                     raise_working(&mut cards, &mut working_cards, wc);
                 }
             }
+            // A failed attempt is a card verdict, not a notification: the Planner handles it.
             "failed" => {
-                let at_ms = t.finished_at_ms.unwrap_or(t.updated_at_ms);
-                if failure_counts(at_ms) {
-                    items.push(ActivityItem {
-                        kind: ItemKind::Failed,
-                        source: ItemSource::Task,
-                        id: t.key.clone(),
-                        card_id: t.worker_card_id.clone(),
-                        at_ms,
-                    });
-                    if let Some(wc) = &t.worker_card_id {
-                        raise(&mut cards, wc, CardState::Failed);
-                    }
+                if let Some(wc) = &t.worker_card_id {
+                    raise(&mut cards, wc, CardState::Failed);
                 }
-                // E3 counts the failure whether or not it is still red
-                // (unread is unchanged by aging).
                 e3 = e3.max(t.finished_at_ms);
             }
             "done" => {
@@ -280,52 +241,29 @@ pub fn fold(track_id: &str, rows: &TrackRows) -> Fold {
             }
         }
         // `failed` ⇔ `ws.state = 'failed'` (the exit writer's verdict on an ephemeral session, the
-        // reaper's on a harness / isolated one). A signal-killed codex TUI leaves its resumable row
-        // `running` and is NOT failed. Unknown providers: nothing.
+        // reaper's on a harness / isolated one): a card verdict, not a notification. A signal-killed
+        // codex TUI leaves its resumable row `running` and is NOT failed. Unknown providers: nothing.
         if (harness || pty_backed)
             && ws.state == "failed"
             && !failed_session_is_finished_work(ws, &rows.tasks)
-            && failure_counts(ws.updated_at_ms)
         {
-            items.push(ActivityItem {
-                kind: ItemKind::Failed,
-                source: ItemSource::Session,
-                id: ws.id.clone(),
-                card_id: Some(ws.card_id.clone()),
-                at_ms: ws.updated_at_ms,
-            });
             raise(&mut cards, &ws.card_id, CardState::Failed);
         }
     }
 
-    // Lifecycle.
-    let lifecycle_item = |kind: ItemKind| ActivityItem {
-        kind,
-        source: ItemSource::Lifecycle,
-        id: track_id.to_string(),
-        card_id: None,
-        at_ms: rows.track.updated_at,
-    };
-    match rows.track.lifecycle.as_str() {
-        "blocked" | "reviewing" => items.push(lifecycle_item(ItemKind::Input)),
-        "failed" => items.push(lifecycle_item(ItemKind::Failed)),
-        _ => {}
-    }
+    // The notification items, newest first then by key so the stored payload compares byte-stable.
+    let items = notifications(track_id, &rows.notifications);
 
-    // Terminal-phase filter: on a `done` or archived track nothing waits on a person — `items` and the per-card
-    // `input` / `failed` verdicts go; `working` stays (the sweeper ends it) and `cards` is rebuilt from the working evidence.
+    // Terminal-phase filter, `cards[]` only: on a `done` or archived track the per-card `input` / `failed`
+    // verdicts go; `working` stays (the sweeper ends it) and `cards` is rebuilt from the working evidence.
+    // The items are not filtered: an open ask or planner down is still addressed to the user.
     if rows.track.lifecycle == "done" || rows.track.archived_at.is_some() {
-        items.clear();
         cards = working_cards
             .iter()
             .map(|card_id| (card_id.clone(), CardState::Working))
             .collect();
     }
 
-    // Deterministic order so the stored payload compares byte-stable:
-    // newest first, then by source / id.
-    items.sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.cmp(b)));
-    items.dedup();
     let cards = cards
         .into_iter()
         .map(|(card_id, state)| CardActivity { card_id, state })
@@ -406,7 +344,7 @@ impl TrackActivityProjector {
         };
         let tasks = sql::current_tasks(&self.pool, track_id).await?;
         let sessions = sql::eligible_sessions(&self.pool, track_id).await?;
-        let planner_last_turn = sql::planner_last_turn(&self.pool, track_id).await?;
+        let notifications = sql::notification_rows(&self.pool, track_id).await?;
         let live_harness_sessions = self
             .harness
             .live_for_track(&TrackId::from(track_id.to_string()))
@@ -429,7 +367,7 @@ impl TrackActivityProjector {
             live_harness_sessions,
             output,
             now_ms: crate::model::now_ms(),
-            planner_last_turn,
+            notifications,
         }))
     }
 
@@ -439,7 +377,8 @@ impl TrackActivityProjector {
             return Ok(Recompute::NoTrack);
         };
         let folded = fold(track_id, &rows);
-        let evidence = sql::evidence(&self.pool, track_id).await?;
+        let e2 = rows.notifications.notifies.iter().map(|n| n.at_ms).max();
+        let evidence = sql::evidence(&self.pool, track_id, e2).await?;
         let stored = sql::existing_activity_payload(&self.pool, track_id).await?;
         // The high-water mark is read from the raw JSON, independently of the struct parse: a payload
         // another binary version wrote must not re-seed the mark and light a spurious unread.
@@ -576,13 +515,21 @@ impl TrackActivityProjector {
     pub async fn track_for_event(&self, env: &BroadcastEnvelope) -> Option<String> {
         match &env.event {
             Event::HarnessPhaseChanged { track_id, .. } => Some(track_id.as_str().to_string()),
-            // The COMPLETED tool-call row only; the `item/started` twin would be a second recompute that finds nothing new.
+            // The COMPLETED tool-call row only (the `item/started` twin would be a second recompute that
+            // finds nothing new), and every turn end: a codex system error persists its failed turn row
+            // AFTER the phase event, so only this event carries it.
             Event::HarnessItemAdded {
                 track_id,
                 item_type,
                 method,
                 ..
-            } if item_type.as_deref() == Some("mcpToolCall") && method == "item/completed" => {
+            } if (item_type.as_deref() == Some("mcpToolCall") && method == "item/completed")
+                || method == "turn/completed" =>
+            {
+                Some(track_id.as_str().to_string())
+            }
+            // A user's reply to the Planner closes its asks.
+            Event::HarnessUserMessageEnqueued { track_id, .. } => {
                 Some(track_id.as_str().to_string())
             }
             Event::WorkerSessionStarted { card_id, .. }
