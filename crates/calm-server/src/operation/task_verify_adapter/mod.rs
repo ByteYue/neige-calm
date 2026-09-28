@@ -295,6 +295,9 @@ pub struct TaskVerifyAdapter {
     #[cfg(test)]
     pub(crate) before_release:
         Option<std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
+    #[cfg(any(test, feature = "fixtures"))]
+    before_completion:
+        Option<std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
 }
 
 impl TaskVerifyAdapter {
@@ -303,7 +306,19 @@ impl TaskVerifyAdapter {
             gate_logs_dir,
             #[cfg(test)]
             before_release: None,
+            #[cfg(any(test, feature = "fixtures"))]
+            before_completion: None,
         }
+    }
+
+    /// Fixture-only pause in the live observer after the kernel verdict, before completion commits.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn with_before_completion(
+        mut self,
+        hook: std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>,
+    ) -> Self {
+        self.before_completion = Some(hook);
+        self
     }
 
     /// For the GENUINELY config-less call sites only; every config-ful site passes the resolved dir explicitly.
@@ -720,8 +735,10 @@ impl ProviderAdapter for TaskVerifyAdapter {
         let observer_pool = pool.clone();
         let observer_log_path = log_path.clone();
         let observer_frozen = frozen.clone();
+        #[cfg(any(test, feature = "fixtures"))]
+        let before_completion = self.before_completion.clone();
         let observer = Box::pin(async move {
-            let verdict = super::gate_process::wait_verdict(
+            let observation = super::gate_process::observe_verdict(
                 child,
                 artifacts.clone(),
                 observer_log_path,
@@ -729,11 +746,18 @@ impl ProviderAdapter for TaskVerifyAdapter {
                 timeout_secs,
             )
             .await;
-            // `wait_verdict` killed and waited the group; a cleanup it left unresolved is what
-            // `stop_group` reports, and `finalize` then samples nothing.
+            #[cfg(any(test, feature = "fixtures"))]
+            if let Some(hook) = before_completion {
+                hook().await;
+            }
+            // `observe_verdict` killed the group and waited for it to stop, but left the leader an
+            // unreaped zombie: its identity keeps a concurrent parked probe from reading this
+            // killed gate as dead-without-verdict until the verdict below commits. A cleanup it
+            // left unresolved is what `stop_group` reports, and `finalize` then samples nothing.
             let op_marker = gate_attempt_key(&observer_frozen.task_id, observer_frozen.attempt);
             let stopped = target::stop_group(&artifacts, &op_marker).await;
-            let verdict = target::finalize(verdict, &observer_frozen, stopped).await;
+            let verdict =
+                target::finalize(observation.verdict.clone(), &observer_frozen, stopped).await;
             if let Err(e) = complete_gate_op_with_result(
                 &observer_pool,
                 &completion,
@@ -751,6 +775,7 @@ impl ProviderAdapter for TaskVerifyAdapter {
                     "gate observer: completion tx failed; sweep/reconcile will recover"
                 );
             }
+            observation.reap().await;
         });
 
         let deadline_ms = now_ms() + (timeout_secs + PARKED_DEADLINE_SLACK_SECS) * 1000;
