@@ -10,18 +10,17 @@ export type AttentionKind = 'none' | 'input' | 'failed';
 /** The per-card verdict the overlay's `cards[]` carries; a card without one has no indicator. */
 export type CardActivity = 'working' | 'input' | 'failed';
 
-/** Where an attention item came from — the overlay's `items[].source`. */
-export type ActivityOrigin = 'card' | 'task' | 'session' | 'lifecycle';
+/** What a notification is: the Planner asks the user something, or the Planner stopped. */
+export type NotificationSource = 'ask' | 'planner_down';
 
-/** One thing that needs a person, as the kernel listed it. */
+/** One thing addressed to the user and not yet handled, as the kernel listed it (`items[]`). */
 export type ActivityItem = Readonly<{
-  origin: ActivityOrigin;
-  /** Card id, task key, session id or track id — whichever `origin` names. */
-  id: string;
-  /** The card to open for it; `null` for a lifecycle item or a task with no worker card yet. */
-  cardId: string | null;
+  source: NotificationSource;
+  /** The kernel's identity for it; the same source happening again is a new key. */
+  key: string;
+  /** The kernel's words: the Planner's question, or the reason it stopped. */
+  text: string;
   atMs: number;
-  kind: 'input' | 'failed';
 }>;
 
 /** The precedence, stated once: `failed > attention > working > unread > quiet`. */
@@ -55,38 +54,6 @@ export function activityNameBit(state: ActivityState): string {
     case 'unread':
     case 'quiet': return '';
   }
-}
-
-/** Folds a list of items the way the kernel folds `attention`: any failed → failed, else any input → input. */
-export function attentionKindOf(items: readonly Readonly<{ kind: 'input' | 'failed' }>[]): AttentionKind {
-  let kind: AttentionKind = 'none';
-  for (const item of items) {
-    if (item.kind === 'failed') return 'failed';
-    kind = 'input';
-  }
-  return kind;
-}
-
-/**
- * One row per card for the Notifications aside: a card's items fold into the one with the largest
- * `atMs` (a tie goes to the `task` item over the `session` one), so the row's `origin` / `id` name
- * that item; items with no card (`cardId === null`) stay one row each. No `failed > input` precedence:
- * the kernel emits no card-level `input` item, so a card's items are all `failed`.
- * Rows keep first-appearance order.
- */
-export function foldAttentionByCard(items: readonly ActivityItem[]): ActivityItem[] {
-  const rows: ActivityItem[] = [];
-  const rowByCard = new Map<string, number>();
-  for (const item of items) {
-    if (item.cardId === null) { rows.push(item); continue; }
-    const index = rowByCard.get(item.cardId);
-    if (index === undefined) { rowByCard.set(item.cardId, rows.length); rows.push(item); continue; }
-    const current = rows[index];
-    const later = item.atMs > current.atMs
-      || (item.atMs === current.atMs && item.origin === 'task' && current.origin !== 'task');
-    if (later) rows[index] = item;
-  }
-  return rows;
 }
 
 /** The one read of a track's per-card verdicts; `null` is "the kernel said nothing about this card". */

@@ -132,21 +132,24 @@ describe('TrackPage header', () => {
     expect(onCloseBoard).toHaveBeenCalledOnce();
   });
 
-  it('turns a card input request into a bottom-right notification action', async () => {
-    const onOpenInputNotification = vi.fn();
+  it('turns a Planner ask into a bottom-right notification whose one action is Reply', async () => {
+    const onReply = vi.fn();
+    const now = 1_790_000_000_000;
     renderPage({
       inputNotifications: [{
-        origin: 'card', id: 'planner', cardId: 'planner', source: 'Planner',
-        message: 'Requires input to continue.', state: 'awaiting-input', updatedAt: 1,
+        key: 'ask:lifecycle:7', kind: 'ask', text: 'Merge PR #1811 now, or hold it?', atMs: now - 3 * 60_000,
       }],
-      onOpenInputNotification,
+      onReply,
+      nowMs: now,
     });
     const notice = screen.getByRole('region', { name: 'Notifications' });
     expect(screen.getByRole('status', { name: 'Input notifications' }).textContent)
       .toBe('1 notification needs your attention.');
     expect(notice.textContent).toContain('Notifications');
-    expect(notice.textContent).toContain('1 item needs attention');
-    expect(notice.textContent).toContain('Requires input to continue.');
+    expect(notice.textContent).toContain('1 waiting on you');
+    const row = within(notice).getByRole('listitem');
+    expect(row.getAttribute('data-nc-notification-state')).toBe('ask');
+    expect(row.textContent).toBe('Planner asks3mMerge PR #1811 now, or hold it?Reply');
     expect(screen.queryByText('Needs input')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Collapse notifications' }));
     expect(notice.getAttribute('data-nc-notification-mode')).toBe('compact');
@@ -154,24 +157,32 @@ describe('TrackPage header', () => {
     expect(notice.textContent).toContain('1');
     await userEvent.click(screen.getByRole('button', { name: 'Open 1 notification' }));
     expect(notice.getAttribute('data-nc-notification-mode')).toBe('expanded');
-    await userEvent.click(screen.getByRole('button', { name: 'Review Planner notification: Requires input to continue.' }));
-    expect(onOpenInputNotification).toHaveBeenCalledWith('planner');
+    await userEvent.click(screen.getByRole('button', { name: 'Reply to the Planner: Merge PR #1811 now, or hold it?' }));
+    expect(onReply).toHaveBeenCalledOnce();
   });
 
-  it('reopens a collapsed center when another card requests attention', async () => {
-    const planner: TrackInputNotification = {
-      origin: 'card', id: 'planner', cardId: 'planner', source: 'Planner',
-      message: 'Requires input to continue.', state: 'awaiting-input', updatedAt: 1,
+  it('names a Reply by the first 80 characters of its text', () => {
+    const long = `${'a'.repeat(80)}${'b'.repeat(40)}`;
+    renderPage({
+      inputNotifications: [{ key: 'planner_down:9', kind: 'planner-down', text: long, atMs: 1 }],
+      onReply: vi.fn(),
+    });
+    expect(screen.getByRole('button', { name: `Reply to the Planner: ${'a'.repeat(80)}…` })).toBeTruthy();
+    expect(screen.getByText(long)).toBeTruthy();
+  });
+
+  it('reopens a collapsed center when another notification arrives', async () => {
+    const ask: TrackInputNotification = {
+      key: 'ask:notify:1', kind: 'ask', text: 'Which branch?', atMs: 1,
     };
-    const worker: TrackInputNotification = {
-      origin: 'card', id: 'worker', cardId: 'worker', source: 'Worker',
-      message: 'Stopped with an error and needs attention.', state: 'errored', updatedAt: 2,
+    const down: TrackInputNotification = {
+      key: 'planner_down:2', kind: 'planner-down', text: 'unexpected status 403 Forbidden', atMs: 2,
     };
     function NotificationHarness() {
-      const [notifications, setNotifications] = useState<readonly TrackInputNotification[]>([planner]);
+      const [notifications, setNotifications] = useState<readonly TrackInputNotification[]>([ask]);
       return (
         <>
-          <button type="button" onClick={() => setNotifications([worker, planner])}>Add notification</button>
+          <button type="button" onClick={() => setNotifications([down, ask])}>Add notification</button>
           <TrackPage
             mobilePanelObscured={false}
             track={track()}
@@ -195,7 +206,7 @@ describe('TrackPage header', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Add notification' }));
     expect(screen.getByRole('region', { name: 'Notifications' })
       .getAttribute('data-nc-notification-mode')).toBe('expanded');
-    expect(screen.getByText('2 items need attention')).toBeTruthy();
+    expect(screen.getByText('2 waiting on you')).toBeTruthy();
     expect(screen.getByRole('status', { name: 'Input notifications' }).textContent)
       .toBe('2 notifications need your attention.');
   });

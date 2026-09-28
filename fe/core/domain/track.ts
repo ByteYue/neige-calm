@@ -43,13 +43,13 @@ export type TrackActivity = Readonly<{
   now: string;
   /** From the kernel `activity` overlay: something dispatched is still running. */
   working: boolean;
-  /** Same overlay: the fold of `attentionItems` — any failed → failed, else any input → input. */
+  /** Same overlay: the fold of `attentionItems` — a `planner_down` item → failed, else an `ask` → input. */
   attention: AttentionKind;
   /** Same overlay: high-water mark of completion-class evidence; the read receipt compares against it. */
   activityAt: number | null;
   /** Latest finite write/evidence time from the kernel activity overlay; used only for Area ordering. */
   recentAt: number | null;
-  /** Same overlay: every item that needs a person, with where it came from. */
+  /** Same overlay: every notification — an ask or planner down — with the kernel's words for it. */
   attentionItems: readonly ActivityItem[];
   /** Same overlay: the per-card verdicts, keyed by card id. Read through `cardActivityOf`. */
   cards: Readonly<Record<string, CardActivity>>;
@@ -143,10 +143,9 @@ function payloadField(payload: unknown, key: string): unknown {
 
 const attentionKindSchema = z.enum(['none', 'input', 'failed']);
 const activityItemWireSchema = z.object({
-  kind: z.enum(['input', 'failed']),
-  source: z.enum(['card', 'task', 'session', 'lifecycle']),
-  id: z.string(),
-  card_id: z.string().nullable(),
+  source: z.enum(['ask', 'planner_down']),
+  key: z.string(),
+  text: z.string(),
   at_ms: z.number(),
 });
 const activityCardWireSchema = z.object({
@@ -157,7 +156,7 @@ const activityCardWireSchema = z.object({
 /** Mirrors `calm_truth::validation::KERNEL_OVERLAY_PLUGIN_ID`. */
 const KERNEL_OVERLAY_PLUGIN_ID = 'kernel';
 const activityOverlayWireSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   working: z.boolean(),
   attention: attentionKindSchema,
   activity_at_ms: z.number().nullable(),
@@ -173,8 +172,7 @@ function activityOverlayFields(payload: unknown): Partial<TrackActivity> | null 
     const item = activityItemWireSchema.safeParse(row);
     if (!item.success) continue;
     attentionItems.push({
-      origin: item.data.source, id: item.data.id, cardId: item.data.card_id,
-      atMs: item.data.at_ms, kind: item.data.kind,
+      source: item.data.source, key: item.data.key, text: item.data.text, atMs: item.data.at_ms,
     });
   }
   const cards: Record<string, CardActivity> = {};
@@ -250,25 +248,6 @@ export function sortAreaTracksByRecent(tracks: readonly Track[]): Track[] {
     const rightSort = Number.isFinite(right.sort) ? right.sort : Number.POSITIVE_INFINITY;
     return leftSort - rightSort || bytewiseCompare(left.id, right.id);
   });
-}
-
-/** The longest title the Notifications aside takes from a card's goal. */
-export const CARD_GOAL_TITLE_MAX = 60;
-
-/**
- * The first line of a card's `payload.goal`, capped at `CARD_GOAL_TITLE_MAX` characters — how the
- * Notifications aside names a worker card. `Card.payload` is `z.unknown()`, so this is a narrow
- * runtime guard (an object with a string `goal`), not a schema; `null` when there is no such goal.
- */
-export function cardGoalTitle(payload: unknown): string | null {
-  if (typeof payload !== 'object' || payload === null) return null;
-  const goal = (payload as { goal?: unknown }).goal;
-  if (typeof goal !== 'string') return null;
-  const newline = goal.indexOf('\n');
-  const line = (newline === -1 ? goal : goal.slice(0, newline)).trim();
-  if (line === '') return null;
-  const chars = [...line];
-  return chars.length > CARD_GOAL_TITLE_MAX ? `${chars.slice(0, CARD_GOAL_TITLE_MAX - 1).join('')}…` : line;
 }
 
 export const cardWireSchema = z.object({

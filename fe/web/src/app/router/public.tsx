@@ -19,10 +19,10 @@ import {
 } from '../../features/planner/attachments.tsx';
 import { hasUnseenMatchingConversationMessage, failedConversationDelivery } from '../../../../core/domain/conversation-delivery.ts';
 import {
-  cardGoalTitle, liveTableOverlayPayload, plannerProviderOf, toTrack, trackActivityFrom, trackDisplayTitle,
+  liveTableOverlayPayload, plannerProviderOf, toTrack, trackActivityFrom, trackDisplayTitle,
   type Track, type TrackActivity, type TrackDetailWire,
 } from '../../../../core/domain/track.ts';
-import { cardActivityOf, foldAttentionByCard, type CardActivity } from '../../../../core/domain/activity.ts';
+import { cardActivityOf, type CardActivity } from '../../../../core/domain/activity.ts';
 import type {
   BoardHostItem, CardAddMenuEntry, CardHost, CardRegistry,
 } from '../../systems/cards/public.js';
@@ -1864,47 +1864,17 @@ function TrackRoute({ transport, unauthorized, cardRuntime, recentFiles }: {
   );
 }
 
-/** How a card without a goal is named in the Notifications aside: the planner by role, the rest by title, then kind. */
-function notificationCardLabel(card: TrackDetailWire['cards'][number]): string {
-  return card.kind === 'codex' && isPlannerHarnessPayload(card.payload)
-    ? 'Planner'
-    : card.kind === 'codex' && isAssistantHarnessPayload(card.payload)
-      ? card.title ?? 'Assistant'
-      : card.title ?? card.kind;
-}
-
 /**
- * The Notifications aside from `activity.items`, one row per card (`foldAttentionByCard`),
- * newest first. A card's row is named by the first line of its `payload.goal` (a worker card's
- * task, in words); a card with no goal (a terminal card, the planner) by `notificationCardLabel`.
+ * The Notifications aside from `activity.items`: one row per item, in the kernel's order (newest
+ * first) and in the kernel's words. No item names a card: both sources belong to the Planner.
  */
-function attentionNotifications(
-  items: TrackActivity['attentionItems'], cards: TrackDetailWire['cards'],
-): readonly TrackInputNotification[] {
-  return foldAttentionByCard(items).map((item): TrackInputNotification => {
-    const card = item.cardId === null ? undefined : cards.find((candidate) => candidate.id === item.cardId);
-    /* An item whose `card_id` names a card absent from `detail.cards` (deleted between
-           ticks) is listed as `Card`; the next tick drops it. */
-    const source = card !== undefined ? cardGoalTitle(card.payload) ?? notificationCardLabel(card)
-      : item.origin === 'task' ? `Task ${item.id}`
-        : item.origin === 'lifecycle' ? 'Track' : 'Card';
-    const message = item.origin === 'card'
-      ? (item.kind === 'input' ? 'Requires input to continue.' : 'Stopped with an error and needs attention.')
-      : item.origin === 'session'
-        ? (item.kind === 'input' ? 'Its session is waiting for input.' : 'Its session failed and needs attention.')
-        : item.origin === 'task'
-          ? (item.kind === 'input' ? 'The task is waiting for input.' : 'The task failed and needs attention.')
-          : (item.kind === 'input' ? 'The track is waiting on you.' : 'The track failed and needs attention.');
-    return {
-      origin: item.origin,
-      id: item.id,
-      cardId: card === undefined ? null : card.id,
-      source,
-      message,
-      state: item.kind === 'input' ? 'awaiting-input' : 'errored',
-      updatedAt: item.atMs,
-    };
-  }).toSorted((left, right) => right.updatedAt - left.updatedAt);
+function trackNotifications(items: TrackActivity['attentionItems']): readonly TrackInputNotification[] {
+  return items.map((item): TrackInputNotification => ({
+    key: item.key,
+    kind: item.source === 'ask' ? 'ask' : 'planner-down',
+    text: item.text,
+    atMs: item.atMs,
+  }));
 }
 
 function TrackRouteBody({
@@ -2085,8 +2055,8 @@ function TrackRouteBody({
       }));
   }, [cardRegistry, cards, track]);
   const inputNotifications = useMemo(
-    () => attentionNotifications(track.attentionItems, cards),
-    [cards, track.attentionItems],
+    () => trackNotifications(track.attentionItems),
+    [track.attentionItems],
   );
   /* Stable across renders that do not change the overlays, so a live table is
      not handed a new resolver identity on every keystroke elsewhere. */
@@ -2100,13 +2070,6 @@ function TrackRouteBody({
   /* One polled read of the track's previews, only while the report has a `preview` block. */
   const resolvePreview = useReportPreviewResolver(transport, track.id, reportBlocks, unauthorized);
   const previewViewports = useReportPreviewViewports(track.id);
-  const conversationNotificationCardIds = useMemo(
-    () => new Set(cards
-      .filter((card) => card.kind === 'codex'
-        && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload)))
-      .map((card) => card.id)),
-    [cards],
-  );
   /* The cards this route can open, asked of the registry through the list the board
    * draws. A worker card whose kind no entry claims is `unknown` and its `?card=`
    * is bounced; its task keeps its `workerCardId` regardless, because the TASKS
@@ -2407,21 +2370,10 @@ function TrackRouteBody({
       onStartConversation={chat.startConversation}
       conversationOpen={chat.isOpen}
       inputNotifications={inputNotifications}
-      onOpenInputNotification={(cardId) => {
-        /* No card to open (a lifecycle item, a task with no worker card yet): the
-                   track itself is the destination. */
-        if (cardId === null) {
-          if (plannerCard !== undefined) registry.requestOpen(plannerCard.id, { focusComposer: true });
-          else go({ name: 'track', trackId: track.id, from: routeFrom });
-          return;
-        }
-        if (conversationNotificationCardIds.has(cardId)) {
-          registry.requestOpen(cardId, { focusComposer: true });
-          return;
-        }
-        if (!gridItems.some((item) => item.card.id === cardId)) return;
-        chat.close();
-        go({ name: 'track', trackId: track.id, cardId, from: routeFrom });
+      /* Both kinds of item are the Planner's, so both reply to it: sending it a message is what
+         answers an ask and what makes a stopped Planner continue. */
+      onReply={plannerCard === undefined ? undefined : () => {
+        registry.requestOpen(plannerCard.id, { focusComposer: true });
       }}
       onRenameTrack={(title) => trackMutations.patch(track.id, track.areaId, { title }).then(() => undefined)}
       onResumeTrack={() => trackMutations.patch(track.id, track.areaId, { lifecycle: 'working' }).then(() => undefined)}

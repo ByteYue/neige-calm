@@ -6,8 +6,8 @@ use calm_server::event::Event;
 use calm_server::model::{CardRole, new_id};
 use calm_server::routes::theme::RequestTheme;
 use calm_server::track_activity::{
-    ActivityPayload, Attention, CardState, INTERACTIVE_OUTPUT_WINDOW, ItemKind, ItemSource,
-    Recompute, TrackActivityProjector,
+    ActivityPayload, Attention, CardState, INTERACTIVE_OUTPUT_WINDOW, Recompute,
+    TrackActivityProjector,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -3362,7 +3362,7 @@ async fn interactive_codex_card_uses_output_not_thread_status() {
     h.stop(&p.terminal).await;
 }
 
-/// The reader writes the signal-killed session `failed` ⇒ one `session` item, the card `failed`, not working.
+/// The reader writes the signal-killed session `failed` ⇒ the card `failed` (a status, not a notification), not working.
 #[tokio::test]
 async fn signal_killed_ephemeral_card_is_failed() {
     let h = Harness::start().await;
@@ -3373,13 +3373,8 @@ async fn signal_killed_ephemeral_card_is_failed() {
     await_session_state(&h, &p.session, "failed").await;
     let a = recompute(&h, &pj).await;
     assert!(!a.working, "{a:?}");
-    assert_eq!(a.attention, Attention::Failed);
+    assert_eq!(a.attention, Attention::None);
     assert_eq!(card_state(&a, &p.card), Some(CardState::Failed));
-    assert_eq!(a.items.len(), 1, "{a:?}");
-    assert_eq!(a.items[0].kind, ItemKind::Failed);
-    assert_eq!(a.items[0].source, ItemSource::Session);
-    assert_eq!(a.items[0].id, p.session);
-    assert_eq!(a.items[0].card_id.as_deref(), Some(p.card.as_str()));
     h.stop(&p.terminal).await;
 }
 

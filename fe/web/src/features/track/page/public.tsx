@@ -10,7 +10,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 
 import { createPortal } from 'react-dom';
 import { useCompactViewport } from '../../../ui/viewport/public.ts';
 
-import type { ActivityOrigin } from '../../../../../core/domain/activity.ts';
 import { independentTaskUnavailableReason } from '../../../../../core/domain/independent-task.ts';
 import type { ReportOutlineItem, ReportTaskRow } from '../../../../../core/domain/report.ts';
 import {
@@ -28,6 +27,7 @@ import {
   OperationFeedback, useDeleteConfirm, useOperationFeedback,
 } from '../../../ui/operation-feedback/public.tsx';
 import { PanelCard, PanelModule } from '../../../ui/panel-card/public.tsx';
+import { relativeTime } from '../row/public.tsx';
 import { useState } from '../../../ui/state/public.ts';
 import { deriveTrackPageView } from '../../../../../core/view/track-page.ts';
 import type { RowModuleView, TrackPageView } from '../../../../../core/view/panel.ts';
@@ -40,20 +40,27 @@ import styles from './page.module.css';
 /** The mobile drill-down pages: two that are not row modules, plus one per row module the view model names. The renderer special-cases exactly those two and sends every other member through `paintMobileModule`. */
 type MobilePanelKind = 'outline' | RowModuleView['key'] | 'conversations';
 
-/** One row of the Notifications aside — the route's projection of one card's `TrackActivity.attentionItems` (folded per card), or of one card-less item. */
+/** One row of the Notifications aside — the route's projection of one item of `TrackActivity.attentionItems`. */
 export type TrackInputNotification = Readonly<{
-  /** Which kind of thing this is about — the overlay item's `source` (a card's row: its latest item's). */
-  origin: ActivityOrigin;
-  /** Card id, task key, session id or track id — whichever `origin` names. */
-  id: string;
-  /** The card Review opens — and the row's key; `null` when Review lands on the track itself, and then `origin:id` is the key. */
-  cardId: string | null;
-  /** The human-read label: the card's goal, `Planner`, the card's title, the task key, … */
-  source: string;
-  message: string;
-  state: 'awaiting-input' | 'errored';
-  updatedAt: number;
+  /** The kernel's item key; the row's key. */
+  key: string;
+  /** `ask`: the Planner asks the user something; `planner-down`: the Planner stopped. */
+  kind: 'ask' | 'planner-down';
+  /** The kernel's words, shown verbatim: the Planner's question, or the reason it stopped. */
+  text: string;
+  atMs: number;
 }>;
+
+/** What a planner-down row adds after the reason: sending the Planner a message is what makes it continue. */
+export const PLANNER_DOWN_NEXT_STEP = 'Fix the cause, then send the Planner a message to continue.';
+
+const NOTIFICATION_LABEL = Object.freeze({ ask: 'Planner asks', 'planner-down': 'Planner stopped' } as const);
+
+/** The start of a row's text for its Reply button's name; the whole text is in the Planner conversation. */
+function notificationGist(text: string): string {
+  const chars = [...text];
+  return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : text;
+}
 
 export type TrackPageProps = Readonly<{
   track: Track;
@@ -72,11 +79,13 @@ export type TrackPageProps = Readonly<{
   conversationList?: ReactNode;
   /** The conversation module head's `+`, composed by `app/router`. */
   conversationAction?: ReactNode;
-  /** Everything the kernel says needs a person on this track, projected by
+  /** Everything the kernel says is addressed to the user on this track, projected by
    *  the route from the activity overlay's items (`attentionItems`). */
   inputNotifications?: readonly TrackInputNotification[];
-  /** Review: the item's card when it has one, else the track itself. */
-  onOpenInputNotification?: (cardId: string | null) => void;
+  /** Reply: opens the Planner's composer. The one action of every row, an ask and planner down alike. */
+  onReply?: () => void;
+  /** The clock the rows' relative times read; the current time when omitted. */
+  nowMs?: number;
   /** The route's conversation drawer is open. Input notifications compact
    *  beside it instead of covering its composer. */
   conversationOpen?: boolean;
@@ -129,7 +138,7 @@ function taskInventorySummary(tasks: readonly ReportTaskRow[]): string | null {
 
 export function TrackPage({
   track, cards, tasks, openableCards, outlineItems = [], report, backlinks, conversationList, conversationAction,
-  onStartConversation, conversationOpen = false, mobilePanelObscured, inputNotifications = [], onOpenInputNotification,
+  onStartConversation, conversationOpen = false, mobilePanelObscured, inputNotifications = [], onReply, nowMs,
   cardsAction, onCreateTask, recentFiles, onOpenCard, onDeleteCard, onOpenTask, onOpenOutline, board, onCloseBoard,
   panel = null, onOpenPanel, onClosePanel,
   mobileBackLabel = 'Pages', onMobileBack, mobileHeaderActionsHost = null, mobileHeaderTitleHost = null, mobileTitleReadView,
@@ -176,9 +185,7 @@ export function TrackPage({
   const deletion = useDeleteConfirm((_id, signal) => onDeleteTrack(signal));
   const resumeFeedback = useOperationFeedback();
   const [resumePending, setResumePending] = useState(false);
-  const notificationSignature = inputNotifications
-    .map(({ origin, id, state, updatedAt }) => `${origin}:${id}:${state}:${updatedAt}`)
-    .join('|');
+  const notificationSignature = inputNotifications.map(({ key }) => key).join('|');
   const [noticeExpanded, setNoticeExpanded] = useState(inputNotifications.length > 0 && !conversationOpen);
   const [notificationAnnouncement, setNotificationAnnouncement] = useState('');
   const resumePendingRef = useRef(false);
@@ -531,7 +538,7 @@ export function TrackPage({
                 <span className={styles.needsInputNoticeCopy}>
                   <strong className={styles.needsInputNoticeTitle}>Notifications</strong>
                   <span className={styles.needsInputNoticeDetail}>
-                    {inputNotifications.length} {inputNotifications.length === 1 ? 'item needs' : 'items need'} attention
+                    {inputNotifications.length} waiting on you
                   </span>
                 </span>
                 <button
@@ -545,22 +552,32 @@ export function TrackPage({
               <ul className={styles.needsInputNoticeList}>
                 {inputNotifications.map((notification) => (
                   <li
-                    key={notification.cardId ?? `${notification.origin}:${notification.id}`}
+                    key={notification.key}
                     className={styles.needsInputNoticeItem}
-                    data-nc-notification-state={notification.state}
+                    data-nc-notification-state={notification.kind}
                   >
                     <span className={styles.needsInputNoticeCopy}>
-                      <strong className={styles.needsInputNoticeSource}>{notification.source}</strong>
-                      <span className={styles.needsInputNoticeDetail}>{notification.message}</span>
+                      <span className={styles.needsInputNoticeMeta}>
+                        <strong className={`${styles.needsInputNoticeSource} ${notification.kind === 'ask'
+                          ? styles.needsInputNoticeAsk : styles.needsInputNoticeDown}`}
+                        >{NOTIFICATION_LABEL[notification.kind]}</strong>
+                        <time className={styles.needsInputNoticeTime} dateTime={new Date(notification.atMs).toISOString()}>
+                          {relativeTime(notification.atMs, nowMs ?? Date.now())}
+                        </time>
+                      </span>
+                      <span className={`${styles.needsInputNoticeDetail} ${styles.needsInputNoticeText}`}>{notification.text}</span>
+                      {notification.kind === 'planner-down' && (
+                        <span className={styles.needsInputNoticeDetail}>{PLANNER_DOWN_NEXT_STEP}</span>
+                      )}
                     </span>
-                    {onOpenInputNotification !== undefined && (
+                    {onReply !== undefined && (
                       <button
                         type="button"
                         className={styles.needsInputAction}
-                        /* The message is part of the name: two rows can share a label (two cards titled alike), and two buttons named alike are one button to a reader who cannot see the row. */
-                        aria-label={`Review ${notification.source} notification: ${notification.message}`}
-                        onClick={() => onOpenInputNotification(notification.cardId)}
-                      >Review</button>
+                        /* The text is part of the name: every row's button says Reply, and two buttons named alike are one button to a reader who cannot see the row. */
+                        aria-label={`Reply to the Planner: ${notificationGist(notification.text)}`}
+                        onClick={onReply}
+                      >Reply</button>
                     )}
                   </li>
                 ))}

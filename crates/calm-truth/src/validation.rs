@@ -95,7 +95,7 @@ pub const KERNEL_OVERLAY_PLUGIN_ID: &str = "kernel";
 /// `schemaVersion` for `Overlay.payload` when `kind == "file-viewer-nav"`.
 pub const OVERLAY_FILE_VIEWER_NAV_SCHEMA_VERSION: u32 = 1;
 /// `schemaVersion` for `Overlay.payload` when `kind == "activity"`.
-pub const OVERLAY_ACTIVITY_SCHEMA_VERSION: u32 = 1;
+pub const OVERLAY_ACTIVITY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 pub struct OverlayKindEntry {
@@ -232,31 +232,19 @@ fn validate_activity_overlay_payload(payload: &Value) -> Result<()> {
 
     #[derive(Deserialize)]
     #[allow(dead_code)]
-    #[serde(rename_all = "lowercase")]
-    enum ItemKind {
-        Input,
-        Failed,
-    }
-
-    #[derive(Deserialize)]
-    #[allow(dead_code)]
-    #[serde(rename_all = "lowercase")]
-    enum ItemSource {
-        Card,
-        Task,
-        Session,
-        Lifecycle,
+    #[serde(rename_all = "snake_case")]
+    enum NotificationSource {
+        Ask,
+        PlannerDown,
     }
 
     #[derive(Deserialize)]
     #[allow(dead_code)]
     #[serde(deny_unknown_fields)]
     struct Item {
-        kind: ItemKind,
-        source: ItemSource,
-        id: String,
-        #[serde(deserialize_with = "present")]
-        card_id: Option<String>,
+        source: NotificationSource,
+        key: String,
+        text: String,
         at_ms: i64,
     }
 
@@ -864,12 +852,12 @@ mod tests {
             "attention": "input",
             "activity_at_ms": 1789460968837_i64,
             "items": [
-                { "kind": "input", "source": "card", "id": "card-1",
-                  "card_id": "card-1", "at_ms": 1789460968837_i64 },
-                { "kind": "failed", "source": "task", "id": "build",
-                  "card_id": null, "at_ms": 1789460968000_i64 },
-                { "kind": "failed", "source": "lifecycle", "id": "track-1",
-                  "card_id": null, "at_ms": 1789460960000_i64 }
+                { "source": "ask", "key": "ask:lifecycle:28475",
+                  "text": "Merge the PR?", "at_ms": 1789460968837_i64 },
+                { "source": "ask", "key": "ask:notify:22801",
+                  "text": "Which branch?", "at_ms": 1789460968000_i64 },
+                { "source": "planner_down", "key": "planner_down:22825",
+                  "text": "unexpected status 403 Forbidden", "at_ms": 1789460960000_i64 }
             ],
             "cards": [
                 { "card_id": "card-1", "state": "input" },
@@ -896,10 +884,34 @@ mod tests {
         let rejected = [
             // missing required (nullable) field
             json!({ "working": false, "attention": "none", "items": [], "cards": [] }),
-            // an item without its (nullable) card_id
+            // an item without one of its required fields
             {
                 let mut p = activity_payload_fixture();
-                p["items"][0].as_object_mut().unwrap().remove("card_id");
+                p["items"][0].as_object_mut().unwrap().remove("key");
+                p
+            },
+            {
+                let mut p = activity_payload_fixture();
+                p["items"][0].as_object_mut().unwrap().remove("text");
+                p
+            },
+            // a null text: the item is required to carry the kernel's words
+            {
+                let mut p = activity_payload_fixture();
+                p["items"][0]["text"] = Value::Null;
+                p
+            },
+            // a v1 item (`kind` / `id` / `card_id`) is not a v2 item
+            {
+                let mut p = activity_payload_fixture();
+                p["items"][0] = json!({ "kind": "input", "source": "card", "id": "card-1",
+                                        "card_id": "card-1", "at_ms": 1 });
+                p
+            },
+            // a v1 payload is below the registry's version
+            {
+                let mut p = activity_payload_fixture();
+                p["schemaVersion"] = json!(1);
                 p
             },
             // unknown top-level field
@@ -928,12 +940,12 @@ mod tests {
             },
             {
                 let mut p = activity_payload_fixture();
-                p["items"][0]["kind"] = json!("working");
+                p["items"][0]["source"] = json!("lifecycle");
                 p
             },
             {
                 let mut p = activity_payload_fixture();
-                p["items"][0]["source"] = json!("overlay");
+                p["items"][0]["source"] = json!("failed");
                 p
             },
             {

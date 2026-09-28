@@ -3,22 +3,20 @@
 //! real PTY and the renderer registry: those cases live in `terminal_signals.rs`.
 
 use calm_server::db::sqlite::{
-    begin_immediate_tx, session_supersede_and_start_tx, task_complete_from_worker_tx,
-    task_mark_running_tx, task_mark_sub_track_running_tx,
+    begin_immediate_tx, task_complete_from_worker_tx, task_mark_running_tx,
+    task_mark_sub_track_running_tx,
 };
 use calm_server::db::write_with_event_typed;
 use calm_server::event::{EditAuthor, Event, EventScope, TrackUpdatedPayload};
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::model::{CardRole, Overlay, TrackLifecycle, now_ms};
-use calm_server::session_projection_repo::{
-    AgentProvider, WorkerSessionInit, WorkerSessionKind, WorkerSessionState,
-};
+use calm_server::session_projection_repo::{AgentProvider, WorkerSessionKind, WorkerSessionState};
 use calm_server::terminal_renderer::TerminalRendererRegistry;
 use calm_server::track_activity::sql::{
-    E1_HARNESS_TURN_COMPLETED_SQL, E2_USER_NOTIFY_SQL, SessionRow,
+    E1_HARNESS_TURN_COMPLETED_SQL, N3_PLANNER_TRANSCRIPT_SQL, SessionRow,
 };
 use calm_server::track_activity::{
-    ActivityPayload, Attention, CardActivity, CardState, ItemKind, ItemSource, Recompute,
+    ActivityPayload, Attention, CardActivity, CardState, NotificationSource, Recompute,
     TrackActivityProjector, WriteOutcome, fold,
 };
 use calm_server::track_lifecycle::{
@@ -201,14 +199,6 @@ async fn sub_track_child_failed_marks_parent_failed() {
 
     let p = f.recompute(&parent).await;
     assert!(!p.working);
-    assert_eq!(p.attention, Attention::Failed);
-    assert_eq!(p.items.len(), 1, "{p:?}");
-    let item = &p.items[0];
-    assert_eq!(item.kind, ItemKind::Failed);
-    assert_eq!(item.source, ItemSource::Task);
-    assert_eq!(item.id, "sub");
-    assert_eq!(item.card_id, None);
-    assert_eq!(Some(item.at_ms), finished);
     assert!(p.cards.is_empty(), "no worker card ⇒ no cards[] entry");
     assert_eq!(p.activity_at_ms, finished, "E3 counts the failure");
 }
@@ -264,8 +254,8 @@ async fn parent_gate_verifying_is_working() {
     assert_eq!(p.attention, Attention::None);
 }
 
-/// An interactive card whose session died `failed` (signal-killed / spawn compensation) is red
-/// until the card is restarted or deleted.
+/// An interactive card whose session died `failed` (signal-killed / spawn compensation) carries a
+/// `failed` card verdict until the card is restarted or deleted.
 #[tokio::test]
 async fn interactive_card_failed_session_is_failed() {
     let f = fx().await;
@@ -285,16 +275,7 @@ async fn interactive_card_failed_session_is_failed() {
     f.exit_session(&ws, WorkerSessionState::Failed, 5_000).await;
     let p = f.recompute(&t).await;
     assert!(!p.working);
-    assert_eq!(p.attention, Attention::Failed);
     assert_eq!(card_state(&p, &card), Some(CardState::Failed));
-    assert_eq!(p.items.len(), 1);
-    assert_eq!(p.items[0].source, ItemSource::Session);
-    assert_eq!(p.items[0].id, ws);
-    assert_eq!(p.items[0].card_id.as_deref(), Some(card.as_str()));
-    assert_eq!(
-        p.items[0].at_ms, 5_000,
-        "a failed-state item carries the exit time"
-    );
 }
 
 /// The isolated marker is on the CARD (`operations.target_id`), not on `ws.spawn_op_id`: a
@@ -398,10 +379,7 @@ async fn wedged_harness_is_failed() {
     let (t, planner, ws) = harness_track(&f, WorkerSessionState::TurnPending).await;
     f.exit_session(&ws, WorkerSessionState::Failed, 9_000).await;
     let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::Failed);
     assert_eq!(card_state(&p, &planner), Some(CardState::Failed));
-    assert_eq!(p.items[0].source, ItemSource::Session);
-    assert_eq!(p.items[0].id, ws);
 }
 
 /// Session minted at `t0 < t1 = done`, later signal-killed ⇒ quiet: the verdict belongs to finished work.
@@ -436,7 +414,7 @@ async fn done_task_worker_signal_killed_is_quiet() {
 }
 
 /// The task is `done@t1`; a restart AFTER that mints S2 (`created_at_ms = t2 > t1`) and the
-/// replacement spawn fails ⇒ red: new work's failure, not the finished task's exit.
+/// replacement spawn fails ⇒ a `failed` card verdict: new work's failure, not the finished task's exit.
 #[tokio::test]
 async fn done_task_replacement_session_failure_is_failed() {
     let f = fx().await;
@@ -481,12 +459,7 @@ async fn done_task_replacement_session_failure_is_failed() {
     f.exit_session(&s2, WorkerSessionState::Failed, 7_000).await;
 
     let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::Failed, "{p:?}");
-    assert_eq!(card_state(&p, &worker), Some(CardState::Failed));
-    assert_eq!(p.items.len(), 1);
-    assert_eq!(p.items[0].source, ItemSource::Session);
-    assert_eq!(p.items[0].id, s2);
-    assert_eq!(p.items[0].at_ms, 7_000);
+    assert_eq!(card_state(&p, &worker), Some(CardState::Failed), "{p:?}");
 }
 
 /// (2) the empty set: the fold applied to A's session with NO current row for A's card must NOT
@@ -515,7 +488,11 @@ async fn superseded_failed_attempt_session_is_not_actionable() {
     f.exit_session(&ws_a, WorkerSessionState::Failed, 4_500)
         .await;
     let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::Failed, "attempt A failed: {p:?}");
+    assert_eq!(
+        card_state(&p, &card_a),
+        Some(CardState::Failed),
+        "attempt A failed: {p:?}"
+    );
     assert_eq!(p.activity_at_ms, Some(4_000));
 
     let attempt_b = f.recover(&t, "build", &Fx::task_id(&t, "build")).await;
@@ -558,13 +535,10 @@ async fn superseded_failed_attempt_session_is_not_actionable() {
     assert_eq!(f.task_status(&Fx::task_id(&t, "build")).await.0, "failed");
 
     let p = f.recompute(&t).await;
-    assert_eq!(
-        p.attention,
-        Attention::None,
+    assert!(
+        p.cards.is_empty(),
         "(1) A's failed session is fenced: {p:?}"
     );
-    assert!(p.items.is_empty());
-    assert!(p.cards.is_empty());
     assert!(!p.working);
     assert_eq!(p.activity_at_ms, Some(8_000));
 
@@ -596,16 +570,12 @@ async fn superseded_failed_attempt_session_is_not_actionable() {
         pty_open: false,
     });
     let folded = fold(&t, &admitted);
-    assert_eq!(
-        folded.attention(),
-        Attention::Failed,
-        "(2) an empty current-row set never suppresses a failed session: {folded:?}"
-    );
     assert!(
         folded
-            .items
+            .cards
             .iter()
-            .any(|i| i.source == ItemSource::Session && i.id == ws_a)
+            .any(|c| c.card_id == card_a && c.state == CardState::Failed),
+        "(2) an empty current-row set never suppresses a failed session: {folded:?}"
     );
 }
 
@@ -639,25 +609,7 @@ async fn failed_attempt(
     (worker, session)
 }
 
-/// A planner card on `t` with an `idle` harness session (`cards.role =
-/// 'planner'`, `last_turn_completed_ms` NULL — the mint value).
-async fn planner_on(f: &Fx, t: &str, card: &str, ws: &str) -> (String, String) {
-    let planner = f.card(t, card, "planner", CardRole::Planner).await;
-    let session = f
-        .session(
-            &planner,
-            ws,
-            WorkerSessionKind::SharedPlanner,
-            WorkerSessionState::Idle,
-            Some(&format!("th-{ws}")),
-            Some(Fx::harness_snapshot()),
-            1_000,
-        )
-        .await;
-    (planner, session)
-}
-
-/// The failed attempt's task item, `session` item and card verdict all go; the E3 high-water mark stays.
+/// The failed attempt's card verdict goes; the E3 high-water mark stays.
 #[tokio::test]
 async fn done_track_failed_attempt_is_quiet() {
     let f = fx().await;
@@ -666,17 +618,17 @@ async fn done_track_failed_attempt_is_quiet() {
     let (worker, ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
     f.exit_session(&ws, WorkerSessionState::Failed, 4_500).await;
     let before = f.recompute(&t).await;
-    assert_eq!(before.attention, Attention::Failed, "{before:?}");
-    assert_eq!(before.items.len(), 2, "task + session items: {before:?}");
-    assert_eq!(card_state(&before, &worker), Some(CardState::Failed));
+    assert_eq!(
+        card_state(&before, &worker),
+        Some(CardState::Failed),
+        "{before:?}"
+    );
 
     f.set_lifecycle(&t, TrackLifecycle::Done).await;
     let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::None, "done ⇒ none: {p:?}");
-    assert!(p.items.is_empty(), "{p:?}");
     assert!(
         p.cards.is_empty(),
-        "the failed verdict goes with its item: {p:?}"
+        "done ⇒ the failed card verdict goes: {p:?}"
     );
     assert!(!p.working);
     assert_eq!(
@@ -684,8 +636,7 @@ async fn done_track_failed_attempt_is_quiet() {
         Some(4_000),
         "the mark is a high-water mark: the filter does not lower it"
     );
-    let stored = f.stored(&t).await.unwrap();
-    assert_eq!(stored.attention, Attention::None);
+    assert!(f.stored(&t).await.unwrap().cards.is_empty());
 }
 
 /// `archived_at IS NOT NULL` filters the same way whatever the lifecycle says; an event-driven recompute still reaches an archived track.
@@ -696,8 +647,11 @@ async fn archived_track_failed_attempt_is_quiet() {
     f.set_lifecycle(&t, TrackLifecycle::Working).await;
     let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
     let before = f.recompute(&t).await;
-    assert_eq!(before.attention, Attention::Failed, "{before:?}");
-    assert_eq!(card_state(&before, &worker), Some(CardState::Failed));
+    assert_eq!(
+        card_state(&before, &worker),
+        Some(CardState::Failed),
+        "{before:?}"
+    );
 
     f.archive(&t, 5_000).await;
     let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM tracks WHERE id = ?1")
@@ -710,13 +664,14 @@ async fn archived_track_failed_attempt_is_quiet() {
         "archiving does not touch the lifecycle"
     );
     let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::None, "archived ⇒ none: {p:?}");
-    assert!(p.items.is_empty(), "{p:?}");
-    assert!(p.cards.is_empty(), "{p:?}");
+    assert!(
+        p.cards.is_empty(),
+        "archived ⇒ the failed card verdict goes: {p:?}"
+    );
     assert!(!p.working);
 }
 
-/// `done → planning` through `track_update_tx` brings the failed attempt back — the filter is a function of the row, not a one-way write.
+/// `done → planning` through `track_update_tx` brings the failed card verdict back — the filter is a function of the row, not a one-way write.
 #[tokio::test]
 async fn reopened_track_failed_attempt_is_red_again() {
     let f = fx().await;
@@ -725,8 +680,7 @@ async fn reopened_track_failed_attempt_is_red_again() {
     let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
     f.set_lifecycle(&t, TrackLifecycle::Done).await;
     let quiet_now = f.recompute(&t).await;
-    assert_eq!(quiet_now.attention, Attention::None, "{quiet_now:?}");
-    assert!(quiet_now.items.is_empty());
+    assert!(quiet_now.cards.is_empty(), "{quiet_now:?}");
 
     f.set_lifecycle(&t, TrackLifecycle::Planning).await;
     let terminal_at: Option<i64> =
@@ -738,18 +692,13 @@ async fn reopened_track_failed_attempt_is_red_again() {
     assert_eq!(terminal_at, None, "reopening clears terminal_at (K20)");
     let p = f.recompute(&t).await;
     assert_eq!(
-        p.attention,
-        Attention::Failed,
-        "reopened ⇒ red again: {p:?}"
+        card_state(&p, &worker),
+        Some(CardState::Failed),
+        "reopened ⇒ the failed card verdict is back: {p:?}"
     );
-    assert_eq!(p.items.len(), 1);
-    assert_eq!(p.items[0].source, ItemSource::Task);
-    assert_eq!(p.items[0].id, "build");
-    assert_eq!(p.items[0].at_ms, 4_000);
-    assert_eq!(card_state(&p, &worker), Some(CardState::Failed));
 }
 
-/// The filter removes the attention verdict, not the card: a card whose `failed` verdict out-ranked its `working` one keeps the working verdict.
+/// The filter removes the failed verdict, not the card: a card whose `failed` verdict out-ranked its `working` one keeps the working verdict.
 #[tokio::test]
 async fn done_track_running_task_is_still_working() {
     let f = fx().await;
@@ -797,7 +746,6 @@ async fn done_track_running_task_is_still_working() {
     f.mark_running(&t, "pack", &both_worker, 6_000).await;
     let before = f.recompute(&t).await;
     assert!(before.working, "{before:?}");
-    assert_eq!(before.attention, Attention::Failed);
     assert_eq!(card_state(&before, &failed_worker), Some(CardState::Failed));
     assert_eq!(
         card_state(&before, &running_worker),
@@ -806,7 +754,7 @@ async fn done_track_running_task_is_still_working() {
     assert_eq!(
         card_state(&before, &both_worker),
         Some(CardState::Failed),
-        "failed > working while the failure counts: {before:?}"
+        "failed > working on a live track: {before:?}"
     );
 
     f.set_lifecycle(&t, TrackLifecycle::Done).await;
@@ -815,8 +763,6 @@ async fn done_track_running_task_is_still_working() {
         p.working,
         "a running task on a done track is not hidden: {p:?}"
     );
-    assert_eq!(p.attention, Attention::None);
-    assert!(p.items.is_empty());
     assert_eq!(
         p.cards,
         vec![
@@ -859,7 +805,6 @@ async fn done_track_failed_session_on_a_running_worker_is_still_working() {
     f.exit_session(&ws, WorkerSessionState::Failed, 4_000).await;
     let before = f.recompute(&t).await;
     assert!(before.working, "{before:?}");
-    assert_eq!(before.attention, Attention::Failed);
     assert_eq!(
         card_state(&before, &worker),
         Some(CardState::Failed),
@@ -869,8 +814,6 @@ async fn done_track_failed_session_on_a_running_worker_is_still_working() {
     f.set_lifecycle(&t, TrackLifecycle::Done).await;
     let p = f.recompute(&t).await;
     assert!(p.working, "{p:?}");
-    assert_eq!(p.attention, Attention::None);
-    assert!(p.items.is_empty());
     assert_eq!(
         p.cards,
         vec![CardActivity {
@@ -878,225 +821,6 @@ async fn done_track_failed_session_on_a_running_worker_is_still_working() {
             state: CardState::Working
         }],
         "the working evidence outlives the filtered failed verdict: {p:?}"
-    );
-}
-
-/// A failure newer than the planner's last completed turn (`at_ms > P`) is still red.
-#[tokio::test]
-async fn failed_after_planner_turn_is_red() {
-    let f = fx().await;
-    let t = f.track("w").await;
-    f.set_lifecycle(&t, TrackLifecycle::Planning).await;
-    let (_planner, planner_ws) = planner_on(&f, &t, "card-planner", "ws-planner").await;
-    let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
-    f.planner_turn_completed(&planner_ws, Some(3_000)).await;
-    let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::Failed, "4000 > P=3000 ⇒ red: {p:?}");
-    assert_eq!(p.items.len(), 1);
-    assert_eq!(p.items[0].source, ItemSource::Task);
-    assert_eq!(p.items[0].at_ms, 4_000);
-    assert_eq!(card_state(&p, &worker), Some(CardState::Failed));
-    assert!(!p.working);
-}
-
-/// A failure at or before the planner's last completed turn (`at_ms <= P`) is handled: no item, no card verdict; its `finished_at_ms` still feeds E3.
-#[tokio::test]
-async fn failed_before_planner_turn_is_quiet() {
-    let f = fx().await;
-    let t = f.track("w").await;
-    f.set_lifecycle(&t, TrackLifecycle::Planning).await;
-    let (_planner, planner_ws) = planner_on(&f, &t, "card-planner", "ws-planner").await;
-    let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
-    let red = f.recompute(&t).await;
-    assert_eq!(red.attention, Attention::Failed, "no turn yet: {red:?}");
-
-    f.planner_turn_completed(&planner_ws, Some(5_000)).await;
-    let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::None, "4000 <= P=5000 ⇒ aged: {p:?}");
-    assert!(p.items.is_empty(), "{p:?}");
-    assert!(
-        p.cards.is_empty(),
-        "the aged failure's card verdict goes too: {p:?}"
-    );
-    assert!(!p.working);
-    assert_eq!(
-        p.activity_at_ms,
-        Some(4_000),
-        "the mark written while the failure was red is not lowered by aging"
-    );
-    assert_eq!(card_state(&p, &worker), None);
-
-    // The boundary is `>`: a turn completed AT the failure instant ages it.
-    f.planner_turn_completed(&planner_ws, Some(4_000)).await;
-    let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::None, "4000 <= P=4000 ⇒ aged: {p:?}");
-    assert!(p.items.is_empty());
-}
-
-/// P NULL: a planner that has never completed a turn has handled nothing — the failure stays red.
-#[tokio::test]
-async fn null_planner_turn_keeps_failed_red() {
-    let f = fx().await;
-    let t = f.track("w").await;
-    f.set_lifecycle(&t, TrackLifecycle::Planning).await;
-    let (_planner, planner_ws) = planner_on(&f, &t, "card-planner", "ws-planner").await;
-    let p_column: Option<i64> =
-        sqlx::query_scalar("SELECT last_turn_completed_ms FROM worker_sessions WHERE id = ?1")
-            .bind(&planner_ws)
-            .fetch_one(&f.pool)
-            .await
-            .unwrap();
-    assert_eq!(p_column, None, "the mint value is NULL");
-    let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
-    let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::Failed, "P NULL ⇒ counted: {p:?}");
-    assert_eq!(p.items.len(), 1);
-    assert_eq!(card_state(&p, &worker), Some(CardState::Failed));
-}
-
-/// P is the max over EVERY planner-role session, superseded ones included. Also asserts that E3 counts an aged
-/// failure: P is written before the failure and the first recompute, so `activity_at_ms == 4000` can only come from E3.
-#[tokio::test]
-async fn superseded_planner_turn_still_ages() {
-    let f = fx().await;
-    let t = f.track("w").await;
-    f.set_lifecycle(&t, TrackLifecycle::Planning).await;
-    let (planner, old_ws) = planner_on(&f, &t, "card-planner", "ws-planner-1").await;
-    // The old session completed a turn at 5000 while live…
-    f.planner_turn_completed(&old_ws, Some(5_000)).await;
-    // …then the planner restarted: the production supersede-and-start
-    // writer parks it as `superseded` and mints the current session
-    // (column NULL, `cards.session_id` repointed).
-    let mut tx = begin_immediate_tx(&f.pool).await.unwrap();
-    session_supersede_and_start_tx(
-        &mut tx,
-        &old_ws,
-        WorkerSessionInit {
-            id: "ws-planner-2".into(),
-            card_id: planner.clone(),
-            kind: WorkerSessionKind::SharedPlanner,
-            agent_provider: Some(AgentProvider::Codex),
-            status: WorkerSessionState::Idle,
-            terminal_run_id: None,
-            thread_id: Some("th-planner-2".into()),
-            session_id: Some("native-ws-planner-2".into()),
-            active_turn_id: None,
-            handle_state_json: Some(Fx::harness_snapshot()),
-            spawn_op_id: None,
-            now_ms: 6_000,
-        },
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    let (old_state, current): (String, Option<String>) = sqlx::query_as(
-        "SELECT ws.state, c.session_id FROM worker_sessions ws JOIN cards c ON c.id = ws.card_id \
-          WHERE ws.id = ?1",
-    )
-    .bind(&old_ws)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(old_state, "superseded");
-    assert_eq!(current.as_deref(), Some("ws-planner-2"));
-
-    let (worker, _ws) = failed_attempt(&f, &t, "card-w", "ws-w", "build", 4_000).await;
-    assert_eq!(
-        f.stored(&t).await,
-        None,
-        "no mark stored before the first recompute"
-    );
-    let p = f.recompute(&t).await;
-    assert_eq!(
-        p.attention,
-        Attention::None,
-        "the superseded planner's P=5000 ages the 4000 failure: {p:?}"
-    );
-    assert!(p.items.is_empty(), "{p:?}");
-    assert_eq!(card_state(&p, &worker), None);
-    assert_eq!(
-        p.activity_at_ms,
-        Some(4_000),
-        "rule 3: E3 counts the aged failure on the first recompute (no stored mark, \
-         no other evidence at 4000): {p:?}"
-    );
-}
-
-/// The track's own `lifecycle = failed` item is a phase; a later planner turn does not age it.
-#[tokio::test]
-async fn lifecycle_failed_item_is_not_aged() {
-    let f = fx().await;
-    let t = f.track("w").await;
-    let (_planner, planner_ws) = planner_on(&f, &t, "card-planner", "ws-planner").await;
-    f.set_lifecycle(&t, TrackLifecycle::Failed).await;
-    let updated_at: i64 = sqlx::query_scalar("SELECT updated_at FROM tracks WHERE id = ?1")
-        .bind(&t)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    f.planner_turn_completed(&planner_ws, Some(updated_at + 1_000))
-        .await;
-    let p = f.recompute(&t).await;
-    assert_eq!(p.attention, Attention::Failed, "a phase is not aged: {p:?}");
-    assert_eq!(p.items.len(), 1);
-    assert_eq!(p.items[0].source, ItemSource::Lifecycle);
-    assert_eq!(p.items[0].kind, ItemKind::Failed);
-    assert_eq!(p.items[0].id, t);
-    assert_eq!(p.items[0].at_ms, updated_at);
-}
-
-/// The same worker card's running attempt then folds to `working` (`failed > working` would otherwise win).
-#[tokio::test]
-async fn aged_failure_drops_its_card_verdict() {
-    let f = fx().await;
-    let t = f.track("w").await;
-    f.set_lifecycle(&t, TrackLifecycle::Planning).await;
-    let (_planner, planner_ws) = planner_on(&f, &t, "card-planner", "ws-planner").await;
-    let worker = f.card(&t, "card-w", "codex", CardRole::Worker).await;
-    f.session(
-        &worker,
-        "ws-w",
-        WorkerSessionKind::CodexCard,
-        WorkerSessionState::Running,
-        Some("th-w"),
-        None,
-        1_000,
-    )
-    .await;
-    f.plan_tasks(
-        &t,
-        &[
-            ("build", "codex", TASK_IN_TRACK_ROUTE, None),
-            ("test", "codex", TASK_IN_TRACK_ROUTE, None),
-        ],
-    )
-    .await;
-    f.claim(&t, "build", 2_000).await;
-    f.mark_running(&t, "build", &worker, 3_000).await;
-    f.fail(&t, "build", &worker, 4_000).await;
-    f.claim(&t, "test", 5_000).await;
-    f.mark_running(&t, "test", &worker, 6_000).await;
-    let before = f.recompute(&t).await;
-    assert!(before.working);
-    assert_eq!(before.attention, Attention::Failed);
-    assert_eq!(
-        card_state(&before, &worker),
-        Some(CardState::Failed),
-        "failed > working while the failure counts: {before:?}"
-    );
-
-    f.planner_turn_completed(&planner_ws, Some(4_500)).await;
-    let p = f.recompute(&t).await;
-    assert!(p.working, "{p:?}");
-    assert_eq!(p.attention, Attention::None);
-    assert!(p.items.is_empty());
-    assert_eq!(
-        p.cards,
-        vec![CardActivity {
-            card_id: worker.clone(),
-            state: CardState::Working
-        }],
-        "the aged failure no longer raises the card: {p:?}"
     );
 }
 
@@ -1197,6 +921,7 @@ async fn e2_user_notify_completed_row_is_the_activity_instant() {
         let mut item = json!({
             "id": "call-1", "type": "mcpToolCall", "server": "calm",
             "tool": "calm.user.notify", "status": status,
+            "arguments": {"text": "Which branch should the release go out from?"},
         });
         if let Some(e) = error {
             item["error"] = json!({"message": e});
@@ -1251,14 +976,16 @@ async fn e2_user_notify_completed_row_is_the_activity_instant() {
     }
 }
 
-/// The production E1/E2 statements enter the transcript table through `idx_transcript_card_method_created_at` — one index range per card, no scan.
+/// The production E1 and N3 statements enter the transcript table through
+/// `idx_transcript_card_method_created_at` — one index range per card (both N3 arms), no table scan.
+/// N3's `LIMIT 1` arm is a co-routine; its `SCAN (subquery-N)` reads that co-routine, not a table.
 #[tokio::test]
 async fn e1_e2_query_plans_use_the_transcript_index() {
     let f = fx().await;
     const INDEX: &str = "USING INDEX idx_transcript_card_method_created_at";
-    for (label, sql) in [
-        ("E1", E1_HARNESS_TURN_COMPLETED_SQL),
-        ("E2", E2_USER_NOTIFY_SQL),
+    for (label, sql, index_ranges) in [
+        ("E1", E1_HARNESS_TURN_COMPLETED_SQL, 1),
+        ("N3", N3_PLANNER_TRANSCRIPT_SQL, 2),
     ] {
         let details: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
             .bind("track-1")
@@ -1268,13 +995,21 @@ async fn e1_e2_query_plans_use_the_transcript_index() {
             .into_iter()
             .map(|row| sqlx::Row::get::<String, _>(&row, "detail"))
             .collect();
-        assert!(
-            details.iter().any(|d| d.contains(INDEX)),
-            "{label} must be an index range per card, got plan {details:?}"
+        assert_eq!(
+            details.iter().filter(|d| d.contains(INDEX)).count(),
+            index_ranges,
+            "{label} must be an index range per card in every arm, got plan {details:?}"
         );
         assert!(
-            !details.iter().any(|d| d.starts_with("SCAN")),
-            "{label} must not scan any table, got plan {details:?}"
+            details
+                .iter()
+                .filter(|d| d.starts_with("SCAN"))
+                .all(|d| d.starts_with("SCAN (subquery-")),
+            "{label} must not scan a table, got plan {details:?}"
+        );
+        assert!(
+            !details.iter().any(|d| d.contains("MATERIALIZE")),
+            "{label} must not materialize the transcript, got plan {details:?}"
         );
     }
 }
@@ -1379,11 +1114,6 @@ async fn kernel_lifecycle_edge_advances_activity() {
     let p = f.recompute(&t).await;
     assert_eq!(p.activity_at_ms, Some(at), "E4: {p:?}");
     assert!(at > 4_000);
-    // `reviewing` is also a lifecycle `input` item.
-    assert_eq!(p.attention, Attention::Input);
-    assert_eq!(p.items[0].source, ItemSource::Lifecycle);
-    assert_eq!(p.items[0].id, t);
-    assert_eq!(p.items[0].card_id, None);
 }
 
 #[tokio::test]
@@ -1460,8 +1190,9 @@ async fn activity_at_is_monotone() {
     assert_eq!(f.stored(&t).await.unwrap().activity_at_ms, Some(big));
 }
 
-/// A stored payload THIS binary cannot parse (what a newer binary leaves behind) still keeps its
-/// high-water mark; the mark is read from the raw JSON, otherwise a downgrade would re-seed it.
+/// A stored payload THIS binary cannot parse — a v1 row with a v1 item, what the release before
+/// #1829 left behind — is rewritten as v2 and keeps its high-water mark: the mark is read from the raw
+/// JSON, otherwise the upgrade would re-seed it.
 #[tokio::test]
 async fn high_water_mark_survives_an_unparseable_stored_payload() {
     let f = fx().await;
@@ -1470,8 +1201,11 @@ async fn high_water_mark_survives_an_unparseable_stored_payload() {
     f.seed_activity_overlay(
         &t,
         json!({
-            "schemaVersion": 1, "working": true, "attention": "review",
-            "activity_at_ms": big, "items": [], "cards": [], "reviewers": ["someone"]
+            "schemaVersion": 1, "working": true, "attention": "failed",
+            "activity_at_ms": big,
+            "items": [{"kind": "failed", "source": "session", "id": "ws-1",
+                       "card_id": "card-1", "at_ms": 1_000}],
+            "cards": [{"card_id": "card-1", "state": "failed"}]
         }),
     )
     .await;
@@ -1490,12 +1224,17 @@ async fn high_water_mark_survives_an_unparseable_stored_payload() {
     };
     assert_eq!(p.activity_at_ms, Some(big), "{p:?}");
     let stored = f.stored(&t).await.unwrap();
+    assert_eq!(stored.schema_version, 2);
     assert_eq!(stored.activity_at_ms, Some(big));
     assert!(
         !stored.working,
         "the conclusions come from the rows, not the old row"
     );
     assert_eq!(stored.attention, Attention::None);
+    assert!(
+        stored.items.is_empty() && stored.cards.is_empty(),
+        "{stored:?}"
+    );
 }
 
 /// A change writes exactly one `overlay.set` with the track scope.
@@ -1593,7 +1332,7 @@ async fn deleted_track_is_not_resurrected_by_a_late_write() {
 async fn activity_payload_passes_the_overlay_registry() {
     let f = fx().await;
     let t = f.track("w").await;
-    f.set_lifecycle(&t, TrackLifecycle::Reviewing).await;
+    f.set_lifecycle(&t, TrackLifecycle::Working).await;
     let worker = f.card(&t, "card-w", "codex", CardRole::Worker).await;
     let ws = f
         .session(
@@ -1634,15 +1373,52 @@ async fn activity_payload_passes_the_overlay_registry() {
         .await;
     f.exit_session(&chat_ws, WorkerSessionState::Failed, 6_000)
         .await;
+    // The Planner card: one `calm.user.notify` ask and a failed turn (planner down).
+    let planner = f
+        .card(&t, "card-planner", "planner", CardRole::Planner)
+        .await;
+    let planner_ws = f
+        .session(
+            &planner,
+            "ws-planner",
+            WorkerSessionKind::SharedPlanner,
+            WorkerSessionState::Idle,
+            Some("th-planner"),
+            Some(Fx::harness_snapshot()),
+            1_000,
+        )
+        .await;
+    f.transcript_item(
+        &planner_ws,
+        &planner,
+        &t,
+        "call-notify",
+        "mcpToolCall",
+        "item/completed",
+        json!({"item": {"id": "call-notify", "type": "mcpToolCall", "server": "calm",
+                        "tool": "calm.user.notify", "status": "completed",
+                        "arguments": {"text": "Ship it?"}}}),
+    )
+    .await;
+    f.turn_outcome(
+        &planner_ws,
+        &planner,
+        &t,
+        "turn-failed",
+        json!({"id": "turn-failed", "status": "failed", "error": {"message": "boom"}}),
+    )
+    .await;
     let p = f.recompute(&t).await;
-    // Every source is represented: task (failed), session (failed),
-    // lifecycle (input); a card folded to `failed`; working from `test`.
+    // Both sources are represented: an ask and planner down; a card folded to `failed`; working from `test`.
     assert!(p.working);
     assert_eq!(p.attention, Attention::Failed);
-    let sources: Vec<ItemSource> = p.items.iter().map(|i| i.source).collect();
-    assert!(sources.contains(&ItemSource::Task));
-    assert!(sources.contains(&ItemSource::Session));
-    assert!(sources.contains(&ItemSource::Lifecycle));
+    let mut sources: Vec<NotificationSource> = p.items.iter().map(|i| i.source).collect();
+    sources.sort();
+    assert_eq!(
+        sources,
+        [NotificationSource::Ask, NotificationSource::PlannerDown],
+        "{p:?}"
+    );
     assert_eq!(card_state(&p, &worker), Some(CardState::Failed));
     let stored = f
         .repo_dyn
@@ -1655,7 +1431,13 @@ async fn activity_payload_passes_the_overlay_registry() {
     OVERLAY_KIND_REGISTRY
         .validate("activity", &stored.payload)
         .expect("the projector's payload is the registry's shape");
-    assert_eq!(stored.payload["schemaVersion"], json!(1));
+    assert_eq!(stored.payload["schemaVersion"], json!(2));
+    // Every item key is present, nothing else.
+    for item in stored.payload["items"].as_array().unwrap() {
+        let mut keys: Vec<&String> = item.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["at_ms", "key", "source", "text"]);
+    }
     // Every key is present, nothing else.
     let mut keys: Vec<&String> = stored.payload.as_object().unwrap().keys().collect();
     keys.sort();
@@ -1830,6 +1612,24 @@ async fn wakeup_table_resolves_every_row_of_the_design() {
             EventScope::System,
             Fx::item_added(&t, &card, "item/completed", None),
             None,
+        ),
+        // A codex system error persists its failed turn row after the phase event; this is its one event.
+        (
+            "harness.item.added turn/completed (no item type)".into(),
+            EventScope::System,
+            Fx::item_added(&t, &card, "turn/completed", None),
+            Some(t.as_str()),
+        ),
+        (
+            "harness.user_message.enqueued".into(),
+            EventScope::System,
+            Event::HarnessUserMessageEnqueued {
+                worker_session_id: "ws-w".into(),
+                card_id: cid.clone(),
+                track_id: tid.clone(),
+                char_count: 5,
+            },
+            Some(t.as_str()),
         ),
         (
             "track.lifecycle_changed".into(),

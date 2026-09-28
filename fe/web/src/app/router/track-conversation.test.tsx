@@ -36,22 +36,22 @@ const ASSISTANT_CARD = { ...PLANNER_CARD, id: 'conv-assistant-1', title: null, p
 const WORKER_CARD = { ...PLANNER_CARD, id: 'card-worker', title: 'Worker', payload: {}, sort: 3, updated_at: 4 };
 /* The kernel's `kernel/track/activity` overlay: `items` are what the aside lists,
  * `cards` the per-card verdicts every row and card head reads. */
-type ActivityItemWire = {
-  kind: 'input' | 'failed'; source: 'card' | 'task' | 'session' | 'lifecycle';
-  id: string; card_id: string | null; at_ms: number;
-};
+type ActivityItemWire = { source: 'ask' | 'planner_down'; key: string; text: string; at_ms: number };
 type ActivityCardWire = { card_id: string; state: 'working' | 'input' | 'failed' };
 const trackActivityOverlay = (payload: Partial<{
   working: boolean; attention: 'none' | 'input' | 'failed'; activity_at_ms: number | null;
   items: ActivityItemWire[]; cards: ActivityCardWire[];
 }> = {}, trackId = 'w1') => ({
   id: `activity-${trackId}`, plugin_id: 'kernel', entity_kind: 'track', entity_id: trackId, kind: 'activity',
-  payload: { schemaVersion: 1, working: false, attention: 'none', activity_at_ms: null, items: [], cards: [], ...payload },
+  payload: { schemaVersion: 2, working: false, attention: 'none', activity_at_ms: null, items: [], cards: [], ...payload },
   updated_at: 3,
 });
-/** A card's own input request, as the projector lists it: one item and one card verdict. */
-const cardInputItem = (cardId: string, kind: 'input' | 'failed', atMs: number): ActivityItemWire =>
-  ({ kind, source: 'card', id: cardId, card_id: cardId, at_ms: atMs });
+/** The Planner's ask, in its words, as the projector lists it. */
+const askItem = (text: string, atMs: number): ActivityItemWire =>
+  ({ source: 'ask', key: `ask:lifecycle:${atMs}`, text, at_ms: atMs });
+/** The Planner stopped: its failure reason, as the projector lists it. */
+const plannerDownItem = (text: string, atMs: number): ActivityItemWire =>
+  ({ source: 'planner_down', key: `planner_down:${atMs}`, text, at_ms: atMs });
 /** The retired per-card status row (`kernel/card/status`): nothing reads it any more. */
 const cardStatusOverlay = (cardId: string, state: 'AwaitingInput' | 'Errored', updatedAt: number) => ({
   id: `status-${cardId}`, plugin_id: 'kernel', entity_kind: 'card', entity_id: cardId,
@@ -292,162 +292,59 @@ describe('track conversations', () => {
     await screen.findByRole('button', { name: 'Conversation Assistant' });
   });
 
-  it('opens the planner conversation from the track input request', async () => {
-    setup((request) => request.path === '/api/tracks/w1'
+  it('both notification kinds show the kernel\'s words and Reply opens the Planner composer', async () => {
+    const mount = () => setup((request) => request.path === '/api/tracks/w1'
       ? ok({
           track: TRACK, can_resume: false,
           cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
-          overlays: [trackActivityOverlay({ attention: 'input', items: [cardInputItem(PLANNER_CARD.id, 'input', 4)],
-            cards: [{ card_id: PLANNER_CARD.id, state: 'input' }] })],
+          overlays: [trackActivityOverlay({ attention: 'failed', items: [
+            plannerDownItem('unexpected status 403 Forbidden', 5),
+            askItem('Merge PR #1811 now, or hold it?', 4),
+          ] })],
         })
       : undefined);
-    fireEvent.click(await screen.findByRole('button', { name: 'Review Planner notification: Requires input to continue.' }));
-    expect(await screen.findByRole('complementary', { name: 'Planner chat' })).toBeTruthy();
-    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' })).toBe(document.activeElement));
-    expect(screen.getByRole('region', { name: 'Notifications' })
-      .getAttribute('data-nc-notification-mode')).toBe('compact');
-    expect(screen.getByRole('region', { name: 'Notifications' }).querySelector('strong')).toBeNull();
+    mount();
+    const notice = await screen.findByRole('region', { name: 'Notifications' });
+    const rows = within(notice).getAllByRole('listitem');
+    expect(rows.map((row) => row.getAttribute('data-nc-notification-state'))).toEqual(['planner-down', 'ask']);
+    expect(within(rows[0]).getByText('Planner stopped')).toBeTruthy();
+    expect(within(rows[0]).getByText('unexpected status 403 Forbidden')).toBeTruthy();
+    expect(within(rows[0]).getByText('Fix the cause, then send the Planner a message to continue.')).toBeTruthy();
+    expect(within(rows[1]).getByText('Planner asks')).toBeTruthy();
+    expect(within(rows[1]).getByText('Merge PR #1811 now, or hold it?')).toBeTruthy();
+    expect(within(rows[1]).queryByText('Fix the cause, then send the Planner a message to continue.')).toBeNull();
+    /* Each row's Reply, on a fresh mount: the Planner's composer opens focused and the aside compacts beside it. */
+    for (const [index, text] of ['unexpected status 403 Forbidden', 'Merge PR #1811 now, or hold it?'].entries()) {
+      if (index > 0) {
+        cleanup();
+        window.history.pushState({}, '', `${APP_BASEPATH}/track/w1`);
+        mount();
+      }
+      fireEvent.click(await screen.findByRole('button', { name: `Reply to the Planner: ${text}` }));
+      expect(await screen.findByRole('complementary', { name: 'Planner chat' })).toBeTruthy();
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' })).toBe(document.activeElement));
+      expect(screen.getByRole('region', { name: 'Notifications' })
+        .getAttribute('data-nc-notification-mode')).toBe('compact');
+      expect(screen.getByRole('region', { name: 'Notifications' }).querySelector('strong')).toBeNull();
+      expect(window.location.search).not.toContain('card=');
+    }
   });
 
-  it('opens the requesting worker card instead of the Planner conversation', async () => {
-    setup((request) => request.path === '/api/tracks/w1'
-      ? ok({
-          track: TRACK, can_resume: false,
-          cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
-          overlays: [trackActivityOverlay({ attention: 'input', items: [cardInputItem(WORKER_CARD.id, 'input', 4)],
-            cards: [{ card_id: WORKER_CARD.id, state: 'input' }] })],
-        })
-      : undefined);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Review Worker notification: Requires input to continue.' }));
-    await waitFor(() => expect(window.location.search).toContain('card=card-worker'));
-    expect(screen.queryByRole('complementary', { name: 'Planner chat' })).toBeNull();
-    expect(document.querySelector('[data-nc-card-cell][data-nc-card-id="card-worker"]')).toBeTruthy();
-  });
-
-  it('opens an Assistant input notification in its conversation instead of treating it as a worker card', async () => {
-    setup((request) => request.path === '/api/tracks/w1'
-      ? ok({
-          track: TRACK, can_resume: false,
-          cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
-          overlays: [trackActivityOverlay({ attention: 'input', items: [cardInputItem(ASSISTANT_CARD.id, 'input', 4)],
-            cards: [{ card_id: ASSISTANT_CARD.id, state: 'input' }] })],
-        })
-      : undefined);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Review Assistant notification: Requires input to continue.' }));
-    expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeTruthy();
-    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' })).toBe(document.activeElement));
-    expect(window.location.search).not.toContain('card=');
-  });
-
-  it('lists simultaneous Planner and Worker requests with a truthful count', async () => {
+  it('counts an ask and planner down as two notifications', async () => {
     setup((request) => request.path === '/api/tracks/w1'
       ? ok({
           track: TRACK, can_resume: false,
           cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
           overlays: [trackActivityOverlay({ attention: 'failed',
-            items: [cardInputItem(PLANNER_CARD.id, 'input', 4), cardInputItem(WORKER_CARD.id, 'failed', 5)],
-            cards: [{ card_id: PLANNER_CARD.id, state: 'input' }, { card_id: WORKER_CARD.id, state: 'failed' }] })],
+            items: [plannerDownItem('boom', 5), askItem('Which region?', 4)],
+            cards: [{ card_id: PLANNER_CARD.id, state: 'failed' }] })],
         })
       : undefined);
 
     const notice = await screen.findByRole('region', { name: 'Notifications' });
-    expect(within(notice).getByText('2 items need attention')).toBeTruthy();
-    expect(within(notice).getByText('Planner')).toBeTruthy();
-    expect(within(notice).getByText('Worker')).toBeTruthy();
-    expect(within(notice).getByText('Stopped with an error and needs attention.')).toBeTruthy();
-    /* Newest first (`at_ms` desc): the Worker's later failure above the Planner's request. */
-    expect(within(notice).getAllByRole('listitem').map((item) => item.getAttribute('data-nc-notification-state')))
-      .toEqual(['errored', 'awaiting-input']);
+    expect(within(notice).getByText('2 waiting on you')).toBeTruthy();
     fireEvent.click(within(notice).getByRole('button', { name: 'Collapse notifications' }));
     expect(await screen.findByRole('button', { name: 'Open 2 notifications' })).toBeTruthy();
-  });
-
-  /* The aside is the overlay's `items` folded per card (`foldAttentionByCard`): a card
-   * carrying both a task and a session item is one row, spoken for by its later item.
-   * Card-less items stay one row each; a task with no worker card reviews to the track itself. */
-  it('notifications sidebar folds a card\'s items into one row and keeps every card-less item', async () => {
-    setup((request) => request.path === '/api/tracks/w1'
-      ? ok({
-          track: TRACK, can_resume: false,
-          cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
-          overlays: [trackActivityOverlay({ attention: 'failed', items: [
-            { kind: 'failed', source: 'task', id: 'impl', card_id: WORKER_CARD.id, at_ms: 7 },
-            { kind: 'failed', source: 'session', id: 'ws-worker', card_id: WORKER_CARD.id, at_ms: 6 },
-            { kind: 'failed', source: 'task', id: 'gate', card_id: null, at_ms: 5 },
-            { kind: 'input', source: 'lifecycle', id: 'w1', card_id: null, at_ms: 4 },
-          ], cards: [{ card_id: WORKER_CARD.id, state: 'failed' }] })],
-        })
-      : undefined);
-
-    const notice = await screen.findByRole('region', { name: 'Notifications' });
-    expect(within(notice).getByText('3 items need attention')).toBeTruthy();
-    const items = within(notice).getAllByRole('listitem');
-    expect(items).toHaveLength(3);
-    expect(items.map((item) => item.textContent)).toEqual([
-      'WorkerThe task failed and needs attention.Review',
-      'Task gateThe task failed and needs attention.Review',
-      'TrackThe track is waiting on you.Review',
-    ]);
-    expect(items.map((item) => item.getAttribute('data-nc-notification-state'))).toEqual(['errored', 'errored', 'awaiting-input']);
-    /* One Worker row: the later (task, at_ms 7) item speaks for the card. */
-    expect(within(notice).getAllByRole('button', { name: /^Review Worker notification/ })
-      .map((button) => button.getAttribute('aria-label'))).toEqual([
-      'Review Worker notification: The task failed and needs attention.',
-    ]);
-    fireEvent.click(within(notice).getByRole('button', { name: 'Review Task gate notification: The task failed and needs attention.' }));
-    expect(await screen.findByRole('complementary', { name: 'Planner chat' })).toBeTruthy();
-    expect(window.location.search).not.toContain('card=');
-  });
-
-  /* The twin of the fold case: the fold is per card, so two failed worker cards are two rows. */
-  it('notifications sidebar keeps one row per failed card', async () => {
-    const SECOND_WORKER = { ...WORKER_CARD, id: 'card-worker-2', title: 'Worker two', sort: 4 };
-    setup((request) => request.path === '/api/tracks/w1'
-      ? ok({
-          track: TRACK, can_resume: false,
-          cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD, SECOND_WORKER],
-          overlays: [trackActivityOverlay({ attention: 'failed', items: [
-            { kind: 'failed', source: 'task', id: 'impl', card_id: WORKER_CARD.id, at_ms: 7 },
-            { kind: 'failed', source: 'task', id: 'gate', card_id: SECOND_WORKER.id, at_ms: 6 },
-          ], cards: [{ card_id: WORKER_CARD.id, state: 'failed' }, { card_id: SECOND_WORKER.id, state: 'failed' }] })],
-        })
-      : undefined);
-
-    const notice = await screen.findByRole('region', { name: 'Notifications' });
-    expect(within(notice).getByText('2 items need attention')).toBeTruthy();
-    expect(within(notice).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
-      'WorkerThe task failed and needs attention.Review',
-      'Worker twoThe task failed and needs attention.Review',
-    ]);
-  });
-
-  /* A worker card's row is named by the first line of its `payload.goal` (what the task is
-   * about), never by the card title (the task key); a card without a goal keeps its label. */
-  it('notifications sidebar names a worker card by the first line of its goal and a terminal card by its title', async () => {
-    const GOAL_WORKER = {
-      ...WORKER_CARD, id: 'card-goal', kind: 'claude', title: 'review-r6-a',
-      payload: { goal: 'Review the parser split against the design\nThen post the verdict.', idempotency_key: 'w1:review-r6-a' },
-    };
-    const TERMINAL_CARD = { ...WORKER_CARD, id: 'card-term', kind: 'terminal', title: 'zsh', payload: { command: 'zsh' }, sort: 5 };
-    setup((request) => request.path === '/api/tracks/w1'
-      ? ok({
-          track: TRACK, can_resume: false,
-          cards: [PLANNER_CARD, ASSISTANT_CARD, GOAL_WORKER, TERMINAL_CARD],
-          overlays: [trackActivityOverlay({ attention: 'failed', items: [
-            { kind: 'failed', source: 'task', id: 'review-r6-a', card_id: GOAL_WORKER.id, at_ms: 7 },
-            { kind: 'failed', source: 'session', id: 'ws-term', card_id: TERMINAL_CARD.id, at_ms: 6 },
-          ], cards: [{ card_id: GOAL_WORKER.id, state: 'failed' }, { card_id: TERMINAL_CARD.id, state: 'failed' }] })],
-        })
-      : undefined);
-
-    const notice = await screen.findByRole('region', { name: 'Notifications' });
-    expect(within(notice).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
-      'Review the parser split against the designThe task failed and needs attention.Review',
-      'zshIts session failed and needs attention.Review',
-    ]);
-    expect(within(notice).queryByText('review-r6-a')).toBeNull();
   });
 
   it('ignores a retired kernel/card/status row and a plugin-authored activity row', async () => {
@@ -457,7 +354,7 @@ describe('track conversations', () => {
           cards: [PLANNER_CARD, ASSISTANT_CARD, WORKER_CARD],
           overlays: [
             cardStatusOverlay(WORKER_CARD.id, 'AwaitingInput', 5),
-            { ...trackActivityOverlay({ attention: 'input', items: [cardInputItem(PLANNER_CARD.id, 'input', 4)] }),
+            { ...trackActivityOverlay({ attention: 'input', items: [askItem('Which region?', 4)] }),
               plugin_id: 'third-party' },
           ],
         })
