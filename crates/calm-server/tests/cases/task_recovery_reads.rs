@@ -484,10 +484,10 @@ async fn task_recovery_list_carries_the_worker_worktree_facts() {
         json!({
             "path": lease_path.to_string_lossy(),
             "state": "held",
-            "branch": format!("neige/{track}/{card}"),
             "removed": false,
         }),
-        "lease without a commit: branch from the lease naming, no last_commit: {entry}"
+        "a per-card lease from before S2 names no branch (its row does not record one), no \
+         last_commit: {entry}"
     );
 
     // The kernel's auto commit lands a `worktree.committed` event scoped to the worker card.
@@ -564,12 +564,13 @@ async fn task_recovery_list_names_the_worktree_base_sha_from_the_lease_row() {
         .unwrap();
     let base_sha = "89abcdef0123456789abcdef0123456789abcdef";
     let repo_root = tempfile::tempdir().expect("tempdir");
-    let lease_path = calm_server::test_seams::acquire_based_workspace_lease_for_test(
+    let lease_path = repo_root.path().to_path_buf();
+    calm_server::test_seams::acquire_based_workspace_lease_for_test(
         &pool,
         &card,
         &track,
         "test-owner",
-        repo_root.path(),
+        &lease_path,
         base_sha,
     )
     .await
@@ -587,7 +588,6 @@ async fn task_recovery_list_names_the_worktree_base_sha_from_the_lease_row() {
         json!({
             "path": lease_path.to_string_lossy(),
             "state": "held",
-            "branch": format!("neige/{track}/{card}"),
             "base_sha": base_sha,
             "removed": false,
         }),
@@ -645,8 +645,8 @@ async fn append_worker_card_event(
     ids[0]
 }
 
-/// `release_workspace_lease_for_card_*` only flips the row; `release_workspace_lease_by_id`
-/// removes the worktree and appends `worktree.removed`.
+/// A release only flips the row; `worktree.removed` (which only a per-card worktree before
+/// #1830 S2 ever got) hides the path and branch until the card is provisioned again.
 #[tokio::test]
 async fn task_recovery_list_worktree_facts_tell_a_removed_worktree_from_a_retained_one() {
     let boot = boot().await;
@@ -669,6 +669,7 @@ async fn task_recovery_list_worktree_facts_tell_a_removed_worktree_from_a_retain
         .join(&track)
         .join(&card);
     let lease_path_json = json!(lease_path.to_string_lossy());
+    // The per-card branch a pre-S2 kernel commit named.
     let naming_branch = format!("neige/{track}/{card}");
 
     // Lease 1: acquired, then released through the flip-only production path.
@@ -698,10 +699,9 @@ async fn task_recovery_list_worktree_facts_tell_a_removed_worktree_from_a_retain
         json!({
             "path": lease_path_json,
             "state": "released",
-            "branch": naming_branch,
             "removed": false,
         }),
-        "released + retained: path and branch stay, removed:false: {entry}"
+        "released + retained: the path stays, removed:false: {entry}"
     );
 
     // Lease 2 on the same card and path. `acquire` stamps `created_at_ms` with the wall clock and
@@ -756,32 +756,33 @@ async fn task_recovery_list_worktree_facts_tell_a_removed_worktree_from_a_retain
         "lease 2 held with a commit: {entry}"
     );
 
-    // Lease 2 released through the removing production path.
+    // Lease 2 released, then its worktree removed (a pre-S2 per-card removal).
     assert!(
-        calm_server::test_seams::release_workspace_lease_by_id_for_test(
-            &pool,
+        calm_server::test_seams::release_workspace_lease_for_card_for_test(
+            boot.repo.as_ref(),
             &boot.ctx.events,
-            &lease_2,
+            &card,
         )
         .await
         .unwrap(),
         "lease 2 releases"
     );
-    assert!(
-        !lease_path.exists(),
-        "removing release deletes the checkout"
-    );
-    let removed_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events WHERE scope_card = ?1 AND kind = 'worktree.removed'",
+    let released: String =
+        sqlx::query_scalar("SELECT state FROM workspace_leases WHERE lease_id = ?1")
+            .bind(&lease_2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(released, "released");
+    append_worker_card_event(
+        &boot,
+        calm_server::event::Event::WorktreeRemoved {
+            track_id: boot.track_id.clone(),
+            card_id: boot.worker_card_id.clone(),
+            path: lease_path.to_string_lossy().to_string(),
+        },
     )
-    .bind(&card)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        removed_count, 1,
-        "the removing release appends worktree.removed"
-    );
+    .await;
     let entry = list_entry(&boot, json!({})).await;
     assert_eq!(
         entry["worktree"],
