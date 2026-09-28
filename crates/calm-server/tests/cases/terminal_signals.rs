@@ -3643,11 +3643,13 @@ async fn reattach_replay_does_not_stamp() {
     h.stop(&p.terminal).await;
 }
 
-/// The supervisor's replay ring of `term:<terminal>` contains `needle`: a read-only attach with its
-/// own reader id, dropped after the `AttachOk`.
-async fn await_ring_contains(h: &Harness, terminal: &str, needle: &str) {
+/// The supervisor's replay ring of `term:<terminal>` holds all [`SLEEPER`] prints: `READY` plus the
+/// line discipline's `\r\n`, which the PTY may deliver as a separate later read. A read-only attach
+/// with its own reader id, dropped after the `AttachOk`.
+async fn await_ring_holds_sleeper_output(h: &Harness, terminal: &str) {
     use calm_session::control::{AttachRequest, ControlMsg, ControlReply};
     use calm_session::{read_frame, write_frame};
+    let needle = "READY\r\n";
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let mut stream = tokio::net::UnixStream::connect(h.supervisor_socket())
@@ -3730,7 +3732,7 @@ async fn concurrent_attach_keeps_the_fresh_launch_stamp() {
             term.pid.is_some(),
             "the hold sits after the pid persistence: the concurrent ensure is attach-shaped"
         );
-        await_ring_contains(&h, &terminal, "READY").await;
+        await_ring_holds_sleeper_output(&h, &terminal).await;
         assert!(
             h.state.terminal_renderer.get(&terminal).is_none(),
             "the held launch has not inserted its entry"
@@ -3892,7 +3894,7 @@ async fn fresh_launch_replay_stamp_wakes_without_a_bus_event() {
     let (ensured, ()) = tokio::join!(h.state.terminal_renderer.ensure(cfg), async {
         let terminal = entered.await.expect("the ensure reached the attach hold");
         assert_eq!(terminal, term.id);
-        await_ring_contains(&h, &terminal, "READY").await;
+        await_ring_holds_sleeper_output(&h, &terminal).await;
         release.notify_one();
     });
     let entry = ensured.expect("the registry spawned the child");
@@ -3944,7 +3946,7 @@ async fn handed_over_stamp_wakes_without_a_bus_event() {
     let (ensured, attach_entry) = tokio::join!(h.state.terminal_renderer.ensure(cfg), async {
         let terminal = entered.await.expect("the ensure reached the attach hold");
         assert_eq!(terminal, term.id);
-        await_ring_contains(&h, &terminal, "READY").await;
+        await_ring_holds_sleeper_output(&h, &terminal).await;
         let persisted = h.state.repo.terminal_get(&terminal).await.unwrap().unwrap();
         assert!(
             persisted.pid.is_some(),
