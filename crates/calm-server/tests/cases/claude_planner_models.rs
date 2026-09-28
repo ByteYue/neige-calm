@@ -1,21 +1,28 @@
-//! #1810: a Claude Planner chooses its model from the alias list, through the real routes and the
-//! fake `claude` (see `claude_planner_stack_fixture.rs`). The card is read at issue time, so a PUT
-//! between turns reaches the next spawn's `--model`.
-
-use std::time::Duration;
+//! #1822: a Claude Planner chooses its model from the Claude CLI's own model list, through the
+//! real routes and the fake `claude` (see `claude_planner_stack_fixture.rs`), which answers
+//! `initialize` with the list measured from the pinned CLI and refuses a model it does not list as
+//! the pinned CLI does. A write is advised against the list as Codex's is (6′); the card is read at
+//! issue time, so a PUT between turns reaches the next spawn's `--model=` and `--effort=`.
 
 use axum::http::StatusCode;
-use calm_server::model::CardPatch;
 use serde_json::{Value, json};
 
 use super::claude_planner_stack_fixture::{Root, Stack};
 
-/// The last spawn's `--model` value, or `None` when it passed none.
-fn spawned_model(root: &Root) -> Option<String> {
+/// The value of the last spawn's `<flag>=<value>` token, or `None` when it passed no `flag`.
+fn spawned_flag(root: &Root, flag: &str) -> Option<String> {
     let argv = root.read_fake("argv").expect("a spawn recorded its argv");
-    let argv: Vec<&str> = argv.lines().collect();
-    let at = argv.iter().position(|arg| *arg == "--model")?;
-    Some(argv[at + 1].to_string())
+    let prefix = format!("{flag}=");
+    let values: Vec<String> = argv
+        .lines()
+        .filter_map(|arg| arg.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    assert!(values.len() <= 1, "{flag} passed twice: {argv}");
+    assert!(
+        !argv.lines().any(|arg| arg == flag),
+        "{flag} passed as its own token: {argv}"
+    );
+    values.into_iter().next()
 }
 
 async fn put_model(stack: &Stack, card_id: &str, body: Value) -> (StatusCode, Value) {
@@ -38,56 +45,144 @@ async fn payload(stack: &Stack, card_id: &str) -> Value {
         .payload
 }
 
-/// Acceptance: create with `sonnet` → the first turn passes `--model sonnet`; PUT `haiku` → the
-/// next turn passes `--model haiku`; PUT `null` → the next turn passes no `--model`.
+/// Acceptance: create with Fable + `high` → the first turn passes
+/// `--model claude-fable-5-1[1m] --effort high`; PUT `haiku` → `--model haiku` and no effort;
+/// PUT the default with `max` → no `--model` and `--effort max`; PUT `null`/`null` → neither.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_chosen_alias_reaches_each_next_turn() {
+async fn the_chosen_model_and_effort_reach_each_next_turn() {
     let root = Root::new("exit");
     let stack = Stack::boot(&root).await;
     let (_track, card_id) = stack
-        .create_claude_track_with(json!({"model": "sonnet"}))
+        .create_claude_track_with(
+            json!({"model": "claude-fable-5-1[1m]", "reasoning_effort": "high"}),
+        )
         .await;
 
     let (outcome, _) = stack.run_turn(&root, &card_id, "exit", "first").await;
     assert_eq!(outcome["status"], "completed", "{outcome}");
-    assert_eq!(spawned_model(&root).as_deref(), Some("sonnet"));
+    assert_eq!(
+        spawned_flag(&root, "--model").as_deref(),
+        Some("claude-fable-5-1[1m]")
+    );
+    assert_eq!(spawned_flag(&root, "--effort").as_deref(), Some("high"));
 
-    let (status, body) = put_model(
-        &stack,
-        &card_id,
-        json!({"model": "haiku", "reasoning_effort": null}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["model"], "haiku", "{body}");
-    assert_eq!(body["effort_adjusted"], false, "{body}");
-    assert_eq!(body["unknown_model"], false, "{body}");
-    let (outcome, _) = stack.run_turn(&root, &card_id, "exit", "second").await;
-    assert_eq!(outcome["status"], "completed", "{outcome}");
-    assert_eq!(spawned_model(&root).as_deref(), Some("haiku"));
-
-    let (status, body) = put_model(
-        &stack,
-        &card_id,
-        json!({"model": null, "reasoning_effort": null}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (outcome, _) = stack.run_turn(&root, &card_id, "exit", "third").await;
-    assert_eq!(outcome["status"], "completed", "{outcome}");
-    assert_eq!(spawned_model(&root), None, "the default passes no --model");
+    for (body, model, effort) in [
+        (
+            json!({"model": "haiku", "reasoning_effort": null}),
+            Some("haiku"),
+            None,
+        ),
+        (
+            json!({"model": null, "reasoning_effort": "max"}),
+            None,
+            Some("max"),
+        ),
+        (json!({"model": null, "reasoning_effort": null}), None, None),
+    ] {
+        let (status, answer) = put_model(&stack, &card_id, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}: {answer}");
+        assert_eq!(answer["model"], body["model"], "{answer}");
+        assert_eq!(
+            answer["reasoning_effort"], body["reasoning_effort"],
+            "{answer}"
+        );
+        assert_eq!(answer["effort_adjusted"], false, "{answer}");
+        assert_eq!(answer["unknown_model"], false, "{answer}");
+        let (outcome, _) = stack.run_turn(&root, &card_id, "exit", "next").await;
+        assert_eq!(outcome["status"], "completed", "{outcome}");
+        assert_eq!(spawned_flag(&root, "--model").as_deref(), model, "{body}");
+        assert_eq!(spawned_flag(&root, "--effort").as_deref(), effort, "{body}");
+    }
 }
 
-/// Create and PUT refuse an unknown model and any effort with 400, and store nothing.
+/// A PUT is advised like Codex's (6′): a value the list does not carry (the pre-#1822 alias `opus`)
+/// is stored and reported `unknown_model`; an effort the entry does not declare is dropped, since a
+/// Claude entry declares no default effort, and reported `effort_adjusted`, as is any effort sent
+/// with an unlisted value (the CLI would ignore it); a null model's effort is judged on the CLI's
+/// `default` entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unknown_model_or_an_effort_is_refused_at_create_and_put() {
+async fn a_put_stores_an_unlisted_value_as_unknown_and_drops_an_undeclared_effort() {
     let root = Root::new("exit");
     let stack = Stack::boot(&root).await;
-    for extra in [
-        json!({"model": "claude-sonnet-4-5"}),
-        json!({"model": "gpt-5"}),
-        json!({"model": "sonnet", "reasoning_effort": "high"}),
-        json!({"reasoning_effort": "low"}),
+    let (_track, card_id) = stack.create_claude_track().await;
+    for (body, stored_effort, adjusted, unknown) in [
+        (
+            json!({"model": "opus", "reasoning_effort": null}),
+            None,
+            false,
+            true,
+        ),
+        (
+            json!({"model": "opus", "reasoning_effort": "high"}),
+            None,
+            true,
+            true,
+        ),
+        (
+            json!({"model": "haiku", "reasoning_effort": "low"}),
+            None,
+            true,
+            false,
+        ),
+        (
+            json!({"model": null, "reasoning_effort": "ultra"}),
+            None,
+            true,
+            false,
+        ),
+        (
+            json!({"model": "sonnet", "reasoning_effort": "max"}),
+            Some("max"),
+            false,
+            false,
+        ),
+        (
+            json!({"model": null, "reasoning_effort": "xhigh"}),
+            Some("xhigh"),
+            false,
+            false,
+        ),
+    ] {
+        let (status, answer) = put_model(&stack, &card_id, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}: {answer}");
+        assert_eq!(answer["model"], body["model"], "{body}: {answer}");
+        assert_eq!(
+            answer["reasoning_effort"],
+            json!(stored_effort),
+            "{body}: {answer}"
+        );
+        assert_eq!(answer["effort_adjusted"], adjusted, "{body}: {answer}");
+        assert_eq!(answer["unknown_model"], unknown, "{body}: {answer}");
+        let stored = payload(&stack, &card_id).await;
+        assert_eq!(stored["model"], body["model"], "{body}: {stored}");
+        assert_eq!(
+            stored["reasoning_effort"],
+            json!(stored_effort),
+            "{body}: {stored}"
+        );
+    }
+}
+
+/// Create uses the same advice and, as for Codex, refuses an effort the advice would move rather
+/// than adjusting it (with an unlisted value, any effort); a value the list does not carry is
+/// minted without one, for the CLI to judge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_refuses_an_undeclared_effort_and_mints_an_unlisted_value() {
+    let root = Root::new("exit");
+    let stack = Stack::boot(&root).await;
+    for (extra, expected) in [
+        (
+            json!({"model": "haiku", "reasoning_effort": "low"}),
+            "reasoning_effort `low` is unsupported for model `haiku`; it declares no default effort",
+        ),
+        (
+            json!({"reasoning_effort": "ultra"}),
+            "reasoning_effort `ultra` is unsupported for the default model",
+        ),
+        (
+            json!({"model": "opus", "reasoning_effort": "high"}),
+            "reasoning_effort `high` is unsupported for model `opus`; the catalog does not list it",
+        ),
     ] {
         let area = stack.area().await;
         let mut request = json!({
@@ -101,6 +196,7 @@ async fn an_unknown_model_or_an_effort_is_refused_at_create_and_put() {
         }
         let (status, body) = stack.send("POST", "/api/tracks", Some(request)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {body}");
+        assert!(body.to_string().contains(expected), "{extra}: {body}");
         let tracks = stack
             .repo()
             .tracks_by_area(&area)
@@ -108,79 +204,51 @@ async fn an_unknown_model_or_an_effort_is_refused_at_create_and_put() {
             .expect("tracks read");
         assert!(tracks.is_empty(), "{extra}: no track is minted");
     }
-
     let (_track, card_id) = stack
         .create_claude_track_with(json!({"model": "opus"}))
         .await;
-    let before = payload(&stack, &card_id).await;
-    for body in [
-        json!({"model": "some-model", "reasoning_effort": null}),
-        json!({"model": "opus", "reasoning_effort": "high"}),
-        json!({"model": null, "reasoning_effort": "medium"}),
-    ] {
-        let (status, answer) = put_model(&stack, &card_id, body.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {answer}");
-    }
-    assert_eq!(payload(&stack, &card_id).await, before, "nothing stored");
+    assert_eq!(payload(&stack, &card_id).await["model"], "opus");
 }
 
-/// A Claude card whose stored selection the alias list cannot satisfy is refused at issue (the
-/// reader is told, nothing is spawned), and a PUT of an alias releases the queued message.
+/// At issue no catalog is consulted: a stored value the CLI does not list (one that looks like a
+/// flag among them) reaches argv as a single `--model=` token, and the CLI fails the turn in its
+/// own words; nothing substitutes another model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_payload_the_alias_list_cannot_run_is_refused_at_issue() {
+async fn a_model_the_cli_rejects_fails_the_turn_in_the_cli_words() {
     let root = Root::new("exit");
     let stack = Stack::boot(&root).await;
     let (_track, card_id) = stack.create_claude_track().await;
-    let runtime = stack.runtime(&card_id).await;
-    let mut stored = payload(&stack, &card_id).await;
-    stored["model"] = json!("gpt-5");
-    stored["model_ever_set"] = json!(true);
-    stack
-        .repo()
-        .card_update(
+    for (at, model) in ["claude-bogus-9-9", "-x"].into_iter().enumerate() {
+        let (status, answer) = put_model(
+            &stack,
             &card_id,
-            CardPatch {
-                title: None,
-                kind: None,
-                sort: None,
-                payload: Some(stored),
-                deletable: None,
-            },
+            json!({"model": model, "reasoning_effort": null}),
         )
-        .await
-        .expect("write an unrunnable selection");
-
-    let harness = stack.harness(&runtime.id);
-    let (status, body) = stack.post_input(&card_id, "hello?").await;
-    assert_eq!(status, StatusCode::OK, "the message is queued: {body}");
-    let mut block = None;
-    for _ in 0..200 {
-        block = harness.issuance_block().await;
-        if block.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        .await;
+        assert_eq!(status, StatusCode::OK, "{model}: {answer}");
+        assert_eq!(answer["unknown_model"], true, "{model}: {answer}");
+        let (status, body) = stack.post_input(&card_id, "hello?").await;
+        assert_eq!(status, StatusCode::OK, "{model}: {body}");
+        let outcome = stack.wait_outcomes(&card_id, at + 1).await[at].clone();
+        assert_eq!(outcome["status"], "failed", "{model}: {outcome}");
+        let words = format!(
+            "There's an issue with the selected model ({model}). It may not exist or you may not \
+             have access to it."
+        );
+        assert!(outcome.to_string().contains(&words), "{model}: {outcome}");
+        assert_eq!(spawned_flag(&root, "--model").as_deref(), Some(model));
+        let argv = root.read_fake("argv").expect("argv");
+        assert!(
+            !argv.lines().any(|arg| arg == model),
+            "{model} as its own token: {argv}"
+        );
     }
-    let block = block.expect("the reader is told why nothing is sent");
-    assert!(block.contains("gpt-5"), "{block}");
-    assert!(root.read_fake("spawns").is_none(), "nothing was spawned");
-    assert!(stack.outcomes(&card_id).await.is_empty());
-
-    let (status, body) = put_model(
-        &stack,
-        &card_id,
-        json!({"model": "opus", "reasoning_effort": null}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let outcomes = stack.wait_outcomes(&card_id, 1).await;
-    assert_eq!(outcomes[0]["status"], "completed", "{outcomes:?}");
-    assert_eq!(spawned_model(&root).as_deref(), Some("opus"));
 }
 
-/// `GET /api/models` for a Claude Planner: the alias catalog with the flag, `unavailable` without.
+/// `GET /api/models` for a Claude Planner: the CLI's list with its resolved models and effort
+/// levels, and the CLI's `default` entry as the default; `unavailable` without the flag.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_catalog_is_the_alias_list_only_with_the_flag() {
+async fn the_catalog_is_the_cli_list_with_the_flag() {
     let root = Root::new("exit");
     let stack = Stack::boot(&root).await;
     let (_track, card_id) = stack.create_claude_track().await;
@@ -188,35 +256,62 @@ async fn the_catalog_is_the_alias_list_only_with_the_flag() {
         format!("/api/models?card_id={card_id}"),
         "/api/models?provider=claude".to_string(),
     ];
+    let levels: Vec<Value> = ["low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .map(|level| json!({"reasoning_effort": level, "description": null}))
+        .collect();
     for uri in &uris {
         let (status, body) = stack.send("GET", uri, None).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
-        assert_eq!(body["source"], "built_in", "{uri}: {body}");
-        assert_eq!(body["default_source"], "unknown", "{uri}: {body}");
+        assert_eq!(body["source"], "live", "{uri}: {body}");
+        assert_eq!(body["default_source"], "claude_cli", "{uri}: {body}");
         assert_eq!(
             body["default"],
-            json!({"model": null, "reasoning_effort": null})
+            json!({"model": "claude-opus-5-5[1m]", "reasoning_effort": null,
+                   "supported_reasoning_efforts": levels}),
+            "{uri}"
         );
-        assert_eq!(body["fetched_at_ms"], Value::Null);
-        let aliases: Vec<&str> = body["models"]
+        assert!(
+            body["fetched_at_ms"].as_i64().is_some_and(|ms| ms > 0),
+            "{body}"
+        );
+        let entries: Vec<(&str, &str, &str)> = body["models"]
             .as_array()
             .expect("models")
             .iter()
-            .map(|m| m["model"].as_str().expect("alias"))
+            .map(|m| {
+                (
+                    m["model"].as_str().expect("model"),
+                    m["resolved_model"].as_str().expect("resolved model"),
+                    m["display_name"].as_str().expect("display name"),
+                )
+            })
             .collect();
-        assert_eq!(aliases, ["opus", "sonnet", "haiku"], "{uri}");
+        assert_eq!(
+            entries,
+            [
+                ("opus[1m]", "claude-opus-5-5[1m]", "Opus (1M context)"),
+                ("claude-fable-5-1[1m]", "claude-fable-5-1", "Fable"),
+                ("sonnet", "claude-sonnet-5", "Sonnet"),
+                ("haiku", "claude-haiku-4-5-20251001", "Haiku"),
+            ],
+            "{uri}"
+        );
         for entry in body["models"].as_array().unwrap() {
             assert_eq!(entry["id"], entry["model"], "{entry}");
             assert_eq!(entry["is_default"], false, "{entry}");
-            assert_eq!(entry["supported_reasoning_efforts"], json!([]), "{entry}");
             assert_eq!(entry["default_reasoning_effort"], Value::Null, "{entry}");
-            assert!(
-                entry["display_name"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())
-            );
-            assert!(entry["description"].as_str().is_some_and(|s| !s.is_empty()));
+            let expected = if entry["model"] == "haiku" {
+                json!([])
+            } else {
+                json!(levels)
+            };
+            assert_eq!(entry["supported_reasoning_efforts"], expected, "{entry}");
         }
+        assert!(
+            !body.to_string().contains("owner@example.invalid"),
+            "{body}"
+        );
     }
     stack.shutdown().await;
 

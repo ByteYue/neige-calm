@@ -3,9 +3,11 @@
 # copies it into a private directory next to a `scenario` file; the spawn's environment is an
 # allowlist, so everything the fake needs or records lives in that directory:
 #   in:  scenario, version (optional; default 2.1.280), result_line (optional),
-#        auth (optional; the `auth status --json` answer, default logged-in)
+#        auth (optional; the `auth status --json` answer, default logged-in),
+#        catalog (optional; the `initialize` answer, default ok)
 #   out: spawns, pid, argv, env, stdin, instructions, orphan, emitted, mcp_reply,
-#        auth-pid, auth-env, auth-calls
+#        auth-pid, auth-env, auth-calls, init-calls, init-pid, init-argv, init-env, init-cwd,
+#        init-stdin
 # Needs on PATH: bash, jq, setsid, sleep, seq, touch, yes; `flood` (F_SETPIPE_SZ) and `mcp` (a unix
 # socket client) also need python3.
 D=$(cd "$(dirname "$0")" && pwd)
@@ -47,16 +49,60 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 
+case " $* " in
+  *" --session-id "*|*" --resume "*) ;;
+  *)
+    # #1822: the model-list exchange. neige writes one `initialize` control request and closes
+    # stdin; the CLI answers with its `/model` list (measured from the pinned 2.1.280) and exits.
+    # The answer also carries the account, as the real one does, for neige never to pass on.
+    echo "$$" >> "$D/init-calls"
+    echo "$$" > "$D/init-pid"
+    printf '%s\n' "$@" > "$D/init-argv"
+    env > "$D/init-env"
+    pwd > "$D/init-cwd"
+    IFS= read -r REQUEST || exit 3
+    printf '%s\n' "$REQUEST" > "$D/init-stdin"
+    [ "$(jq -r '.request.subtype' <<< "$REQUEST")" = initialize ] || {
+      echo "fake claude: expected an initialize request" >&2; exit 2; }
+    ID=$(jq -r '.request_id' <<< "$REQUEST")
+    EFFORT='"supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]'
+    DEFAULT='{"value":"default","resolvedModel":"claude-opus-5-5[1m]","displayName":"Default (recommended)","description":"Opus 5.5 with 1M context · Best for everyday, complex tasks",'"$EFFORT"'}'
+    OPUS='{"value":"opus[1m]","resolvedModel":"claude-opus-5-5[1m]","displayName":"Opus (1M context)","description":"Opus 5.5 with 1M context · Best for everyday, complex tasks",'"$EFFORT"'}'
+    FABLE='{"value":"claude-fable-5-1[1m]","resolvedModel":"claude-fable-5-1","displayName":"Fable","description":"Fable 5.1 · Most capable for your hardest and longest-running tasks",'"$EFFORT"'}'
+    SONNET='{"value":"sonnet","resolvedModel":"claude-sonnet-5","displayName":"Sonnet","description":"Sonnet 5 · Efficient for routine tasks",'"$EFFORT"'}'
+    HAIKU='{"value":"haiku","resolvedModel":"claude-haiku-4-5-20251001","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers"}'
+    MODELS="[$DEFAULT,$OPUS,$FABLE,$SONNET,$HAIKU]"
+    case "$(cat "$D/catalog" 2>/dev/null || echo ok)" in
+      ok) ;;
+      # What an entitlement change would list: the default and Haiku only.
+      restricted) MODELS="[$DEFAULT,$HAIKU]" ;;
+      # Well-formed but for one entry, whose `resolvedModel` is empty.
+      malformed) MODELS="[$DEFAULT,$HAIKU,"'{"value":"sonnet","resolvedModel":"","displayName":"Sonnet","description":""}]' ;;
+      empty-list) MODELS='[]' ;;
+      # No answer at all, and a clean exit.
+      empty) cat > /dev/null; exit 0 ;;
+      hang) exec sleep 300 ;;
+      flood) exec yes '{"type":"system","subtype":"status"}' ;;
+      *) echo "fake claude: unknown catalog answer" >&2; exit 2 ;;
+    esac
+    echo '{"type":"system","subtype":"status","status":null}'
+    printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"commands":[],"agents":[],"models":%s,"account":{"email":"owner@example.invalid","organization":"fake org","subscriptionType":"max"},"pid":%s}}}\n' "$ID" "$MODELS" "$$"
+    cat > /dev/null
+    exit 0 ;;
+esac
+
 echo "$$" >> "$D/spawns"
 echo "$$" > "$D/pid"
 printf '%s\n' "$@" > "$D/argv"
 env > "$D/env"
 SID=""
 PF=""
+MODEL=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --session-id|--resume) SID="$2"; shift ;;
     --append-system-prompt-file) PF="$2"; shift ;;
+    --model=*) MODEL="${1#--model=}" ;;
   esac
   shift
 done
@@ -93,6 +139,16 @@ if [ "$SCENARIO" = "slow-bind" ]; then sleep 1; fi
 printf "$INIT" "$SID"
 jq -c '. + {isReplay: true}' <<< "$LINE"
 if [ "$SCENARIO" = "slow-bind" ]; then sleep 7; SCENARIO=exit; fi
+
+# #1822: a model the CLI does not list ends the turn as the pinned 2.1.280 does, with an error
+# result in its own words and exit 1 (stderr then says `unrecognized_model`).
+case "$MODEL" in
+  ''|default|'opus[1m]'|'claude-fable-5-1[1m]'|sonnet|haiku) ;;
+  *)
+    printf '{"type":"result","subtype":"success","is_error":true,"result":"There'"'"'s an issue with the selected model (%s). It may not exist or you may not have access to it. Run --model to pick a different model.","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"iterations":[]},"modelUsage":{},"terminal_reason":"completed"}\n' "$MODEL"
+    echo "unrecognized_model" >&2
+    exit 1 ;;
+esac
 
 USAGE='"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,'
 USAGE+='"output_tokens":5,"iterations":[{"input_tokens":10,"cache_creation_input_tokens":0,'

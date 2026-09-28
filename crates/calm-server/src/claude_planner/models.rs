@@ -1,91 +1,76 @@
-//! A Claude Planner's model choice (#1810, amending design #1791 §5.8): the one list of the CLI's
-//! model aliases. The CLI resolves each alias to its current model, so the list does not go stale
-//! and needs no configuration. `null` is the CLI's own default and sends no `--model`; there is no
-//! reasoning-effort choice. `GET /api/models`, `PUT /planner/model`, track create and the run loop
-//! all judge a selection here.
+//! A Claude Planner's model catalog (#1822, amending design #1791 §5.8 and #1810): the Claude
+//! CLI's own `/model` list, as its `initialize` answer reports it (`catalog_fetch`), cached by the
+//! availability check (`availability`). There is no fixed list. `GET /api/models` answers it, and
+//! `PUT /planner/model` and track create advise a selection against it as they do against Codex's
+//! (6′); at issue a turn only reads the stored selection (`turn_selection`).
 
 use serde_json::Value;
 
 use crate::planner_model::{CardModelSelection, TurnModelSelection};
 
-/// One alias a Claude Planner can run.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClaudeModel {
-    /// What `--model` is given.
-    pub alias: &'static str,
-    pub display_name: &'static str,
-    pub description: &'static str,
-}
+/// The `value` of the CLI's own default entry. It is the `null` selection, never a stored one.
+pub const DEFAULT_VALUE: &str = "default";
 
-/// Every alias, in the order a picker lists them.
-pub const MODELS: &[ClaudeModel] = &[
-    ClaudeModel {
-        alias: "opus",
-        display_name: "Opus",
-        description: "The most capable Claude model.",
-    },
-    ClaudeModel {
-        alias: "sonnet",
-        display_name: "Sonnet",
-        description: "Balances capability and speed.",
-    },
-    ClaudeModel {
-        alias: "haiku",
-        display_name: "Haiku",
-        description: "The fastest Claude model.",
-    },
-];
-
-/// Why a selection cannot run on a Claude Planner. Refused, never adjusted.
+/// One entry of the CLI's model list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InvalidSelection {
-    UnknownModel(String),
-    Effort(String),
+pub struct ClaudeModel {
+    /// The CLI's `value`: what `--model` is given, verbatim.
+    pub value: String,
+    /// The CLI's `resolvedModel`: the model this entry runs.
+    pub resolved_model: String,
+    pub display_name: String,
+    pub description: String,
+    /// The CLI's `supportedEffortLevels`, in its order; empty when it declares none, and then no
+    /// effort is accepted.
+    pub effort_levels: Vec<String>,
 }
 
-impl std::fmt::Display for InvalidSelection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownModel(model) => write!(
-                f,
-                "`{model}` is not a Claude model alias; choose one of {}, or null for the Claude \
-                 CLI's default",
-                MODELS
-                    .iter()
-                    .map(|m| m.alias)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::Effort(effort) => write!(
-                f,
-                "a Claude Planner has no reasoning-effort choice; `reasoning_effort` must be null, \
-                 not `{effort}`"
-            ),
+/// The CLI's model list as one `initialize` answered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCatalog {
+    /// The CLI's [`DEFAULT_VALUE`] entry: what the `null` selection runs, and its effort levels.
+    pub default: ClaudeModel,
+    /// Every other entry, in the CLI's order: the values a selection may name.
+    pub models: Vec<ClaudeModel>,
+    /// Wall-clock ms at which the list was fetched.
+    pub fetched_at_ms: i64,
+}
+
+impl ClaudeCatalog {
+    /// The catalog of the CLI's entries: exactly one [`DEFAULT_VALUE`], at least one other entry,
+    /// and no value twice. `Err` says which rule the list breaks.
+    pub fn from_entries(entries: Vec<ClaudeModel>, fetched_at_ms: i64) -> Result<Self, String> {
+        let mut default = None;
+        let mut models: Vec<ClaudeModel> = Vec::new();
+        for entry in entries {
+            if entry.value == DEFAULT_VALUE {
+                if default.replace(entry).is_some() {
+                    return Err(format!("lists `{DEFAULT_VALUE}` twice"));
+                }
+            } else if models.iter().any(|m| m.value == entry.value) {
+                return Err(format!("lists `{}` twice", entry.value));
+            } else {
+                models.push(entry);
+            }
         }
-    }
-}
-
-/// The alias `model` names (`None` for the CLI default), or why the pair is refused.
-pub fn resolve(
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-) -> Result<Option<&'static ClaudeModel>, InvalidSelection> {
-    if let Some(effort) = reasoning_effort {
-        return Err(InvalidSelection::Effort(effort.to_string()));
-    }
-    model
-        .map(|model| {
-            MODELS
-                .iter()
-                .find(|m| m.alias == model)
-                .ok_or_else(|| InvalidSelection::UnknownModel(model.to_string()))
+        let default = default.ok_or_else(|| format!("lists no `{DEFAULT_VALUE}` entry"))?;
+        if models.is_empty() {
+            return Err("lists no model besides the default".into());
+        }
+        Ok(Self {
+            default,
+            models,
+            fetched_at_ms,
         })
-        .transpose()
+    }
 }
 
-/// What a Claude Planner card's payload says its next turn runs, read at issue time. Each turn is
-/// a fresh process, so `null` is simply the CLI default: no `*_ever_set` resolution is needed.
-/// `Err((log, reader))` for a payload that cannot be run; the turn is not sent.
+/// What a Claude Planner card's payload says its next turn runs, read at issue time: a type check
+/// of the stored keys only (#1822 6′). The write advised the selection against the catalog (an
+/// unlisted model is stored, flagged `unknown_model`); at issue the CLI is the judge of the model,
+/// and refuses one it cannot run with its own words. Each
+/// turn is a fresh process, so `null` is simply the CLI default: no `*_ever_set` resolution is
+/// needed. `Err((log, reader))` for a payload that cannot be read; the turn is not sent.
 pub fn turn_selection(payload: &Value) -> Result<TurnModelSelection, (String, String)> {
     let card = CardModelSelection::from_payload(payload).map_err(|e| {
         (
@@ -94,15 +79,9 @@ pub fn turn_selection(payload: &Value) -> Result<TurnModelSelection, (String, St
                 .to_string(),
         )
     })?;
-    let model = resolve(card.model.as_deref(), card.reasoning_effort.as_deref()).map_err(|e| {
-        (
-            format!("the card's saved Claude selection cannot run: {e}"),
-            format!("This conversation's saved model selection cannot run: {e}. Pick a model to replace it."),
-        )
-    })?;
     Ok(TurnModelSelection {
-        model: model.map(|m| m.alias.to_string()),
-        effort: None,
+        model: card.model,
+        effort: card.reasoning_effort,
     })
 }
 
@@ -112,40 +91,52 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn an_alias_or_null_resolves_and_anything_else_is_refused() {
-        assert_eq!(resolve(None, None), Ok(None));
-        assert_eq!(
-            resolve(Some("sonnet"), None).unwrap().unwrap().alias,
-            "sonnet"
-        );
-        assert_eq!(
-            resolve(Some("claude-sonnet-4-5"), None),
-            Err(InvalidSelection::UnknownModel("claude-sonnet-4-5".into()))
-        );
-        assert_eq!(
-            resolve(Some("opus"), Some("high")),
-            Err(InvalidSelection::Effort("high".into()))
-        );
-        assert_eq!(
-            resolve(None, Some("high")),
-            Err(InvalidSelection::Effort("high".into()))
-        );
+    fn entry(value: &str, levels: &[&str]) -> ClaudeModel {
+        ClaudeModel {
+            value: value.into(),
+            resolved_model: format!("resolved-{value}"),
+            display_name: value.to_uppercase(),
+            description: String::new(),
+            effort_levels: levels.iter().map(|level| level.to_string()).collect(),
+        }
     }
 
     #[test]
-    fn the_turn_carries_the_alias_and_never_an_effort() {
-        let got = turn_selection(&json!({"model": "haiku", "model_ever_set": true})).unwrap();
-        assert_eq!(got.model.as_deref(), Some("haiku"));
-        assert_eq!(got.effort, None);
+    fn a_list_without_one_default_or_another_entry_or_with_a_repeat_is_refused() {
+        for entries in [
+            vec![],
+            vec![entry(DEFAULT_VALUE, &[])],
+            vec![entry("haiku", &[])],
+            vec![
+                entry(DEFAULT_VALUE, &[]),
+                entry(DEFAULT_VALUE, &[]),
+                entry("haiku", &[]),
+            ],
+            vec![
+                entry(DEFAULT_VALUE, &[]),
+                entry("haiku", &[]),
+                entry("haiku", &[]),
+            ],
+        ] {
+            let count = entries.len();
+            assert!(ClaudeCatalog::from_entries(entries, 1).is_err(), "{count}");
+        }
+    }
+
+    #[test]
+    fn the_turn_carries_the_stored_value_and_effort_and_refuses_only_an_unreadable_payload() {
+        let got = turn_selection(&json!({"model": "claude-fable-5-1[1m]", "reasoning_effort": "low", "model_ever_set": true}))
+            .unwrap();
+        assert_eq!(got.model.as_deref(), Some("claude-fable-5-1[1m]"));
+        assert_eq!(got.effort.as_deref(), Some("low"));
         // A card that chose once and then chose the default again runs the CLI default.
         let got = turn_selection(&json!({"model": null, "model_ever_set": true})).unwrap();
         assert_eq!(got, TurnModelSelection::inherit());
-        for payload in [
-            json!({"model": "gpt-5"}),
-            json!({"model": null, "reasoning_effort": "high"}),
-            json!({"model": 42}),
-        ] {
+        // A value no catalog lists still reaches the CLI, which judges it.
+        let got =
+            turn_selection(&json!({"model": "claude-bogus-9-9", "model_ever_set": true})).unwrap();
+        assert_eq!(got.model.as_deref(), Some("claude-bogus-9-9"));
+        for payload in [json!({"model": 42}), json!({"reasoning_effort": ["high"]})] {
             assert!(turn_selection(&payload).is_err(), "{payload}");
         }
     }

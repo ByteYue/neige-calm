@@ -2448,6 +2448,7 @@ async fn resolve_model_selection_for_issue(
         Ok(Some(card)) => card,
     };
     if claude {
+        // #1822 6′: no catalog is consulted at issue; the CLI judges the model it is given.
         return crate::claude_planner::models::turn_selection(&card.payload)
             .map_err(|(log, reader)| IssuanceRefusal::needs_a_choice(log, reader));
     }

@@ -3,9 +3,10 @@
 //! all read it through [`ProviderAvailabilityCache`].
 //!
 //! Codex: the shared app-server is running, then `account/read` says it is logged in.
-//! Claude: `--claude-planner-config` is present (else `not_configured`), the pinned binary answers
-//! `--version` with the pinned version, then `auth status --json` says `loggedIn`.
-//! Neither check reads a credential file, and no account identity leaves this module.
+//! Claude (`claude_planner::availability`): `--claude-planner-config` is present (else
+//! `not_configured`), the pinned binary answers `--version` with the pinned version,
+//! `auth status --json` says `loggedIn`, then the CLI lists its models (#1822).
+//! Neither check reads a credential file, and no account identity leaves either module.
 
 use std::time::Duration;
 
@@ -13,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use utoipa::ToSchema;
 
-use crate::claude_planner::config::{CONFIG_FLAG, ClaudePlannerHost};
+use crate::claude_planner::availability::ClaudeReadiness;
+use crate::claude_planner::config::ClaudePlannerHost;
 use crate::session_projection_repo::AgentProvider;
 use crate::shared_codex_appserver::SharedCodexAppServer;
 
@@ -103,17 +105,88 @@ pub enum Freshness {
     Recheck,
 }
 
-struct Entry {
-    started: Instant,
-    checked: Checked,
+/// A check's outcome and the wall-clock ms at which that check started.
+#[derive(Debug, Clone)]
+pub struct Stamped<T> {
+    pub outcome: T,
+    pub checked_at_ms: i64,
 }
 
-/// One slot per provider. A slot's lock is held across its check, so concurrent readers share
-/// one check in flight rather than each spawning their own.
+struct Entry<T> {
+    started: Instant,
+    stamped: Stamped<T>,
+}
+
+/// One provider's last check. The lock is held across a check, so concurrent readers share one
+/// check in flight rather than each spawning their own.
+pub struct Slot<T> {
+    entry: tokio::sync::Mutex<Option<Entry<T>>>,
+}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Self {
+        Self {
+            entry: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Slot<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Slot").finish_non_exhaustive()
+    }
+}
+
+impl<T: Clone> Slot<T> {
+    /// The cached answer when `freshness` allows and it is younger than [`TTL`], else
+    /// `check(previous outcome)`'s, which replaces it.
+    pub async fn get<F, Fut>(&self, freshness: Freshness, check: F) -> Stamped<T>
+    where
+        F: FnOnce(Option<T>) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let requested = Instant::now();
+        let mut slot = self.entry.lock().await;
+        if let Some(entry) = slot.as_ref() {
+            // A check that began after this request answers it, even a recheck.
+            let began_after_request = entry.started >= requested;
+            let fresh = freshness == Freshness::Cached && entry.started.elapsed() < TTL;
+            if began_after_request || fresh {
+                return entry.stamped.clone();
+            }
+        }
+        let started = Instant::now();
+        let checked_at_ms = crate::model::now_ms();
+        let previous = slot.as_ref().map(|entry| entry.stamped.outcome.clone());
+        let stamped = Stamped {
+            outcome: check(previous).await,
+            checked_at_ms,
+        };
+        *slot = Some(Entry {
+            started,
+            stamped: stamped.clone(),
+        });
+        stamped
+    }
+
+    /// Fixtures only: make the cached answer older than [`TTL`], so the next cached read checks
+    /// again as it would 30 s later.
+    #[cfg(feature = "fixtures")]
+    pub async fn age_past_ttl_for_test(&self) {
+        if let Some(entry) = self.entry.lock().await.as_mut() {
+            entry.started = entry
+                .started
+                .checked_sub(TTL + Duration::from_secs(1))
+                .expect("the monotonic clock is older than the TTL");
+        }
+    }
+}
+
+/// One slot per provider. Claude's also holds the model list its check fetches (#1822).
 #[derive(Default)]
 pub struct ProviderAvailabilityCache {
-    codex: tokio::sync::Mutex<Option<Entry>>,
-    claude: tokio::sync::Mutex<Option<Entry>>,
+    codex: Slot<Verdict>,
+    claude: Slot<ClaudeReadiness>,
 }
 
 impl ProviderAvailabilityCache {
@@ -126,35 +199,35 @@ impl ProviderAvailabilityCache {
         claude: &ClaudePlannerHost,
         codex: &SharedCodexAppServer,
     ) -> Checked {
-        let requested = Instant::now();
-        let mut slot = match provider {
-            AgentProvider::Codex => self.codex.lock().await,
-            AgentProvider::Claude => self.claude.lock().await,
-        };
-        if let Some(entry) = slot.as_ref() {
-            // A check that began after this request answers it, even a recheck.
-            let began_after_request = entry.started >= requested;
-            let fresh = freshness == Freshness::Cached && entry.started.elapsed() < TTL;
-            if began_after_request || fresh {
-                return entry.checked.clone();
+        match provider {
+            AgentProvider::Codex => {
+                let stamped = self
+                    .codex
+                    .get(freshness, |_previous| check_codex(codex))
+                    .await;
+                Checked {
+                    provider: AgentProvider::Codex,
+                    verdict: stamped.outcome,
+                    checked_at_ms: stamped.checked_at_ms,
+                }
             }
+            AgentProvider::Claude => self.claude(freshness, claude).await.checked(),
         }
-        let started = Instant::now();
-        let checked_at_ms = crate::model::now_ms();
-        let verdict = match provider {
-            AgentProvider::Codex => check_codex(codex).await,
-            AgentProvider::Claude => check_claude(claude).await,
-        };
-        let checked = Checked {
-            provider: provider.clone(),
-            verdict,
-            checked_at_ms,
-        };
-        *slot = Some(Entry {
-            started,
-            checked: checked.clone(),
-        });
-        checked
+    }
+
+    /// The Claude check with the model list it caches: the cached answer when `freshness` allows
+    /// and it is younger than [`TTL`], else a new check (see `claude_planner::availability` for
+    /// when that re-fetches the list).
+    pub async fn claude(
+        &self,
+        freshness: Freshness,
+        host: &ClaudePlannerHost,
+    ) -> Stamped<ClaudeReadiness> {
+        self.claude
+            .get(freshness, |previous| {
+                crate::claude_planner::availability::check(host, previous, freshness)
+            })
+            .await
     }
 
     /// Every provider: Codex, then Claude.
@@ -169,6 +242,13 @@ impl ProviderAvailabilityCache {
             self.get(&AgentProvider::Claude, freshness, claude, codex),
         );
         vec![codex_checked, claude_checked]
+    }
+
+    /// Fixtures only: see [`Slot::age_past_ttl_for_test`].
+    #[cfg(feature = "fixtures")]
+    pub async fn age_past_ttl_for_test(&self) {
+        self.codex.age_past_ttl_for_test().await;
+        self.claude.age_past_ttl_for_test().await;
     }
 }
 
@@ -189,43 +269,6 @@ async fn check_codex(daemon: &SharedCodexAppServer) -> Verdict {
             "could not ask the shared codex app-server whether it is logged in ({error}); \
              recheck shortly"
         )),
-    }
-}
-
-async fn check_claude(host: &ClaudePlannerHost) -> Verdict {
-    let Ok(config) = host.configured() else {
-        return Verdict::NotConfigured(format!(
-            "calm-server was started without {CONFIG_FLAG}; restart it with \
-             {CONFIG_FLAG} <file> to run Claude Planners"
-        ));
-    };
-    let env = match host.readiness_env(config) {
-        Ok(env) => env,
-        Err(error) => {
-            return Verdict::Unavailable(format!(
-                "the Claude Planner environment could not be built: {error}"
-            ));
-        }
-    };
-    if let Some(problem) = config.version_problem(&env).await {
-        return Verdict::Unavailable(format!(
-            "{problem}; point `claude_binary` and `claude_version` in the {CONFIG_FLAG} file \
-             at an installed version"
-        ));
-    }
-    match crate::claude_planner::auth_status::logged_in(
-        &config.claude_binary,
-        &env,
-        crate::claude_planner::auth_status::AUTH_STATUS_TIMEOUT,
-    )
-    .await
-    {
-        Ok(true) => Verdict::Ready,
-        Ok(false) => Verdict::Unavailable(format!(
-            "not logged in — run `claude /login` with CLAUDE_CONFIG_DIR={}",
-            config.config_dir.display()
-        )),
-        Err(reason) => Verdict::Unavailable(reason),
     }
 }
 

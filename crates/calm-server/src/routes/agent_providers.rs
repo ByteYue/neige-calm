@@ -24,8 +24,10 @@ pub fn router() -> Router<AppState> {
 /// names the first failed check and its fix in `reason`; `not_configured` is a provider this
 /// server was not started with (Claude without `--claude-planner-config`). Codex: the shared
 /// app-server runs and `account/read` says it is logged in. Claude: the pinned binary answers
-/// `--version` with the pinned version and `auth status --json` says `loggedIn`. Answers are
-/// cached per provider for 30 s; a failed check is an answer, never an error.
+/// `--version` with the pinned version, `auth status --json` says `loggedIn`, and the CLI lists
+/// its models (`initialize`, #1822). Answers are cached per provider for 30 s; the 30 s re-check
+/// keeps the Claude model list, which `refresh=true` or a check after a failed one fetches again.
+/// A failed check is an answer, never an error.
 #[utoipa::path(
     get,
     path = "/api/agent-providers",

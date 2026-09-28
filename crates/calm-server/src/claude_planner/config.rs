@@ -156,7 +156,7 @@ impl ClaudePlannerHost {
         config.verify_version(&self.readiness_env(config)?).await
     }
 
-    /// The environment of every readiness command (`--version`, `auth status`): the spawn's own
+    /// The environment of every readiness command (`--version`, `auth status`, the model list): the spawn's own
     /// allowlist under the `readiness` marker, without the MCP token.
     pub(crate) fn readiness_env(
         &self,
