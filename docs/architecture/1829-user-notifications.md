@@ -1,5 +1,7 @@
 # 用户通知：点只属于「指名给你、还没处理的事」（#1829）— 设计 v3.3（第五轮确认评审处置后，2026-09-28）
 
+**实现说明（Implementation notes，合并前补记，正文未改）**：REST 为 "13"→"14"、WEB_COMPAT 为 32→33（#1822 先占了文中的 12→13 与 31→32）；迁移号为 `0121_activity_dismissals.sql`；planner down 的 `text` 经内核 `readable_error_text` 化简，不再逐字（owner 要求），转录 wire 另带同源的 `turn_error_text`；侧条行的 UI 重新设计在 preview 上由 owner 确认。
+
 基线：`origin/main` = `dc37cb24a`（工作树 `1829-design`）。所有 `path:line` 都在该基线上读取；4140 的数字由 §2 的只读命令取得（2026-09-28 12:30 取数，Q1/Q2/Q3/Q10 于 13:05 重取；数字会漂，验收一律当场重取）。v1 → v2、v2 → v3、v3 → v3.1、v3.1 → v3.2、v3.2 → v3.3 的逐项处置在 §14。前作：`docs/architecture/1722-track-activity-indicators.md`（下称 1722）、`docs/architecture/1743-activity-v2.md`（下称 1743）。标记：**[v]** = 已按行号或查询核实；**[a]** = 假设，未核实。
 
 **owner 的两条规则（每一节都受其约束）**：

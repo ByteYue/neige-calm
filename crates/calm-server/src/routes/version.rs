@@ -15,9 +15,11 @@ use utoipa::ToSchema;
 /// Diagnostic only on the wire, but `neige-app`'s `compute_verdict` compares it against
 /// the installed release, so a REST contract break must bump it.
 ///
-/// #1829 bumps `"13"` -> `"14"`: `POST /api/tracks/{id}/activity/dismissals` is new, and a bundle
-/// offering Dismiss must not be paired with an older kernel that answers it 404. Older bundles do
-/// not call it, so `WEB_COMPAT_VERSION` does not move.
+/// #1829 bumps `"13"` -> `"14"` for two contract changes: `POST /api/tracks/{id}/activity/dismissals`
+/// is new, and the transcript wire (`GET /api/cards/{id}/harness/items`) gains a required
+/// `turn_error_text`. A bundle of this revision must not be paired with an older kernel, which
+/// answers Dismiss 404 and sends rows without the field. Older bundles call neither and ignore the
+/// extra field, so `WEB_COMPAT_VERSION` does not move.
 pub use calm_types::compatibility::REST_API_VERSION as API_VERSION;
 
 /// Monotonically increasing frontend compatibility floor. Must equal `WEB_COMPAT_VERSION`

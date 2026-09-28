@@ -23,6 +23,9 @@ pub fn readable_error_text(raw: &str) -> String {
 fn html_visible_text(raw: &str, lower: &str) -> String {
     let mut out = String::new();
     let mut at = 0;
+    // A hidden element whose closing tag is missing from some point on is missing from every later
+    // point too: remember it, so an unclosed one costs one search, not one per tag.
+    let mut unclosed: Vec<&str> = Vec::new();
     while let Some(open) = lower[at..].find('<').map(|i| at + i) {
         out.push_str(&raw[at..open]);
         let after = &lower[open + 1..];
@@ -33,8 +36,15 @@ fn html_visible_text(raw: &str, lower: &str) -> String {
                     && after[name.len()..]
                         .starts_with(|c: char| c == '>' || c.is_ascii_whitespace())
             });
-        let close =
-            hidden.and_then(|name| lower[open..].find(&format!("</{name}")).map(|i| open + i));
+        let close = hidden
+            .filter(|name| !unclosed.contains(name))
+            .and_then(|name| {
+                let found = lower[open..].find(&format!("</{name}")).map(|i| open + i);
+                if found.is_none() {
+                    unclosed.push(name);
+                }
+                found
+            });
         match lower[close.unwrap_or(open)..].find('>') {
             Some(i) => {
                 out.push(' ');
@@ -119,6 +129,16 @@ mod tests {
         let raw = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
                    to purchase more credits or try again at Sep 19th, 2026 4:22 PM.";
         assert_eq!(readable_error_text(raw), raw);
+    }
+
+    #[test]
+    fn an_unclosed_hidden_element_is_one_search_not_one_per_tag() {
+        let body = "<script>x</p>".repeat(20_000);
+        let raw = format!("unexpected status 502: <!doctype html>{body}tail");
+        assert_eq!(
+            readable_error_text(&raw),
+            format!("unexpected status 502: {}tail", "x ".repeat(20_000))
+        );
     }
 
     #[test]

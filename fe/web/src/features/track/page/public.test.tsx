@@ -211,6 +211,19 @@ describe('TrackPage header', () => {
     expect(onDismiss).toHaveBeenCalledWith('planner_down:9');
   });
 
+  it('names a short markdown row by its plain words, without syntax or the link address', () => {
+    renderPage({
+      inputNotifications: [{
+        key: 'ask:notify:3', kind: 'ask', atMs: 1,
+        text: 'Ship **now**? See [the PR](https://example.com/a/very/long/path/that/must/not/be/read/out/pulls/1811).',
+      }],
+      onReply: vi.fn(),
+      onDismiss: vi.fn(() => Promise.resolve()),
+    });
+    expect(screen.getByRole('button', { name: 'Answer the Planner: Ship now? See the PR.' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Dismiss: Needs your answer: Ship now? See the PR.' })).toBeTruthy();
+  });
+
   it('reopens a collapsed center when another notification arrives', async () => {
     const ask: TrackInputNotification = {
       key: 'ask:notify:1', kind: 'ask', text: 'Which branch?', atMs: 1,

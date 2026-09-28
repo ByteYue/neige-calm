@@ -65,7 +65,7 @@ const NOTIFICATION_ACTION = Object.freeze({
 /** The start of a row's words, as plain text, for its accessible names; the whole text is in the Planner conversation. */
 function notificationGist(text: string): string {
   const chars = [...notificationPlainText(text)];
-  return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : text;
+  return chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : chars.join('');
 }
 
 export type TrackPageProps = Readonly<{
