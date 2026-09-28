@@ -9160,6 +9160,55 @@ async fn gate_timeout_group_kills_and_fails_gate_timeout() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A parked-deadline probe that runs after the live observer's timeout verdict but before it
+/// commits must see the leader's identity still owned, so the verdict stays `gate-timeout` (#1846).
+#[tokio::test]
+async fn gate_timeout_survives_parked_probe_before_observer_commit() {
+    let _guard = GATE_SPAWN_TEST_LOCK.lock().await;
+    let boot = boot().await;
+    set_lifecycle(&boot, TrackLifecycle::Working).await;
+    let dir = unique_gate_dir("timeout-probe");
+    let gate = json!({
+        "cwd": dir.to_str().unwrap(),
+        "timeout_secs": 1,
+        "steps": [ { "name": "hang", "cmd": "sleep 600" } ]
+    })
+    .to_string();
+    seed_task(&boot, gate_task(&boot, "hang", &gate)).await;
+
+    let runtime_cell = Arc::new(std::sync::OnceLock::<Arc<OperationRuntime>>::new());
+    let probed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook = {
+        let runtime_cell = runtime_cell.clone();
+        let probed = probed.clone();
+        Arc::new(move || {
+            let runtime = runtime_cell.get().expect("runtime installed").clone();
+            let probed = probed.clone();
+            Box::pin(async move {
+                runtime.sweep_parked().await.expect("parked sweep");
+                probed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }) as futures::future::BoxFuture<'static, ()>
+        })
+    };
+    let adapter = TaskVerifyAdapter::new(dir.clone()).with_before_completion(hook);
+    let (runtime, scheduler) = build_scheduler(&boot, vec![Arc::new(adapter)]);
+    assert!(runtime_cell.set(runtime.clone()).is_ok());
+    scheduler.schedule_track(boot.track_id.clone()).await;
+    let row = wait_for_terminal_row(&boot, "hang", 30).await;
+
+    assert!(
+        probed.load(std::sync::atomic::Ordering::SeqCst),
+        "probe ran in the window"
+    );
+    assert_eq!(row.status, TaskStatus::Failed);
+    assert_eq!(
+        row.status_detail.as_deref(),
+        Some("gate-timeout"),
+        "{row:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn gate_spawn_kills_prior_recorded_group() {
     let _guard = GATE_SPAWN_TEST_LOCK.lock().await;

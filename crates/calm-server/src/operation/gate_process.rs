@@ -224,19 +224,6 @@ impl GateObservation {
     }
 }
 
-pub(crate) async fn wait_verdict(
-    child: tokio::process::Child,
-    artifacts: super::SpawnArtifacts,
-    log: std::path::PathBuf,
-    attempt: i64,
-    timeout_secs: i64,
-) -> GateVerdict {
-    let observation = observe_verdict(child, artifacts, log, attempt, timeout_secs).await;
-    let verdict = observation.verdict.clone();
-    observation.reap().await;
-    verdict
-}
-
 /// Observe actual kernel status without releasing the leader's identity.
 pub(crate) async fn observe_verdict(
     child: tokio::process::Child,
