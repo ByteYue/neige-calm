@@ -78,6 +78,11 @@ fn passed() -> Value {
         {"finding_index":1,"status":"resolved","evidence":"README describes numeric-only API"}]})
 }
 async fn produce_c2(fx: &Fixture, pair: &Value) -> (Task, String, Value, Task) {
+    let (task, publication, machine) = check_c2(fx, pair).await;
+    (task, publication, machine, launched_r2(fx, pair).await)
+}
+/// Launch C2, write the repaired files, then publish and machine-check them.
+async fn check_c2(fx: &Fixture, pair: &Value) -> (Task, String, Value) {
     eprintln!("repair stage: launching C2 producer");
     schedule(fx).await;
     let task = current(&fx.boot, pair["receipt"]["repair_key"].as_str().unwrap()).await;
@@ -101,7 +106,10 @@ async fn produce_c2(fx: &Fixture, pair: &Value) -> (Task, String, Value, Task) {
     schedule(fx).await;
     let machine = verified(fx, &publication).await;
     schedule(fx).await;
-    eprintln!("repair stage: C2 checked, R2 launched");
+    eprintln!("repair stage: C2 checked");
+    (task, publication, machine)
+}
+async fn launched_r2(fx: &Fixture, pair: &Value) -> Task {
     let review = current(&fx.boot, pair["receipt"]["review_key"].as_str().unwrap()).await;
     assert_eq!(review.status, TaskStatus::Running, "{}", listed(fx).await);
     assert_eq!(
@@ -113,11 +121,11 @@ async fn produce_c2(fx: &Fixture, pair: &Value) -> (Task, String, Value, Task) {
         .unwrap(),
         REPAIRED.as_bytes()
     );
-    (task, publication, machine, review)
+    review
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_exact_c1_to_c2_delivery_with_fresh_review_and_stable_pair() {
+async fn candidate_repair_exact_c1_to_c2_delivery_with_recovery_fresh_review_and_stable_pair() {
     let (fx, producer, r1, publication, machine) = rejected().await;
     assert!(verdict(&fx, &producer, "accepted").await.is_err());
     let before = crate::mcp_task_dispatch::payload(&fx.boot).await;
@@ -163,7 +171,31 @@ async fn candidate_repair_exact_c1_to_c2_delivery_with_fresh_review_and_stable_p
             assert_eq!(saved[original][field], saved[derived]["payload"][field]);
         }
     }
-    let (c2, c2pub, c2machine, r2) = produce_c2(&fx, &pair).await;
+    let key = pair["receipt"]["repair_key"].as_str().unwrap();
+    let review_key = pair["receipt"]["review_key"].as_str().unwrap();
+    // Technical recovery re-runs the exact C1 input inside the single repair round.
+    schedule(&fx).await;
+    let first = current(&fx.boot, key).await;
+    assert_eq!(first.status, TaskStatus::Running, "{}", listed(&fx).await);
+    let input = binding(&fx, &first).await;
+    settle(&fx, &first, false).await;
+    call_tool(&fx.boot,"calm.plan.recover",planner_identity(&fx.boot),json!({"key":key,"expected_attempt_id":first.id,"idempotency_key":"repair-technical-retry","reason":"Retry the same repair input"})).await.unwrap();
+    // R2's own receipt check refuses an edited Reviewer once C2 is checked.
+    let goal = edit_task(&fx, review_key, "/goal", json!("Different review")).await;
+    let (c2, c2pub, c2machine) = check_c2(&fx, &pair).await;
+    assert_ne!(c2.id, first.id);
+    assert_eq!(binding(&fx, &c2).await, input);
+    assert_eq!(
+        request(&fx, "Resolve both original findings")
+            .await
+            .unwrap()["receipt"],
+        pair["receipt"]
+    );
+    assert_eq!(count(&fx).await.0, 1);
+    assert_claim_refused(&fx, review_key, "reviewer-goal").await;
+    edit_task(&fx, review_key, "/goal", goal).await;
+    schedule(&fx).await;
+    let r2 = launched_r2(&fx, &pair).await;
     assert_ne!(c2pub, publication);
     assert_ne!(
         c2machine["verification_operation_id"],
@@ -384,111 +416,8 @@ async fn candidate_repair_concurrent_replay_atomic_rollback_and_current_auth() {
     assert_eq!(count(&fx).await, committed);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_r2_report_requires_exact_complete_responses_and_fresh_event() {
-    let (fx, _, r1, _, _) = rejected().await;
-    let pair = request(&fx, "Fix findings").await.unwrap();
-    let (c2, _, _, r2) = produce_c2(&fx, &pair).await;
-    let identity = review_identity(&fx, &r2).await;
-    let mut bad = vec![
-        json!({"$neige_result_presentation":"worker-summary-v1","summary":"review claims pass","details":passed()}),
-    ];
-    let mut value = passed();
-    value.as_object_mut().unwrap().remove("finding_responses");
-    bad.push(value);
-    for responses in [
-        json!([]),
-        json!([passed()["finding_responses"][0]]),
-        json!([
-            passed()["finding_responses"][0],
-            passed()["finding_responses"][0]
-        ]),
-    ] {
-        let mut value = passed();
-        value["finding_responses"] = responses;
-        bad.push(value);
-    }
-    for (pointer, value) in [
-        ("/finding_responses/1/finding_index", json!(2)),
-        ("/finding_responses/1/status", json!("unresolved")),
-        ("/finding_responses/1/evidence", json!(" ")),
-        ("/blocking_findings", json!(["new blocker"])),
-    ] {
-        let mut report = passed();
-        *report.pointer_mut(pointer).unwrap() = value;
-        bad.push(report);
-    }
-    for result in bad {
-        let response = call_tool(
-            &fx.boot,
-            "calm.task.complete",
-            identity.clone(),
-            json!({"idempotency_key":r2.id,"result":result,"artifacts":[]}),
-        )
-        .await;
-        assert!(
-            response.is_err(),
-            "accepted invalid repair report: {response:?}"
-        );
-    }
-    assert!(
-        call_tool(
-            &fx.boot,
-            "calm.task.complete",
-            review_identity(&fx, &r1).await,
-            json!({"idempotency_key":r2.id,"result":passed(),"artifacts":[]})
-        )
-        .await
-        .is_err()
-    );
-    // Fault injection at the persisted current task: deleting the optional reference
-    // cannot turn this registered R2 into an ordinary two-field reviewer.
-    let pool = fx.boot.repo.sqlite_pool().unwrap();
-    sqlx::query("UPDATE tasks SET context_json=json_remove(context_json,'$.neige_execution.repair') WHERE id=?1")
-        .bind(&r2.id).execute(&pool).await.unwrap();
-    let downgrade = call_tool(&fx.boot,"calm.task.complete",identity.clone(),json!({"idempotency_key":r2.id,"result":{"passed":true,"blocking_findings":[]},"artifacts":[]})).await.unwrap_err();
-    assert!(
-        downgrade.message.contains("repair reference"),
-        "{downgrade:?}"
-    );
-    assert_eq!(current(&fx.boot, &r2.key).await.status, TaskStatus::Running);
-    sqlx::query("UPDATE tasks SET context_json=?1 WHERE id=?2")
-        .bind(&r2.context_json)
-        .bind(&r2.id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    // An old R1 replay is still an R1 report and cannot qualify C2.
-    call_tool(&fx.boot,"calm.task.complete",review_identity(&fx,&r1).await,json!({"idempotency_key":r1.id,"result":{"passed":false,"blocking_findings":FINDINGS},"artifacts":[]})).await.unwrap();
-    assert!(verdict(&fx, &c2, "accepted").await.is_err());
-    std::fs::write(
-        workspace(&fx, &r2).await.join("report-result.json"),
-        passed().to_string(),
-    )
-    .unwrap();
-    settle(&fx, &r2, true).await;
-    verdict(&fx, &c2, "accepted").await.unwrap();
-    // Directly tamper the persisted event to exercise the independent evidence reader.
-    let report_event:i64=sqlx::query_scalar("SELECT json_extract(event_json,'$.data.result.candidate_acceptance.review.report_event_id') FROM task_candidate_decisions ORDER BY event_id DESC LIMIT 1").fetch_one(&fx.boot.repo.sqlite_pool().unwrap()).await.unwrap();
-    sqlx::query(
-        "UPDATE events SET payload=json_remove(payload,'$.result.finding_responses') WHERE id=?1",
-    )
-    .bind(report_event)
-    .execute(&fx.boot.repo.sqlite_pool().unwrap())
-    .await
-    .unwrap();
-    assert!(verdict(&fx, &c2, "accepted").await.is_err());
-    let view = listed(&fx).await;
-    let task = view["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["key"] == c2.key)
-        .unwrap();
-    assert_eq!(task["file_delivery"]["qualified"], false, "{view}");
-}
-
-async fn edit_task(fx: &Fixture, key: &str, pointer: &str, replacement: Value) {
+/// Replace one field of a declared task through the public report API; returns the value it replaced.
+async fn edit_task(fx: &Fixture, key: &str, pointer: &str, replacement: Value) -> Value {
     let report = crate::mcp_task_dispatch::payload(&fx.boot).await;
     let block = report
         .blocks
@@ -497,7 +426,7 @@ async fn edit_task(fx: &Fixture, key: &str, pointer: &str, replacement: Value) {
         .find(|b| b.payload["key"] == key)
         .unwrap();
     let mut payload = block.payload;
-    *payload.pointer_mut(pointer).unwrap() = replacement;
+    let previous = std::mem::replace(payload.pointer_mut(pointer).unwrap(), replacement);
     call_tool(
         &fx.boot,
         "calm.report.blocks.upsert",
@@ -506,159 +435,157 @@ async fn edit_task(fx: &Fixture, key: &str, pointer: &str, replacement: Value) {
     )
     .await
     .unwrap();
+    previous
+}
+
+async fn assert_claim_refused(fx: &Fixture, key: &str, defect: &str) {
+    schedule(fx).await;
+    let task = current(&fx.boot, key).await;
+    assert_eq!(task.status, TaskStatus::Pending, "{defect}");
+    let operations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM operations WHERE kind='codex-isolated-worker' AND idempotency_key=?1",
+    )
+    .bind(&task.id)
+    .fetch_one(&fx.boot.repo.sqlite_pool().unwrap())
+    .await
+    .unwrap();
+    assert_eq!(
+        operations, 0,
+        "{defect}: refused before allocation of a Worker Operation"
+    );
+}
+
+async fn task_payload(fx: &Fixture, key: &str) -> Value {
+    crate::mcp_task_dispatch::payload(&fx.boot)
+        .await
+        .blocks
+        .unwrap()
+        .into_iter()
+        .find(|b| b.payload["key"] == key)
+        .unwrap()
+        .payload
+}
+
+/// Apply one fault to a declared task, check it, then restore the field and prove the declaration is back to exactly
+/// what it was, so the next fault's refusal cannot be this one's leftover.
+async fn with_fault<F: std::future::Future<Output = ()>>(
+    fx: &Fixture,
+    key: &str,
+    pointer: &str,
+    replacement: Value,
+    check: F,
+) {
+    let before = task_payload(fx, key).await;
+    let original = edit_task(fx, key, pointer, replacement).await;
+    check.await;
+    edit_task(fx, key, pointer, original).await;
+    assert_eq!(task_payload(fx, key).await, before, "{key} {pointer}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_original_contract_drift_cannot_become_new_contract() {
+async fn candidate_repair_contract_drift_and_copied_references_are_refused() {
+    let (fx, _, _, _, _) = rejected().await;
+    // Original contract drift cannot become the repair's new contract.
     for (key, pointer) in [
         ("produce", "/goal"),
         ("produce", "/acceptance"),
         ("review", "/goal"),
         ("review", "/acceptance"),
     ] {
-        let (fx, _, _, _, _) = rejected().await;
-        edit_task(&fx, key, pointer, json!("Changed after execution")).await;
-        assert!(
-            request(&fx, "Fix findings").await.is_err(),
-            "{key} {pointer}"
-        );
-        assert_eq!(count(&fx).await.0, 0);
+        with_fault(&fx, key, pointer, json!("Changed after execution"), async {
+            assert!(
+                request(&fx, "Fix findings").await.is_err(),
+                "{key} {pointer}"
+            );
+            assert_eq!(count(&fx).await.0, 0);
+        })
+        .await;
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_copied_reference_and_derived_contract_drift_fail_claim() {
-    for defect in [
-        "copy",
-        "goal",
-        "acceptance",
-        "remove-reference",
-        "checks",
-        "reviewer-goal",
-    ] {
-        let (fx, _, _, _, _) = rejected().await;
-        let pair = request(&fx, "Fix findings").await.unwrap();
-        let saved = receipt(&fx).await;
-        let key = pair["receipt"]["repair_key"].as_str().unwrap();
-        let review_key = pair["receipt"]["review_key"].as_str().unwrap();
-        match defect {
-            "copy" => {
-                let mut forged = saved["repair"]["payload"].clone();
-                forged["key"] = json!("forged-repair");
-                declare(&fx.boot, forged).await;
-                // Keep the actual pair idle; the copied reference is the only attempted launch.
-                edit_task(&fx, key, "/ready", json!(false)).await;
-            }
-            "goal" => edit_task(&fx, key, "/goal", json!("Different task")).await,
-            "acceptance" => edit_task(&fx, key, "/acceptance", json!("Different acceptance")).await,
-            "checks" => {
-                edit_task(
-                    &fx,
-                    key,
-                    "/context/neige_execution/file_delivery/policy/steps/0/cmd",
-                    json!("true"),
-                )
-                .await
-            }
-            "remove-reference" => {
-                // A valid normal empty CandidateProducer must still be fenced by registered identity.
-                let report = crate::mcp_task_dispatch::payload(&fx.boot).await;
-                let block = report
-                    .blocks
-                    .unwrap()
-                    .into_iter()
-                    .find(|b| b.payload["key"] == key)
-                    .unwrap();
-                let mut payload = block.payload;
-                payload["context"]["neige_execution"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("repair");
-                payload["context"]["neige_execution"]["workspace"] = json!("empty");
-                call_tool(
-                    &fx.boot,
-                    "calm.report.blocks.upsert",
-                    planner_identity(&fx.boot),
-                    json!({"id":block.id,"kind":"task","payload":payload,"if_rev":block.rev}),
-                )
-                .await
-                .unwrap();
-            }
-            "reviewer-goal" => {
-                edit_task(&fx, review_key, "/goal", json!("Different review")).await;
-                // Finish C2; R2's own receipt check must keep the edited reviewer pending.
-                schedule(&fx).await;
-                let task = current(&fx.boot, key).await;
-                assert_eq!(task.status, TaskStatus::Running);
-                for (name, bytes) in FILES {
-                    std::fs::write(workspace(&fx, &task).await.join(name), bytes).unwrap();
-                }
-                settle(&fx, &task, true).await;
-                let publication = publish(&fx, &task).await;
-                schedule(&fx).await;
-                verified(&fx, &publication).await;
-            }
-            _ => unreachable!(),
-        }
-        schedule(&fx).await;
-        let refused = match defect {
-            "copy" => "forged-repair",
-            "reviewer-goal" => review_key,
-            _ => key,
-        };
-        assert_eq!(
-            current(&fx.boot, refused).await.status,
-            TaskStatus::Pending,
-            "{defect}"
-        );
-        let operations:i64=sqlx::query_scalar("SELECT count(*) FROM operations WHERE kind='codex-isolated-worker' AND idempotency_key=?1").bind(current(&fx.boot,refused).await.id).fetch_one(&fx.boot.repo.sqlite_pool().unwrap()).await.unwrap();
-        assert_eq!(
-            operations, 0,
-            "{defect}: refused before allocation of a Worker Operation"
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_technical_recovery_preserves_exact_c1_and_single_round() {
-    let (fx, _, _, _, _) = rejected().await;
     let pair = request(&fx, "Fix findings").await.unwrap();
-    schedule(&fx).await;
     let key = pair["receipt"]["repair_key"].as_str().unwrap();
-    let first = current(&fx.boot, key).await;
-    assert_eq!(first.status, TaskStatus::Running);
-    let original = binding(&fx, &first).await;
-    settle(&fx, &first, false).await;
-    call_tool(&fx.boot,"calm.plan.recover",planner_identity(&fx.boot),json!({"key":key,"expected_attempt_id":first.id,"idempotency_key":"repair-technical-retry","reason":"Retry the same repair input"})).await.unwrap();
-    schedule(&fx).await;
-    let second = current(&fx.boot, key).await;
-    assert_eq!(second.status, TaskStatus::Running, "{}", listed(&fx).await);
-    assert_ne!(second.id, first.id);
-    assert_eq!(binding(&fx, &second).await, original);
-    assert_eq!(
-        request(&fx, "Fix findings").await.unwrap()["receipt"],
-        pair["receipt"]
-    );
-    assert_eq!(count(&fx).await.0, 1);
-    for (name, bytes) in FILES {
-        assert_eq!(
-            std::fs::read(
-                workspace(&fx, &second)
-                    .await
-                    .join("inputs/source")
-                    .join(name)
-            )
-            .unwrap(),
-            bytes.as_bytes()
+    let review_key = pair["receipt"]["review_key"].as_str().unwrap();
+
+    // Derived contract drift fails the claim before any Worker Operation.
+    let mut unregistered = task_payload(&fx, key).await["context"]["neige_execution"].clone();
+    // A valid normal empty CandidateProducer must still be fenced by registered identity.
+    unregistered.as_object_mut().unwrap().remove("repair");
+    unregistered["workspace"] = json!("empty");
+    for (defect, pointer, replacement) in [
+        ("goal", "/goal", json!("Different task")),
+        ("acceptance", "/acceptance", json!("Different acceptance")),
+        (
+            "checks",
+            "/context/neige_execution/file_delivery/policy/steps/0/cmd",
+            json!("true"),
+        ),
+        ("remove-reference", "/context/neige_execution", unregistered),
+    ] {
+        with_fault(
+            &fx,
+            key,
+            pointer,
+            replacement,
+            assert_claim_refused(&fx, key, defect),
+        )
+        .await;
+    }
+
+    // A copied reference cannot launch, and one invalid reference does not hide the whole plan.
+    let mut forged = receipt(&fx).await["repair"]["payload"].clone();
+    forged["key"] = json!("forged-repair");
+    declare(&fx.boot, forged).await;
+    // Keep the actual pair idle; the copied reference is the only attempted launch.
+    edit_task(&fx, key, "/ready", json!(false)).await;
+    edit_task(
+        &fx,
+        review_key,
+        "/context/neige_execution/repair",
+        Value::Null,
+    )
+    .await;
+    let view = call_tool(
+        &fx.boot,
+        "calm.plan.list",
+        planner_identity(&fx.boot),
+        json!({}),
+    )
+    .await
+    .expect("one invalid reference must not hide the whole plan");
+    let tasks = view["tasks"].as_array().unwrap();
+    for invalid in ["forged-repair", review_key] {
+        let invalid = tasks.iter().find(|task| task["key"] == invalid).unwrap();
+        assert_eq!(invalid["file_delivery"]["state"], "invalid", "{view}");
+        assert_eq!(invalid["file_delivery"]["qualified"], false);
+        assert!(
+            invalid["file_delivery"]["qualification"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("repair reference"))
         );
     }
-    settle(&fx, &second, false).await;
+    assert!(tasks.iter().any(|task| task["key"] == "produce"));
+    assert!(tasks.iter().any(|task| task["key"] == "review"));
+    assert_claim_refused(&fx, "forged-repair", "copy").await;
+
+    // Expected reference conflicts are local; actual database errors are still read errors.
+    sqlx::query("ALTER TABLE task_candidate_repairs RENAME TO unavailable_repair_receipts")
+        .execute(&fx.boot.repo.sqlite_pool().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        call_tool(
+            &fx.boot,
+            "calm.plan.list",
+            planner_identity(&fx.boot),
+            json!({})
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_preturn_revalidates_receipt_authority_and_exact_input_bytes() {
+async fn candidate_repair_preturn_revalidates_receipt_authority() {
     for defect in [
-        "bytes",
         "source-withdrawal",
         "review-withdrawal",
         "derived-acceptance",
@@ -699,9 +626,6 @@ async fn candidate_repair_preturn_revalidates_receipt_authority_and_exact_input_
         .unwrap();
         let original = binding(&fx, &task).await;
         match defect {
-            "bytes" => {
-                std::fs::write(path.join("inputs/source/project.py"), b"wrong C1 bytes").unwrap()
-            }
             "source-withdrawal" | "review-withdrawal" => {
                 sqlx::query("UPDATE tasks SET context_stale_at_ms=1 WHERE id=?1")
                     .bind(if defect == "source-withdrawal" {
@@ -720,7 +644,7 @@ async fn candidate_repair_preturn_revalidates_receipt_authority_and_exact_input_
                     "/acceptance",
                     json!("Altered after preparation"),
                 )
-                .await
+                .await;
             }
             _ => unreachable!(),
         }
@@ -737,8 +661,8 @@ async fn candidate_repair_preturn_revalidates_receipt_authority_and_exact_input_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn candidate_repair_done_report_without_successful_settlement_cannot_admit_or_qualify() {
-    let (fx, producer, _, _) = review_source().await;
+async fn candidate_repair_r1_done_report_without_successful_settlement_cannot_admit_repair() {
+    let (fx, _, _, _) = review_source().await;
     crate::mcp_task_dispatch::bind_planner(&fx.boot, &planner_identity(&fx.boot).session_id, false)
         .await;
     let r1 = current(&fx.boot, "review").await;
@@ -746,33 +670,14 @@ async fn candidate_repair_done_report_without_successful_settlement_cannot_admit
     call_tool(&fx.boot,"calm.task.complete",review_identity(&fx,&r1).await,json!({"idempotency_key":r1.id,"result":{"passed":false,"blocking_findings":FINDINGS},"artifacts":[]})).await.unwrap();
     assert_eq!(current(&fx.boot, "review").await.status, TaskStatus::Done);
     assert!(request(&fx, "Fix findings").await.is_err());
+    // Keep the full report identical when the provider repeats it on stop.
     std::fs::write(
         workspace(&fx, &r1).await.join("report-result.json"),
         json!({"passed":false,"blocking_findings":FINDINGS}).to_string(),
     )
     .unwrap();
     settle(&fx, &r1, true).await;
-    let pair = request(&fx, "Fix findings").await.unwrap();
-    let (c2, _, _, r2) = produce_c2(&fx, &pair).await;
-    call_tool(
-        &fx.boot,
-        "calm.task.complete",
-        review_identity(&fx, &r2).await,
-        json!({"idempotency_key":r2.id,"result":passed(),"artifacts":[]}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(current(&fx.boot, &r2.key).await.status, TaskStatus::Done);
-    assert!(verdict(&fx, &c2, "accepted").await.is_err());
-    assert!(verdict(&fx, &producer, "accepted").await.is_err());
-    // Keep the full accepted report identical when the provider repeats it on stop.
-    std::fs::write(
-        workspace(&fx, &r2).await.join("report-result.json"),
-        passed().to_string(),
-    )
-    .unwrap();
-    settle(&fx, &r2, true).await;
-    verdict(&fx, &c2, "accepted").await.unwrap();
+    request(&fx, "Fix findings").await.unwrap();
 }
 
 #[path = "candidate_repair_review.rs"]

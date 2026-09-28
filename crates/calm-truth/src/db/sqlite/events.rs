@@ -116,7 +116,7 @@ mod gated {
 
 /// The crate-internal escape probe: each feature compiles one bypass whose only job is to **fail to compile** with an
 /// exact diagnostic, so `calm-truth` can never be built with `--all-features`. It must live inside the crate (a
-/// descendant of `events`) because an external `trybuild` crate could not even name `Authorized` and would fail vacuously.
+/// descendant of `events`) because an external crate could not even name `Authorized` and would fail vacuously.
 #[cfg(any(
     feature = "append-seam-escape-probe-retarget",
     feature = "append-seam-escape-probe-forge",

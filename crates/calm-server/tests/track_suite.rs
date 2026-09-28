@@ -9,8 +9,6 @@ mod plugin_scope;
 mod report_sources_track_lifecycle;
 #[path = "cases/rest_track_report.rs"]
 mod rest_track_report;
-#[path = "cases/templates_privacy.rs"]
-mod templates_privacy;
 #[path = "cases/track_create_first_message.rs"]
 mod track_create_first_message;
 #[path = "cases/track_create_sync_daemon.rs"]

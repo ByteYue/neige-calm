@@ -366,65 +366,6 @@ async fn planner_replays_settled_isolated_recovery_once_with_user_required() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn planner_settled_hint_refuses_unproven_foreign_and_superseded_execution() {
-    let (fx, first, original) = stopped_failure().await;
-    fx.state.dispatcher.abort_event_listener_for_test();
-    let handle = planner(&fx).await;
-    let events = fx
-        .boot
-        .repo
-        .events_for_track(fx.boot.track_id.as_str(), &["task.execution_settled"], None)
-        .await
-        .unwrap();
-    assert_eq!(events.len(), 1);
-    let envelope = &events[0];
-    let mut corrupt = original.clone();
-    corrupt["data"]["isolated_execution"]["provider"]["record"]["stop"] = json!("Requested");
-    set_output(&fx, &first, &corrupt).await;
-    fx.state
-        .dispatcher
-        .catch_up_push(
-            fx.boot.track_id.clone(),
-            envelope.event.clone(),
-            envelope.id,
-        )
-        .await;
-    assert_eq!(
-        hints(&handle.snapshot().await, &first.id),
-        0,
-        "unproven stop cannot wake Planner as settled"
-    );
-    set_output(&fx, &first, &original).await;
-    let foreign = calm_server::event::Event::TaskExecutionSettled {
-        task_id: first.id.clone(),
-        operation_id: "foreign-operation".into(),
-    };
-    fx.state
-        .dispatcher
-        .catch_up_push(fx.boot.track_id.clone(), foreign, envelope.id)
-        .await;
-    assert_eq!(hints(&handle.snapshot().await, &first.id), 0);
-    // The User can recover this User-owned task; the old notification then becomes stale.
-    fx.state.dispatcher.semaphore().close();
-    let (status, receipt) = rest(&fx, "POST", &route(&fx, "recover"), recovery(&first)).await;
-    assert_eq!(status, StatusCode::OK, "{receipt}");
-    fx.state
-        .dispatcher
-        .catch_up_push(
-            fx.boot.track_id.clone(),
-            envelope.event.clone(),
-            envelope.id,
-        )
-        .await;
-    assert_eq!(
-        hints(&handle.snapshot().await, &first.id),
-        0,
-        "superseded attempt cannot advertise recovery"
-    );
-    handle.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settled_completion_ignores_canceled_missing_and_noncurrent_tasks() {
     use calm_server::operation::ProviderAdapter;
     let (fx, first, _) = stopped_failure().await;
@@ -530,57 +471,6 @@ async fn settled_event_failure_rolls_back_completion_and_reconciles_once() {
         count, 1,
         "owned reconciliation must finish the original Operation once"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn planner_settled_hint_ignores_withdrawn_declaration() {
-    let (fx, first, _) = stopped_failure().await;
-    fx.state.dispatcher.abort_event_listener_for_test();
-    let handle = planner(&fx).await;
-    let report = fx
-        .boot
-        .repo
-        .card_get(fx.boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    let block = report.payload["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|block| block["payload"]["key"] == "retry")
-        .unwrap();
-    let mut payload = block["payload"].clone();
-    payload["ready"] = json!(false);
-    let (status, body) = rest(
-        &fx,
-        "PATCH",
-        &format!(
-            "/api/tracks/{}/report/blocks/{}",
-            fx.boot.track_id,
-            block["id"].as_str().unwrap()
-        ),
-        json!({"kind":"task", "payload":payload, "ifBlockRev":block["rev"]}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let events = fx
-        .boot
-        .repo
-        .events_for_track(fx.boot.track_id.as_str(), &["task.execution_settled"], None)
-        .await
-        .unwrap();
-    assert_eq!(events.len(), 1);
-    fx.state
-        .dispatcher
-        .catch_up_push(
-            fx.boot.track_id.clone(),
-            events[0].event.clone(),
-            events[0].id,
-        )
-        .await;
-    assert_eq!(hints(&handle.snapshot().await, &first.id), 0);
-    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

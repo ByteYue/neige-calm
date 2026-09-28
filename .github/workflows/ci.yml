@@ -542,7 +542,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The archive carries no toolchain; trybuild tests and a few binary-locating fallbacks invoke cargo.
+      # The archive carries no toolchain; a few binary-locating fallbacks invoke cargo.
       - name: install pinned Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
 
@@ -573,7 +573,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # trybuild compiles its probe crates offline against the registry the archive does not carry.
+      # Those fallbacks build against the registry the archive does not carry.
       - name: cargo fetch --locked
         run: cargo fetch --locked
 
