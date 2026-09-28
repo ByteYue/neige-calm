@@ -21,9 +21,10 @@ use crate::track_lifecycle::{
     apply_requested_transition_in_tx, auto_promote_draft_in_tx, track_get_tx,
 };
 use crate::track_report_doc::ReportDoc;
+use calm_types::report_blocks::tasks::normalize_legacy_terminal_task_blocks;
 
-const REPORT_SNAPSHOT_ROW_SQL: &str =
-    "SELECT json(payload),body_crdt FROM cards WHERE track_id=?1 AND kind='track-report'";
+const REPORT_SNAPSHOT_ROW_SQL: &str = "SELECT json(payload),body_crdt IS NOT NULL FROM cards \
+     WHERE track_id=?1 AND kind='track-report'";
 
 /// Read the report snapshot from the caller's transaction. A missing report
 /// card is an invariant violation: every track eligible for fork has one.
@@ -31,7 +32,7 @@ pub(crate) async fn report_blocks_snapshot_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     track_id: &str,
 ) -> crate::error::Result<(String, Vec<ReportBlock>)> {
-    let report: Option<(String, Option<Vec<u8>>)> = sqlx::query_as(REPORT_SNAPSHOT_ROW_SQL)
+    let report: Option<(String, bool)> = sqlx::query_as(REPORT_SNAPSHOT_ROW_SQL)
         .bind(track_id)
         .fetch_optional(&mut **tx)
         .await?;
@@ -44,7 +45,7 @@ pub(crate) async fn report_blocks_snapshot(
     pool: &sqlx::SqlitePool,
     track_id: &str,
 ) -> crate::error::Result<(String, Vec<ReportBlock>)> {
-    let report: Option<(String, Option<Vec<u8>>)> = sqlx::query_as(REPORT_SNAPSHOT_ROW_SQL)
+    let report: Option<(String, bool)> = sqlx::query_as(REPORT_SNAPSHOT_ROW_SQL)
         .bind(track_id)
         .fetch_optional(pool)
         .await?;
@@ -54,9 +55,9 @@ pub(crate) async fn report_blocks_snapshot(
 /// Shared by the transactional and the autocommit readers above so the two cannot drift.
 fn report_blocks_snapshot_from_row(
     track_id: &str,
-    report: Option<(String, Option<Vec<u8>>)>,
+    report: Option<(String, bool)>,
 ) -> crate::error::Result<(String, Vec<ReportBlock>)> {
-    let Some((payload, body_crdt)) = report else {
+    let Some((payload, has_crdt)) = report else {
         return Err(CalmError::Internal(format!(
             "track_report: track {track_id} is missing its report card"
         )));
@@ -66,14 +67,19 @@ fn report_blocks_snapshot_from_row(
             "track_report: decode report payload for fork snapshot: {error}"
         ))
     })?;
-    let mut doc = match body_crdt {
-        Some(bytes) => ReportDoc::from_bytes(&bytes).map_err(|error| {
+    // The only CRDT writer stores the doc's summary and block snapshot in `payload` in the same UPDATE.
+    if has_crdt {
+        let blocks = payload.blocks.ok_or_else(|| {
             CalmError::Internal(format!(
-                "track_report: load report CRDT for fork snapshot: {error}"
+                "track_report: track {track_id} report CRDT has no stored block projection"
             ))
-        })?,
-        None => ReportDoc::from_payload(&payload),
-    };
+        })?;
+        return Ok((
+            payload.summary,
+            normalize_legacy_terminal_task_blocks(&blocks),
+        ));
+    }
+    let mut doc = ReportDoc::from_payload(&payload);
     doc.ensure_blocks_layout(payload.blocks.as_deref())
         .map_err(|error| {
             CalmError::Internal(format!(
@@ -1417,6 +1423,30 @@ mod tests {
         assert_eq!(
             doc.project().unwrap(),
             ("s".to_string(), "# A\n\nalpha\n".to_string())
+        );
+    }
+
+    #[test]
+    fn report_snapshot_with_crdt_reads_the_stored_projection_and_requires_it() {
+        let mut payload = TrackReportPayload::new("stored", "# Body\n\nnot the blocks\n");
+        let blocks = vec![ReportBlock {
+            id: "b_0001".into(),
+            kind: "prose".into(),
+            rev: 3,
+            payload: json!({"markdown": "stored block"}),
+        }];
+        payload.blocks = Some(blocks.clone());
+        let row =
+            |payload: &TrackReportPayload| Some((serde_json::to_string(payload).unwrap(), true));
+        assert_eq!(
+            report_blocks_snapshot_from_row("t", row(&payload)).unwrap(),
+            ("stored".to_string(), blocks)
+        );
+        payload.blocks = None;
+        let error = report_blocks_snapshot_from_row("t", row(&payload)).unwrap_err();
+        assert!(
+            matches!(&error, CalmError::Internal(m) if m.contains("no stored block projection")),
+            "{error:?}"
         );
     }
 }

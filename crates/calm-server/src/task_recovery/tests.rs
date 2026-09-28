@@ -163,8 +163,8 @@ async fn failed_initial_among(siblings: &[Value], declaration: Value) -> Fx {
     }
 }
 
-/// Edit the report's CRDT authority directly, leaving the derived payload
-/// cache alone: the snapshot readers prefer the CRDT.
+/// Edit the report's CRDT directly, writing its projection to `payload` in the same UPDATE as
+/// the report writer does.
 async fn edit_report_crdt(
     pool: &sqlx::SqlitePool,
     track_id: &str,
@@ -178,12 +178,17 @@ async fn edit_report_crdt(
             .unwrap();
     let mut doc = crate::track_report_doc::ReportDoc::from_bytes(&bytes).unwrap();
     edit(&mut doc);
-    sqlx::query("UPDATE cards SET body_crdt=?1 WHERE id=?2")
-        .bind(doc.to_bytes())
-        .bind(&card_id)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE cards SET body_crdt=?1,payload=json_set(payload,'$.body',?2,'$.blocks',json(?3)) \
+         WHERE id=?4",
+    )
+    .bind(doc.to_bytes())
+    .bind(doc.project().unwrap().1)
+    .bind(serde_json::to_string(&doc.blocks_snapshot().unwrap()).unwrap())
+    .bind(&card_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// A recovered (generation 2) attempt, claimed: `check_recovery_attempt_tx` passes as-is.
@@ -1045,9 +1050,14 @@ async fn drive(site: Site) -> RecoveryRefusal {
                     spawn: calm_types::task_recovery::TASK_IN_TRACK_ROUTE.into(),
                     declared_by: PLANNER.into(),
                 };
+                let (_, blocks) =
+                    crate::track_report::report_blocks_snapshot_tx(&mut tx, fx.track_id.as_str())
+                        .await
+                        .unwrap();
                 refused(
                     site,
-                    admission::check_constraint_tx(&mut tx, &track, "b", &constraint).await,
+                    admission::check_constraint_tx(&mut tx, &track, &blocks, "b", &constraint)
+                        .await,
                 )
             })
             .await
