@@ -287,7 +287,10 @@ pub enum TaskKind {
     Terminal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+/// Declaration order is the lifecycle order; `Ord` follows it.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type, ToSchema,
+)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -301,6 +304,19 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// The serde spelling (`rename_all = "lowercase"`).
+    pub fn wire_label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Dispatched => "dispatched",
+            Self::Running => "running",
+            Self::Verifying => "verifying",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+
     /// Terminal executions never transition again; failed-work recovery allocates
     /// a new execution ID under the same Track + key.
     pub fn is_terminal(self) -> bool {
@@ -308,6 +324,20 @@ impl TaskStatus {
             self,
             TaskStatus::Done | TaskStatus::Failed | TaskStatus::Canceled
         )
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn task_status_wire_label_is_the_serde_spelling() {
+    use TaskStatus::*;
+    for status in [
+        Pending, Dispatched, Running, Verifying, Done, Failed, Canceled,
+    ] {
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::Value::from(status.wire_label())
+        );
     }
 }
 
