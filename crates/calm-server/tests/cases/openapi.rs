@@ -13,6 +13,7 @@ fn document_contains_every_annotated_path() {
         "/api/areas/{area_id}/tracks",
         "/api/tracks",
         "/api/tracks/{id}",
+        "/api/tracks/{id}/activity/dismissals",
         "/api/tracks/{track_id}/cards",
         "/api/cards/{id}",
         "/api/cards/{id}/planner/input",
@@ -120,6 +121,7 @@ fn document_contains_every_wire_model() {
         "Plugin",
         // route-local DTOs
         "CreateAreaRequest",
+        "DismissActivityItemRequest",
         "CreateCardBody",
         "ViaToolCall",
         "NewTerminalCardBody",

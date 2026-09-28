@@ -128,9 +128,8 @@ async fn get_version_returns_all_fields_with_expected_sources() {
     assert_eq!(v["apiVersion"].as_str().unwrap(), API_VERSION);
     assert_eq!(
         v["apiVersion"].as_str().unwrap(),
-        "13",
-        "#1822: a Claude Planner's GET /api/models answers the CLI's live list and \
-         `source: \"built_in\"` is gone, which each side's schema rejects from the other"
+        "14",
+        "#1829: POST /api/tracks/{{id}}/activity/dismissals is new; an older kernel answers it 404"
     );
     assert_eq!(
         v["syncEventVersion"].as_u64().unwrap(),

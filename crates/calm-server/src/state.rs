@@ -130,6 +130,8 @@ pub struct RouteState {
     /// Each Planner provider's last availability check (#1817), read by
     /// `GET /api/agent-providers` and track create.
     pub(crate) provider_availability: Arc<crate::agent_providers::ProviderAvailabilityCache>,
+    /// Wakes the activity projector after a write that emits no event (a Dismiss, #1829).
+    pub(crate) activity_wake: crate::track_activity::ActivityWake,
 }
 
 impl RouteState {
@@ -190,6 +192,7 @@ pub struct BootState {
     pub worker_flow: Arc<WorkerFlowDriver>,
     pub isolated_codex_backend: Option<Arc<IsolatedCodexBackend>>,
     pub claude_planner: Arc<ClaudePlannerHost>,
+    pub activity_wake: crate::track_activity::ActivityWake,
 }
 
 impl BootState {
@@ -222,6 +225,7 @@ impl BootState {
             area_delete_locks: crate::per_card_lock::new_keyed_locks(),
             claude_planner: self.claude_planner,
             provider_availability: Arc::default(),
+            activity_wake: self.activity_wake,
         };
         let worker = WorkerState {
             repo: self.repo.clone(),
@@ -867,8 +871,18 @@ impl AppState {
             worker_flow,
             isolated_codex_backend: None,
             claude_planner,
+            // No projector runs in a state built from parts; a test that needs one attaches it
+            // with `with_activity_wake`.
+            activity_wake: crate::track_activity::ActivityWake::detached(),
         }
         .into_app_state()
+    }
+
+    /// Point the routes' [`crate::track_activity::ActivityWake`] at a projector the test runs.
+    #[cfg(feature = "fixtures")]
+    pub fn with_activity_wake(mut self, wake: crate::track_activity::ActivityWake) -> Self {
+        self.route.activity_wake = wake;
+        self
     }
 
     #[cfg(feature = "fixtures")]
@@ -1213,7 +1227,7 @@ impl AppState {
             ))
             .map_err(|_| anyhow::anyhow!("terminal interaction already initialized"))?;
         let harness = HarnessRegistry::new();
-        crate::track_activity::spawn(
+        let activity_wake = crate::track_activity::spawn(
             repo.clone(),
             events.clone(),
             write.clone(),
@@ -1390,6 +1404,7 @@ impl AppState {
             worker_flow,
             isolated_codex_backend,
             claude_planner,
+            activity_wake,
         };
         let state = state.into_app_state();
 

@@ -2,7 +2,24 @@
 //! `blocked`, or called `calm.user.notify`) and planner down (the Planner's newest finished turn
 //! failed). A pure function of the rows `sql::notification_rows` read; nothing else is an item.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
+
+/// The three key shapes: a source prefix, then the evidence row's id (`events.id` for a blocked
+/// edge, the transcript row id for a notify call or a failed turn).
+const ASK_LIFECYCLE_KEY: &str = "ask:lifecycle:";
+const ASK_NOTIFY_KEY: &str = "ask:notify:";
+const PLANNER_DOWN_KEY: &str = "planner_down:";
+
+/// Whether `key` has one of the three item key shapes (`<prefix><decimal row id>`). The Dismiss
+/// route admits only these; whether the item is still open is not asked.
+pub fn is_item_key(key: &str) -> bool {
+    [ASK_LIFECYCLE_KEY, ASK_NOTIFY_KEY, PLANNER_DOWN_KEY]
+        .iter()
+        .filter_map(|prefix| key.strip_prefix(prefix))
+        .any(|id| id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<i64>().is_ok())
+}
 
 /// What an item is: `ask` folds to `attention = input`, `planner_down` to `attention = failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -62,17 +79,24 @@ pub struct NotificationRows {
     pub user_sent_at: Option<i64>,
     pub notifies: Vec<NotifyRow>,
     pub last_turn: Option<LastTurn>,
+    /// N4 — the keys the user dismissed on this track.
+    pub dismissed: BTreeSet<String>,
 }
 
-/// One item, or none when its required text decoded to NULL: only that item is dropped, with a warn
-/// naming its key; the other items and the overlay are written as usual.
+/// One item, or none when the user dismissed its key, or when its required text decoded to NULL:
+/// only that item is dropped, with a warn naming its key; the other items and the overlay are
+/// written as usual.
 fn item(
     track_id: &str,
+    dismissed: &BTreeSet<String>,
     source: NotificationSource,
     key: String,
     text: Option<&str>,
     at_ms: i64,
 ) -> Option<ActivityItem> {
+    if dismissed.contains(&key) {
+        return None;
+    }
     let Some(text) = text else {
         tracing::warn!(
             track_id = %track_id,
@@ -90,8 +114,8 @@ fn item(
 }
 
 /// The open items, newest first then by key. An ask is open while `at_ms > MAX(U, L)`; planner down
-/// is open while the newest non-interrupted turn is `failed`. No lifecycle filter: a done or archived
-/// track keeps what is still addressed to the user.
+/// is open while the newest non-interrupted turn is `failed`; a dismissed key is never an item. No
+/// lifecycle filter: a done or archived track keeps what is still addressed to the user.
 pub fn notifications(track_id: &str, rows: &NotificationRows) -> Vec<ActivityItem> {
     let answered = rows.user_sent_at.max(rows.left_blocked_at);
     let open = |at_ms: i64| answered.is_none_or(|closed| at_ms > closed);
@@ -102,8 +126,9 @@ pub fn notifications(track_id: &str, rows: &NotificationRows) -> Vec<ActivityIte
     {
         items.extend(item(
             track_id,
+            &rows.dismissed,
             NotificationSource::Ask,
-            format!("ask:lifecycle:{}", edge.event_id),
+            format!("{ASK_LIFECYCLE_KEY}{}", edge.event_id),
             edge.message.as_deref(),
             edge.at_ms,
         ));
@@ -111,8 +136,9 @@ pub fn notifications(track_id: &str, rows: &NotificationRows) -> Vec<ActivityIte
     for notify in rows.notifies.iter().filter(|n| open(n.at_ms)) {
         items.extend(item(
             track_id,
+            &rows.dismissed,
             NotificationSource::Ask,
-            format!("ask:notify:{}", notify.row_id),
+            format!("{ASK_NOTIFY_KEY}{}", notify.row_id),
             notify.text.as_deref().map(str::trim),
             notify.at_ms,
         ));
@@ -122,8 +148,9 @@ pub fn notifications(track_id: &str, rows: &NotificationRows) -> Vec<ActivityIte
     {
         items.extend(item(
             track_id,
+            &rows.dismissed,
             NotificationSource::PlannerDown,
-            format!("planner_down:{}", turn.row_id),
+            format!("{PLANNER_DOWN_KEY}{}", turn.row_id),
             turn.error_message.as_deref(),
             turn.at_ms,
         ));
