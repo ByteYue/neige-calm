@@ -49,6 +49,22 @@ struct Boot {
     tmp: Arc<TempDir>,
 }
 
+/// "Exactly `want`": poll `count` until it reaches `want` (a long deadline, so a slow delivery is not misread), then
+/// leave a stray extra copy a short settle to land and report the final count. An absence costs the settle, not the
+/// positive deadline.
+async fn settled<F, Fut>(want: usize, count: F) -> usize
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = usize>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while count().await < want && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    count().await
+}
+
 /// A real git repository the user owns, the shape `PATCH /api/tracks/{id}` accepts as an attached workspace.
 fn user_repo(at: &std::path::Path) -> PathBuf {
     fn git(at: &std::path::Path, args: &[&str]) {
@@ -376,26 +392,10 @@ impl Boot {
     }
 
     /// How many copies of `needle` the harness has been handed: turns already started plus observations still
-    /// queued, as substring occurrences (adjacent `UserMessage`s fold into one entry). Polls and returns what it saw.
+    /// queued, as substring occurrences (adjacent `UserMessage`s fold into one entry). See `settled` for `want`.
     async fn copies_in_harness(&self, needle: &str, want: usize) -> usize {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let mut seen = self
-                .state
-                .shared_codex_appserver
-                .started_turns_for_test()
-                .iter()
-                .map(|(_, items)| {
-                    items
-                        .iter()
-                        .map(|item| {
-                            serde_json::to_string(item)
-                                .map(|s| s.matches(needle).count())
-                                .unwrap_or(0)
-                        })
-                        .sum::<usize>()
-                })
-                .sum::<usize>();
+        settled(want, || async {
+            let mut seen = self.turn_copies(needle);
             let worker_session_ids: Vec<String> =
                 sqlx::query_scalar("SELECT id FROM worker_sessions")
                     .fetch_all(self.repo.pool())
@@ -410,39 +410,33 @@ impl Boot {
                     }
                 }
             }
-            if seen >= want || std::time::Instant::now() >= deadline {
-                return seen;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+            seen
+        })
+        .await
     }
 
     /// How many copies of `needle` the DAEMON was actually handed — turns only. A runtime whose row was retired
     /// under it keeps its queue in memory, so `copies_in_harness` would read a double delivery.
     async fn delivered_copies(&self, needle: &str, want: usize) -> usize {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let seen = self
-                .state
-                .shared_codex_appserver
-                .started_turns_for_test()
-                .iter()
-                .map(|(_, items)| {
-                    items
-                        .iter()
-                        .map(|item| {
-                            serde_json::to_string(item)
-                                .map(|s| s.matches(needle).count())
-                                .unwrap_or(0)
-                        })
-                        .sum::<usize>()
-                })
-                .sum::<usize>();
-            if seen >= want || std::time::Instant::now() >= deadline {
-                return seen;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        settled(want, || async { self.turn_copies(needle) }).await
+    }
+
+    fn turn_copies(&self, needle: &str) -> usize {
+        self.state
+            .shared_codex_appserver
+            .started_turns_for_test()
+            .iter()
+            .map(|(_, items)| {
+                items
+                    .iter()
+                    .map(|item| {
+                        serde_json::to_string(item)
+                            .map(|s| s.matches(needle).count())
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>()
     }
 
     /// Everything the fake app-server was ever asked to run a turn on, as one JSON blob of *rendered* text.
@@ -772,17 +766,10 @@ async fn the_first_message_reaches_the_agent_exactly_once() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "body={body}");
 
-    // `copies_in_harness` returns as soon as it has seen `want`, so "exactly once" is: wait for the delivery
-    // with its own budget, then ask for a SECOND copy, which burns the full deadline before answering 1.
     assert_eq!(
         b.copies_in_harness("refactor the parser", 1).await,
         1,
-        "premise: the create's first message must reach the harness"
-    );
-    assert_eq!(
-        b.copies_in_harness("refactor the parser", 2).await,
-        1,
-        "…and exactly once — no second copy within the full deadline"
+        "the create's first message must reach the harness exactly once"
     );
     assert_eq!(
         b.user_message_event_count().await,
@@ -916,12 +903,7 @@ async fn a_template_create_delivers_the_first_message() {
     assert_eq!(
         b.copies_in_harness(needle, 1).await,
         1,
-        "a template create must deliver the first message too"
-    );
-    assert_eq!(
-        b.copies_in_harness(needle, 2).await,
-        1,
-        "…and exactly once — no second copy within the full deadline"
+        "a template create must deliver the first message too, exactly once"
     );
     assert_eq!(
         b.user_message_event_count().await,
@@ -1028,12 +1010,7 @@ async fn a_first_message_is_delivered_once_on_a_recipe_create() {
     assert_eq!(
         b.copies_in_harness(needle, 1).await,
         1,
-        "premise: the recipe create's first message must reach the harness"
-    );
-    assert_eq!(
-        b.copies_in_harness(needle, 2).await,
-        1,
-        "…and exactly once — no second copy within the full deadline"
+        "the recipe create's first message must reach the harness exactly once"
     );
     assert_eq!(
         b.user_message_event_count().await,
@@ -1112,7 +1089,7 @@ async fn a_failed_harness_start_fails_a_create_that_carried_a_first_message() {
     // Premise: the message really was not delivered, checked at the harness. The audit row IS written here
     // (`prepare_tx` commits it before `AppServerInteract` fails), so it only says a delivery was attempted.
     assert_eq!(
-        b.copies_in_harness("do not lose this sentence", 1).await,
+        b.copies_in_harness("do not lose this sentence", 0).await,
         0,
         "premise: no agent may have been handed the sentence, since no thread ever started"
     );
@@ -1337,8 +1314,7 @@ async fn replaying_a_successful_create_returns_the_same_track_and_delivers_once(
         .await;
     assert_eq!(first, StatusCode::CREATED, "body={first_body}");
     assert_eq!(b.binding_count().await, 1, "the mint wrote its binding");
-    // Give the first delivery its own budget before the replay, so the "no second copy" check burns its full
-    // deadline on the question it is actually asking.
+    // Let the first delivery land before the replay, so the "no second copy" check is about the replay.
     assert_eq!(
         b.copies_in_harness("ship the thing", 1).await,
         1,
@@ -1355,7 +1331,7 @@ async fn replaying_a_successful_create_returns_the_same_track_and_delivers_once(
     );
     assert_eq!(b.track_count().await, 1, "and must not mint a second one");
     assert_eq!(
-        b.copies_in_harness("ship the thing", 2).await,
+        b.copies_in_harness("ship the thing", 1).await,
         1,
         "the replay must not deliver the instruction a second time"
     );
@@ -1415,7 +1391,7 @@ async fn a_replay_survives_the_track_being_repointed_in_between() {
     );
     assert_eq!(b.track_count().await, 1, "no second track");
     assert_eq!(
-        b.copies_in_harness("ship the thing", 2).await,
+        b.copies_in_harness("ship the thing", 1).await,
         1,
         "and the replay must not deliver the instruction a second time"
     );
@@ -1550,7 +1526,7 @@ async fn a_replay_of_a_success_that_happened_on_a_retry_key_survives_a_repoint()
     );
     assert_eq!(b.track_count().await, 1, "no second track");
     assert_eq!(
-        b.copies_in_harness("ship the thing", 2).await,
+        b.copies_in_harness("ship the thing", 1).await,
         1,
         "and the replay must not deliver the instruction a second time"
     );
@@ -1572,7 +1548,7 @@ async fn the_same_key_with_a_different_first_message_is_a_conflict() {
     assert_eq!(second, StatusCode::CONFLICT, "body={body}");
     assert_eq!(b.track_count().await, 1, "the rejected edit minted nothing");
     assert_eq!(
-        b.copies_in_harness("edited draft", 1).await,
+        b.copies_in_harness("edited draft", 0).await,
         0,
         "and delivered nothing"
     );
@@ -1615,13 +1591,8 @@ async fn the_same_key_after_a_failed_start_retries_against_the_same_track() {
     assert_eq!(
         b.copies_in_harness("second time lucky", 1).await,
         1,
-        "premise: the retry delivers the message the failed attempt never did"
-    );
-    assert_eq!(
-        b.copies_in_harness("second time lucky", 2).await,
-        1,
-        "…exactly once: the failed attempt's copy never reached the harness, and the retry \
-         delivered one"
+        "the retry delivers the message the failed attempt never did, exactly once: the failed \
+         attempt's copy never reached the harness, and the retry delivered one"
     );
     b.shutdown_harnesses().await;
 }
@@ -1675,7 +1646,7 @@ async fn the_same_key_after_a_failure_accepts_an_edited_first_message() {
         "the edited sentence is the one that gets delivered"
     );
     assert_eq!(
-        b.copies_in_harness("the draft that never left", 1).await,
+        b.copies_in_harness("the draft that never left", 0).await,
         0,
         "and the abandoned draft is never delivered — the retry replaces it, it does not \
          accompany it"
@@ -1848,7 +1819,7 @@ async fn a_replay_survives_the_attached_directory_being_deleted() {
     );
     assert_eq!(b.track_count().await, 1, "no second track");
     assert_eq!(
-        b.copies_in_harness("ship the thing", 2).await,
+        b.copies_in_harness("ship the thing", 1).await,
         1,
         "and the replay must not deliver the instruction a second time"
     );
@@ -1924,12 +1895,7 @@ async fn a_retry_after_a_failure_survives_the_attached_directory_ceasing_to_vali
     assert_eq!(
         b.copies_in_harness("second time lucky", 1).await,
         1,
-        "premise: the retry delivers the message the failed attempt never did"
-    );
-    assert_eq!(
-        b.copies_in_harness("second time lucky", 2).await,
-        1,
-        "…exactly once"
+        "the retry delivers the message the failed attempt never did, exactly once"
     );
     b.shutdown_harnesses().await;
 }
@@ -2945,13 +2911,7 @@ async fn a_first_message_not_yet_drained_when_the_workspace_is_repointed_still_r
         1,
         "the sentence the user typed must reach the successor the fence started — before this \
          slice it stayed on the superseded runtime's undrained queue and no path ever read it \
-         again"
-    );
-    // "exactly once": ask for a second copy and let the deadline burn.
-    assert_eq!(
-        b.copies_in_harness(STRANDED, 2).await,
-        1,
-        "and it must arrive exactly once — the parked predecessor must not also deliver it"
+         again — and exactly once: the parked predecessor must not also deliver it"
     );
     assert!(
         b.harvest_stamp(&stranded_runtime).await.is_some(),
@@ -3013,7 +2973,7 @@ async fn a_harvested_sentence_is_not_delivered_again_by_a_second_restart() {
         "premise: the second restart must succeed: body={reset_again_body}"
     );
     assert_eq!(
-        b.copies_in_harness(STRANDED, 2).await,
+        b.copies_in_harness(STRANDED, 1).await,
         1,
         "a second restart must NOT re-deliver a sentence an earlier restart already carried — \
          the stamp on the retired row is what makes this a construction rather than a race"
@@ -3070,7 +3030,7 @@ async fn a_repoint_does_not_carry_the_old_workspace_briefing_forward() {
         "premise: the human's sentence still travels"
     );
     assert_eq!(
-        b.copies_in_harness(OLD_BRIEFING, 1).await,
+        b.copies_in_harness(OLD_BRIEFING, 0).await,
         0,
         "but the old workspace's briefing must NOT — the successor lives in a different directory \
          and writes its own"
@@ -3119,7 +3079,7 @@ async fn a_batch_the_daemon_already_has_is_not_harvested_after_the_row_is_retire
         "premise: the restart must succeed: body={reset_body}"
     );
     assert_eq!(
-        b.delivered_copies(STRANDED, 2).await,
+        b.delivered_copies(STRANDED, 1).await,
         1,
         "and the successor must not re-deliver a sentence the daemon already has"
     );
@@ -3145,7 +3105,7 @@ async fn a_runtime_that_is_no_longer_the_cards_carrier_does_not_issue_its_queue(
     release.notify_one();
 
     assert_eq!(
-        b.delivered_copies(STRANDED, 1).await,
+        b.delivered_copies(STRANDED, 0).await,
         0,
         "a retired runtime must leave its queue for whoever the mint handed it to; issuing it \
          anyway is how the same sentence reaches the agent twice"
@@ -3202,7 +3162,7 @@ async fn a_runtime_whose_row_has_been_deleted_does_not_issue_its_queue() {
     release.notify_one();
 
     assert_eq!(
-        b.delivered_copies(STRANDED, 1).await,
+        b.delivered_copies(STRANDED, 0).await,
         0,
         "a runtime with no row cannot show that it is still the card's carrier, and a missing \
          row is reachable only in contexts where issuing a turn is wrong"
@@ -3250,7 +3210,7 @@ async fn a_failed_restart_gives_the_harvested_sentence_back() {
         "premise: the second restart must succeed: body={retry_body}"
     );
     assert_eq!(
-        b.delivered_copies(STRANDED, 2).await,
+        b.delivered_copies(STRANDED, 1).await,
         1,
         "the sentence must still reach an agent after a failed restart in between — exactly \
          once, so a compensation that gave the queue back cannot also have delivered it"
@@ -3302,7 +3262,7 @@ async fn the_non_deferred_arm_carries_an_undrained_sentence_to_its_successor() {
     release.notify_one();
 
     assert_eq!(
-        b.delivered_copies(LAUNCHPAD_SENTENCE, 2).await,
+        b.delivered_copies(LAUNCHPAD_SENTENCE, 1).await,
         1,
         "the non-deferred arm must hand the predecessor's undelivered sentence to the successor \
          — exactly once"
@@ -3361,7 +3321,7 @@ async fn a_failed_deferred_mint_gives_the_inherited_sentence_back() {
         "premise: the second restart must succeed: body={retry_body}"
     );
     assert_eq!(
-        b.delivered_copies(STRANDED, 2).await,
+        b.delivered_copies(STRANDED, 1).await,
         1,
         "and the sentence must reach an agent exactly once"
     );
@@ -3488,7 +3448,7 @@ async fn a_pre_upgrade_sentence_survives_a_failed_mint_that_moved_it() {
         "premise: the second restart must succeed: body={retry_body}"
     );
     assert_eq!(
-        b.delivered_copies(LEGACY, 2).await,
+        b.delivered_copies(LEGACY, 1).await,
         1,
         "and it reaches an agent exactly once"
     );
