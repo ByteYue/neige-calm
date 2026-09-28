@@ -117,6 +117,7 @@ jobs:
         with:
           # Not the shared `workspace` key: rust-cache saves only the first finisher, and clippy's rmeta-only artifacts would starve the test job.
           shared-key: lint
+          save-if: ${{ github.event_name == 'push' }}
 
       - name: cargo fmt --all --check
         if: env.RUN_RUST_CHECKS == 'true'
@@ -476,21 +477,134 @@ jobs:
         if: env.RUN_RUST_CHECKS == 'true'
         run: cargo clippy --workspace --all-targets --features calm-server/codex-e2e -- -D warnings
 
-  rust-shards:
-    name: rust test shard ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && '4' || '1' }}
+  # PRs compile the Rust suite once; the shards below only download and run it. This job also runs
+  # hosted on main pushes, because it is the only one that saves the `rust-test` cache PRs restore.
+  rust-build:
+    name: rust build (nextest archive)
     needs: changes
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.rust_changed == 'true') }}
+    runs-on: ubuntu-latest
+    # No debuginfo: the archive every shard downloads shrinks; panics still report file:line.
+    # Only this job uses the `rust-test` cache key, so a job-level value splits nothing.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: install pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+
+      # mold via ld takeover rather than RUSTFLAGS: RUSTFLAGS feeds the rust-cache key.
+      - uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-test
+          cache-workspace-crates: true
+          save-if: ${{ github.event_name == 'push' }}
+
+      - uses: taiki-e/install-action@nextest
+
+      # calm-worker-boundary is not built by the archive (see .config/nextest.toml's archive include).
+      - name: cargo nextest archive --workspace --locked
+        run: |
+          set -euo pipefail
+          cargo build --locked -p calm-worker-runtime --bin calm-worker-boundary
+          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst
+          ls -l nextest-archive.tar.zst
+
+      - name: upload nextest archive
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          # Already zstd-compressed.
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  rust-shards:
+    name: rust test shard ${{ matrix.shard }}/6
+    needs: [changes, rust-build]
+    if: ${{ always() && github.event_name == 'pull_request' && needs.rust-build.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
-        # Trusted main pushes stay single-job: concurrent jobs must not share the persistent self-hosted target directory.
-        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[1,2,3,4]' || '[1]') }}
-    # This repository is public: fork PRs stay on isolated GitHub-hosted
-    # runners. Only trusted pushes to the canonical repository use the local
-    # machine. The repository check also keeps pushes in forks on hosted CI.
-    runs-on: ${{ github.event_name == 'push' && github.repository == 'keanji-x/neige-calm' && 'neige-calm-main' || 'ubuntu-latest' }}
+        shard: [1, 2, 3, 4, 5, 6]
+    # This repository is public: PRs, fork PRs included, stay on isolated GitHub-hosted runners.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The archive carries no toolchain; trybuild tests and a few binary-locating fallbacks invoke cargo.
+      - name: install pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+
+      # Two neige-app tailnet tests build the Go helper at test time.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tailnet/go.mod
+          cache-dependency-path: tailnet/go.sum
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: install isolated provider fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap python3
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          policy=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -f "$policy" ]; then
+            cat "$policy" > "$RUNNER_TEMP/isolated-provider-userns-policy"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      # trybuild compiles its probe crates offline against the registry the archive does not carry.
+      - name: cargo fetch --locked
+        run: cargo fetch --locked
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
+
+      - name: cargo nextest run --archive-file
+        # nextest runs no doctests and this repo has none (every doc fence carries a non-rust tag); add a `cargo test --doc` step if that changes.
+        run: |
+          scripts/run-ci-rust-nextest.sh \
+            github-hosted --archive-file nextest-archive.tar.zst --partition "count:${{ matrix.shard }}/6"
+
+      - name: restore hosted isolated provider namespace policy
+        if: always()
+        run: |
+          policy_file="$RUNNER_TEMP/isolated-provider-userns-policy"
+          if [ -f "$policy_file" ]; then
+            original_policy=$(cat "$policy_file")
+            sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original_policy"
+          fi
+
+      - name: upload nextest junit timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.shard }}-of-6
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  rust-main:
+    name: rust test (main push)
+    needs: changes
+    if: ${{ always() && github.event_name == 'push' && (needs.changes.result != 'success' || needs.changes.outputs.rust_changed == 'true') }}
+    # Only trusted pushes to the canonical repository use the local machine; pushes in forks stay on hosted CI.
+    runs-on: ${{ github.repository == 'keanji-x/neige-calm' && 'neige-calm-main' || 'ubuntu-latest' }}
     env:
-      CARGO_TARGET_DIR: ${{ github.event_name == 'push' && github.repository == 'keanji-x/neige-calm' && '/home/runner/target-neige-calm-main' || format('{0}/target', github.workspace) }}
+      CARGO_TARGET_DIR: ${{ github.repository == 'keanji-x/neige-calm' && '/home/runner/target-neige-calm-main' || format('{0}/target', github.workspace) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -507,19 +621,6 @@ jobs:
 
       - name: install pinned Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
-
-      # mold via ld takeover rather than RUSTFLAGS: RUSTFLAGS feeds the rust-cache key and would split the shared cache across jobs.
-      # The action writes under /usr/local, so the unprivileged self-hosted runner uses the system linker.
-      - uses: rui314/setup-mold@v1
-        if: runner.environment == 'github-hosted'
-
-      - uses: Swatinem/rust-cache@v2
-        if: runner.environment == 'github-hosted'
-        with:
-          # Test artifacts are profile/feature-specific; GitHub cache keys are immutable, so sharing a key with faster jobs persists a partial cache forever.
-          shared-key: rust-test
-          key: ${{ hashFiles('**/*.rs') }}
-          cache-workspace-crates: true
 
       # Two neige-app tailnet tests build the Go helper at test time; the self-hosted runner has no Go on PATH.
       - uses: actions/setup-go@v5
@@ -548,17 +649,9 @@ jobs:
             --bin calm-worker-boundary --bin neige-mcp-stdio-shim
 
       - name: cargo nextest run --workspace --locked
-        # codex-e2e tests self-skip at runtime when no codex binary is discoverable. nextest runs no doctests and this repo
-        # has none (every doc fence carries a non-rust tag); add a `cargo test --doc` step if that changes.
         run: |
-          set -euo pipefail
-          partition_args=()
-          partition_total="${{ github.event_name == 'pull_request' && '4' || '1' }}"
-          if [ "$partition_total" -gt 1 ]; then
-            partition_args+=(--partition "count:${{ matrix.shard }}/$partition_total")
-          fi
           scripts/run-ci-rust-nextest.sh \
-            "${{ runner.environment }}" "${partition_args[@]}"
+            "${{ runner.environment }}"
 
       - name: restore hosted isolated provider namespace policy
         if: always() && runner.environment == 'github-hosted'
@@ -574,7 +667,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-junit-${{ matrix.shard }}-of-${{ github.event_name == 'pull_request' && '4' || '1' }}
+          name: nextest-junit-main
           path: target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: ignore
@@ -619,6 +712,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: worker-boundary
+          save-if: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@nextest
       - name: verify owned process boundaries
         run: |
@@ -636,27 +730,26 @@ jobs:
             sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original_policy"
           fi
 
-  # Preserve the required status-check name while the worker job is a matrix.
+  # Preserve the required status-check name across the build/shard split.
   # This job performs no checkout and is the single branch-protection verdict.
   rust:
     name: rust (test)
-    needs: [changes, rust-shards, worker-boundary]
+    needs: [changes, rust-build, rust-shards, rust-main, worker-boundary]
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.rust_changed == 'true') }}
     runs-on: ubuntu-latest
     steps:
-      - name: require every Rust test shard to pass
+      - name: require the build, every test job and worker isolation to pass
         env:
-          SHARD_RESULT: ${{ needs.rust-shards.result }}
+          BUILD_RESULT: ${{ needs.rust-build.result }}
+          TEST_RESULT: ${{ github.event_name == 'pull_request' && needs.rust-shards.result || needs.rust-main.result }}
           BOUNDARY_RESULT: ${{ needs.worker-boundary.result }}
         run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "::error::Rust test shards finished with: $SHARD_RESULT"
-            exit 1
-          fi
-          if [ "$BOUNDARY_RESULT" != "success" ]; then
-            echo "::error::Worker process isolation finished with: $BOUNDARY_RESULT"
-            exit 1
-          fi
+          for pair in "rust build:$BUILD_RESULT" "rust tests:$TEST_RESULT" "worker process isolation:$BOUNDARY_RESULT"; do
+            if [ "${pair##*:}" != "success" ]; then
+              echo "::error::${pair%:*} finished with: ${pair##*:}"
+              exit 1
+            fi
+          done
 
   # Branch protection requires this stable context. After retirement its
   # acceptance condition is absence of the legacy source, not building it.
@@ -673,11 +766,12 @@ jobs:
             exit 1
           fi
 
-  fe-unit:
+  # Lint and build run beside the vitest shards; `fe-unit` below keeps the required context name.
+  fe-unit-lint:
     permissions:
       contents: read
       pull-requests: read
-    name: fe-unit (lint + build + test)
+    name: fe-unit lint + build
     needs: changes
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_changed == 'true') }}
     runs-on: ubuntu-latest
@@ -718,8 +812,49 @@ jobs:
       - name: npm run build
         run: npm run build
 
+  fe-unit-test:
+    name: fe-unit test ${{ matrix.shard }}/3
+    needs: changes
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_changed == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: fe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: fe/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
       - name: npm run test
-        run: npm run test
+        run: npm run test -- --shard ${{ matrix.shard }}/3
+
+  fe-unit:
+    name: fe-unit (lint + build + test)
+    needs: [changes, fe-unit-lint, fe-unit-test]
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_changed == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: require lint + build and every test shard to pass
+        env:
+          LINT_RESULT: ${{ needs.fe-unit-lint.result }}
+          TEST_RESULT: ${{ needs.fe-unit-test.result }}
+        run: |
+          if [ "$LINT_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ]; then
+            echo "::error::fe-unit lint + build: $LINT_RESULT; tests: $TEST_RESULT"
+            exit 1
+          fi
 
   fe-browser:
     name: fe-browser (vitest + chromium)
@@ -952,22 +1087,61 @@ jobs:
             exit 1
           fi
 
-  fe-e2e:
-    name: fe e2e (playwright + docker stack)
+  # One release build for both e2e jobs.
+  e2e-release-build:
+    name: e2e release binaries
     needs: changes
-    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_e2e_changed == 'true') }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_e2e_changed == 'true' || needs.changes.outputs.stack_changed == 'true') }}
+    # ubuntu-22.04 keeps the host-built release binaries ABI-compatible with the bookworm-slim runtime image.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    # opt-level 1 nearly halves the release build.
     env:
       CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: install pinned Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
+          save-if: ${{ github.event_name == 'push' }}
+      # The union of Makefile's `build` rule (stack e2e runs `make dev`) and fe-e2e's compose mounts.
+      # `osc-probe-child` (a calm-server `[[bin]]`) is mounted in as `codex` by fe-e2e.
+      - name: cargo build --release (e2e binaries)
+        run: |
+          set -euo pipefail
+          bins=(calm-server neige-codex-bridge neige-app neige-mcp-stdio-shim calm-proc-supervisor neige osc-probe-child)
+          cargo build --release --locked -p calm-server -p calm-codex-bridge -p neige-app -p neige-mcp-stdio-shim \
+            -p calm-proc-supervisor -p neige-cli "${bins[@]/#/--bin=}"
+          # tar keeps the executable bits that upload-artifact drops.
+          tar -C target/release -cf e2e-release-bins.tar "${bins[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-release-bins
+          path: e2e-release-bins.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  fe-e2e:
+    name: fe e2e (playwright + docker stack)
+    needs: [changes, e2e-release-build]
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.fe_e2e_changed == 'true') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: require the e2e release build
+        if: needs.e2e-release-build.result != 'success'
+        run: echo "::error::e2e release binaries finished with ${{ needs.e2e-release-build.result }}" && exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-release-bins
+      - name: unpack release binaries
+        run: mkdir -p target/release && tar -C target/release -xmf e2e-release-bins.tar
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -976,9 +1150,6 @@ jobs:
       - name: npm ci
         working-directory: fe
         run: npm ci
-      # `osc-probe-child` (a calm-server `[[bin]]`) is mounted in as `codex`; without it conversation creation fails in the daemon preflight before any mint.
-      - name: cargo build --release (compose binaries)
-        run: cargo build --release -p calm-server -p calm-codex-bridge -p neige-mcp-stdio-shim -p calm-proc-supervisor --bin calm-server --bin neige-codex-bridge --bin neige-mcp-stdio-shim --bin calm-proc-supervisor --bin osc-probe-child --locked
       - name: write CI .env overrides
         run: |
           cat > .env <<'EOF'
@@ -1045,25 +1216,23 @@ jobs:
 
   stack-e2e-tier-1:
     name: stack e2e (tier 1)
-    needs: changes
+    needs: [changes, e2e-release-build]
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'push') && (needs.changes.result != 'success' || needs.changes.outputs.stack_changed == 'true') }}
-    # ubuntu-22.04 keeps the host-built release binaries ABI-compatible with the bookworm-slim runtime image.
     runs-on: ubuntu-22.04
     timeout-minutes: 45
-    # opt-level 1 nearly halves the release build; must stay identical across jobs sharing the `workspace` cache key.
-    env:
-      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
     steps:
+      - name: require the e2e release build
+        if: needs.e2e-release-build.result != 'success'
+        run: echo "::error::e2e release binaries finished with ${{ needs.e2e-release-build.result }}" && exit 1
+
       - uses: actions/checkout@v4
 
-      - name: install pinned Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install --no-self-update
-
-      - uses: rui314/setup-mold@v1
-
-      - uses: Swatinem/rust-cache@v2
+      # `-m` stamps extraction time, so Makefile's mtime rule sees the binaries as newer than the checkout and `make dev` does not rebuild.
+      - uses: actions/download-artifact@v4
         with:
-          shared-key: workspace
+          name: e2e-release-bins
+      - name: unpack release binaries
+        run: mkdir -p target/release && tar -C target/release -xmf e2e-release-bins.tar
 
       - uses: actions/setup-node@v4
         with:
@@ -1078,11 +1247,6 @@ jobs:
 
       - name: build private Tailnet helper
         run: tailnet/build.sh
-
-      # Match Makefile's `build` cargo rule so `make dev` inside e2e/run.sh
-      # finds every release binary it expects instead of compiling cold.
-      - name: cargo build --release (make dev binaries)
-        run: cargo build --manifest-path "$PWD/Cargo.toml" --release -p calm-server -p calm-codex-bridge -p neige-app -p neige-mcp-stdio-shim -p calm-proc-supervisor -p neige-cli --bin calm-server --bin neige-codex-bridge --bin neige-app --bin neige-mcp-stdio-shim --bin calm-proc-supervisor --bin neige
 
       - name: npm ci + build (next frontend bundle for nginx)
         working-directory: fe
@@ -1143,8 +1307,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Share the cache with the release jobs — same workspace and lockfile.
           shared-key: workspace
+          save-if: ${{ github.event_name == 'push' }}
 
       - uses: actions/setup-node@v4
         with:

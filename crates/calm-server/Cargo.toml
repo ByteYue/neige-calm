@@ -70,7 +70,13 @@ path = "../../plugins/market/main.rs"
 [[bin]]
 name = "replay"
 path = "src/bin/replay.rs"
+test = false
 required-features = ["fixtures"]
+
+[[bin]]
+name = "emit-openapi"
+path = "src/bin/emit-openapi.rs"
+test = false
 
 # Test-only stub plugins, built as side artifacts by `cargo test` and located
 # at runtime via `env!("CARGO_BIN_EXE_<name>")`. Kept under tests/fixtures/ so
@@ -81,14 +87,17 @@ required-features = ["fixtures"]
 [[bin]]
 name = "plugin-host-stub-echo"
 path = "tests/fixtures/stub-plugin-echo/main.rs"
+test = false
 
 [[bin]]
 name = "plugin-host-stub-crash"
 path = "tests/fixtures/stub-plugin-crash/main.rs"
+test = false
 
 [[bin]]
 name = "plugin-host-stub-caller"
 path = "tests/fixtures/stub-plugin-caller/main.rs"
+test = false
 
 # M3-mcp-apps M2 — stub that responds to `tools/call` with a configurable
 # CallToolResult. Used by `tests/plugin_routes_tool_call.rs` to drive the
@@ -96,6 +105,7 @@ path = "tests/fixtures/stub-plugin-caller/main.rs"
 [[bin]]
 name = "plugin-host-stub-toolcall"
 path = "tests/fixtures/stub-plugin-toolcall/main.rs"
+test = false
 
 # #1284 S2 — stub that captures `initialize.params._meta["dev.neige/config"]`
 # and hands it back through `tools/call`. The end-to-end witness that an app
@@ -103,12 +113,14 @@ path = "tests/fixtures/stub-plugin-toolcall/main.rs"
 [[bin]]
 name = "plugin-host-stub-config"
 path = "tests/fixtures/stub-plugin-config/main.rs"
+test = false
 
 # #760 slice ③-b-i — stub forge-action tool that returns a lowered
 # forge-action payload through structuredContent.
 [[bin]]
 name = "plugin-host-stub-forge-action"
 path = "tests/fixtures/stub-plugin-forge-action/main.rs"
+test = false
 
 # #1628 S2 — file-programmed `tools/call` stub for the chart.series resolver
 # tests: replies are read from a control directory per call (structured /
@@ -117,6 +129,7 @@ path = "tests/fixtures/stub-plugin-forge-action/main.rs"
 [[bin]]
 name = "plugin-host-stub-series"
 path = "tests/fixtures/stub-plugin-series/main.rs"
+test = false
 
 # #177 PR3 — e2e OSC roundtrip child: runs inside a real PTY, performs
 # the OSC 11 (default background) startup probe codex does,
@@ -127,6 +140,7 @@ path = "tests/fixtures/stub-plugin-series/main.rs"
 [[bin]]
 name = "osc-probe-child"
 path = "tests/fixtures/osc-probe-child/main.rs"
+test = false
 
 # fix/terminal-osc-echo — shell counterpart to `osc-probe-child`. Models
 # an interactive shell at a prompt: enters raw mode like zsh's ZLE (ECHO
@@ -145,6 +159,7 @@ path = "tests/fixtures/osc-probe-child/main.rs"
 [[bin]]
 name = "cooked-shell-child"
 path = "tests/fixtures/cooked-shell-child/main.rs"
+test = false
 
 [dependencies]
 calm-tailnet-control = { path = "../calm-tailnet-control" }

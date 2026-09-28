@@ -6,10 +6,12 @@ edition = "2024"
 [[bin]]
 name = "neige-terminal-runtime"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "terminal-runtime-parent-probe"
 path = "tests/fixtures/parent_probe.rs"
+test = false
 
 [dependencies]
 anyhow = "1"

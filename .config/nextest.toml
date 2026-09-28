@@ -10,7 +10,7 @@ nextest-version = { required = "0.9.100" }
 
 [profile.default]
 # Exclude the ts-rs `export_bindings_*` generator tests (calm-types /
-# calm-session / calm-editor). ts-rs 12's export-file merge lock is a
+# calm-session). ts-rs 12's export-file merge lock is a
 # process-local static; under nextest's process-per-test model the tests race
 # and concurrently truncate/merge the shared checked-in outputs
 # (web/src/api/generated*.ts), producing nondeterministic panics and a dirty
@@ -79,3 +79,11 @@ threads-required = 4
 # partition resumes normal four-way parallelism as soon as it finishes.
 filter = 'test(/^migration_replay_harness::synthetic_fixture_replays_from_every_version$/)'
 threads-required = 4
+
+[profile.ci.archive]
+# The PR shards run from CI's one `cargo nextest archive`. calm-worker-runtime has no
+# test target without `test-support`, so its boundary binary, which calm-server tests
+# find next to their own executable, is built separately and shipped here.
+include = [
+    { path = "debug/calm-worker-boundary", relative-to = "target", on-missing = "error" },
+]

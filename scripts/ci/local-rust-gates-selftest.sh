@@ -72,6 +72,18 @@ PATH="$stub_bin:$PATH" \
 assert_argv "$partition_capture" nextest run --workspace --locked --features \
   calm-server/codex-e2e --profile ci --partition hash:2/3
 
+archive_capture="$temp_root/archive.args"
+archive_file="$temp_root/tests.tar.zst"
+touch "$archive_file"
+PATH="$stub_bin:$PATH" \
+  NEIGE_CODEX_BIN=/must-not-reach-nextest \
+  RUST_NEXTEST_CAPTURE="$archive_capture" \
+  scripts/run-ci-rust-nextest.sh github-hosted --archive-file "$archive_file" \
+  --partition count:2/6 >/dev/null
+assert_argv "$archive_capture" nextest run --archive-file "$archive_file" \
+  --workspace-remap . --extract-to . --extract-overwrite --profile ci \
+  --partition count:2/6
+
 invalid_output=""
 invalid_rc=0
 invalid_output="$(scripts/run-rust-nextest.sh --test-threads 00 2>&1)" || invalid_rc=$?
@@ -94,7 +106,7 @@ dispatch_output="$(PATH="$stub_bin:$PATH" \
   NEIGE_CODEX_BIN=/must-not-reach-nextest \
   RUST_NEXTEST_CAPTURE="$temp_root/trailing.args" \
   scripts/run-ci-rust-nextest.sh github-hosted extra 2>&1)" || dispatch_rc=$?
-dispatch_usage='usage: scripts/run-ci-rust-nextest.sh {github-hosted|self-hosted} [--partition KIND:N/M]'
+dispatch_usage='usage: scripts/run-rust-nextest.sh [--archive-file FILE] [--test-threads N] [--partition KIND:N/M]'
 if [ "$dispatch_rc" -ne 2 ] || [ "$dispatch_output" != "$dispatch_usage" ]; then
   echo "CI Rust nextest dispatch accepted trailing arguments" >&2
   exit 1
@@ -108,8 +120,9 @@ if [ "$grep_rc" -gt 1 ]; then
   echo "could not inspect CI Rust nextest wiring" >&2
   exit 1
 fi
-if [ "$ci_call_count" -ne 1 ]; then
-  echo "CI must invoke the shared Rust nextest dispatch exactly once" >&2
+# Once for the PR shards (from the archive), once for the self-hosted main push.
+if [ "$ci_call_count" -ne 2 ]; then
+  echo "CI must invoke the shared Rust nextest dispatch exactly twice" >&2
   exit 1
 fi
 if grep -Fq 'migration replay gate (#679 PR0-D)' "$ci_file"; then

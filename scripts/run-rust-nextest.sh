@@ -5,7 +5,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-usage='usage: scripts/run-rust-nextest.sh [--test-threads N] [--partition KIND:N/M]'
+usage='usage: scripts/run-rust-nextest.sh [--archive-file FILE] [--test-threads N] [--partition KIND:N/M]'
+# Without --archive-file the suite is built here. With it, the tests come from a
+# `cargo nextest archive` built by CI's rust-build job with the same features,
+# extracted into ./target so compile-time CARGO_BIN_EXE_* paths still resolve.
+source_args=(--workspace --locked --features calm-server/codex-e2e)
 args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -32,6 +36,14 @@ while [ "$#" -gt 0 ]; do
       args+=("$1" "$2")
       shift 2
       ;;
+    --archive-file)
+      if [ "$#" -lt 2 ] || [ ! -f "$2" ]; then
+        echo "--archive-file requires an existing file" >&2
+        exit 2
+      fi
+      source_args=(--archive-file "$2" --workspace-remap . --extract-to . --extract-overwrite)
+      shift 2
+      ;;
     *)
       echo "$usage" >&2
       exit 2
@@ -40,5 +52,4 @@ while [ "$#" -gt 0 ]; do
 done
 
 exec env -u NEIGE_CODEX_BIN \
-  cargo nextest run --workspace --locked --features calm-server/codex-e2e \
-    --profile ci "${args[@]}"
+  cargo nextest run "${source_args[@]}" --profile ci "${args[@]}"
