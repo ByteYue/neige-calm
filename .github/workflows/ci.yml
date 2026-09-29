@@ -506,13 +506,15 @@ jobs:
         run: |
           set -euo pipefail
           nproc; free -g
-          gccld="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
-          ls -l "$gccld"
-          mv "$gccld/ld.lld" "$gccld/ld.lld.real"
-          real="$gccld/ld.lld.real"
-          if [ "${EXPERIMENT_LINKER:-lld}" = mold ]; then real=/usr/local/bin/mold; fi
-          cat > "$gccld/ld.lld" <<SH
+          bin="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+          ls -l "$bin" "$bin/gcc-ld"
+          mkdir -p "$bin/real"; mv "$bin/rust-lld" "$bin/real/rust-lld"
+          real="$bin/real/rust-lld"; drop=
+          # gcc-ld/ld.lld execs ../rust-lld -flavor gnu ...; mold takes the same GNU-flavor arguments minus -flavor.
+          if [ "${EXPERIMENT_LINKER:-lld}" = mold ]; then real=/usr/local/bin/mold; drop=1; fi
+          cat > "$bin/rust-lld" <<SH
           #!/bin/bash
+          if [ -n "$drop" ] && [ "\$1" = -flavor ]; then shift 2; fi
           out=?; prev=
           for a in "\$@"; do if [ "\$prev" = -o ]; then out=\$a; fi; prev=\$a; done
           s=\$(date +%s.%N)
@@ -521,8 +523,8 @@ jobs:
           echo "\$s \$e \$rc \$out" >> /tmp/ld-times.log
           exit \$rc
           SH
-          chmod +x "$gccld/ld.lld"
-          cat "$gccld/ld.lld"
+          chmod +x "$bin/rust-lld"
+          cat "$bin/rust-lld"
         env:
           EXPERIMENT_LINKER: lld
 
