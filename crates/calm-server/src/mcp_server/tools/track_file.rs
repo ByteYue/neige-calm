@@ -7,7 +7,7 @@ use crate::mcp_server::registry::{
     AppContext, ToolCallIdentity, ToolDescriptor, ToolHandler, ToolHandlerFuture, ToolRegistry,
     read_only_annotations, require_role_any,
 };
-use crate::mcp_server::tools::report_links::block_heading;
+use crate::mcp_server::tools::report_links::unknown_block;
 use crate::mcp_server::tools::track_report::load_report_for_track;
 use crate::model::{Card, CardRole, Track};
 use crate::track_fs_view::{TrackFsContent, TrackFsError, TrackFsView, normalize_path};
@@ -190,20 +190,7 @@ pub(crate) fn report_blocks_content(
     blocks: &[ReportBlock],
     ids: &[String],
 ) -> Result<Value, RpcError> {
-    let content = selected_blocks_text(blocks, ids).map_err(|id| {
-        let listed: Vec<String> = blocks
-            .iter()
-            .map(|block| {
-                format!("  {}  {}", block.id, block_heading(block))
-                    .trim_end()
-                    .to_string()
-            })
-            .collect();
-        RpcError::invalid_params(format!(
-            "unknown block id `{id}`; this report's blocks are:\n{}",
-            listed.join("\n")
-        ))
-    })?;
+    let content = selected_blocks_text(blocks, ids).map_err(|id| unknown_block(blocks, id))?;
     serde_json::to_value(TrackFsContent {
         content,
         content_type: "text/markdown".into(),

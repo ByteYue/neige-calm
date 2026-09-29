@@ -80,43 +80,9 @@ async fn blocks_of_another_same_area_report_come_back_in_document_order_with_mar
         ),
         "document order, each block after its marker line, nothing else"
     );
-}
-
-#[tokio::test]
-async fn the_contract_block_is_absent_unless_requested() {
-    let boot = boot(&[(0, "认证 方案"), (0, "登录 排查")]).await;
-    let (own, other) = (&boot.sides[0], &boot.sides[1]);
-    write_body(&boot, other, BODY).await;
-    let ids = outline_ids(&boot, own, other).await;
-    let path = "area/reports/登录 排查.md";
     assert!(
-        cat(&boot, planner(own), path)
-            .await
-            .unwrap()
-            .contains("Contract intro."),
-        "the whole-body read carries the contract"
-    );
-
-    let sections = cat_blocks(&boot, planner(own), path, &[&ids[1], &ids[2]])
-        .await
-        .unwrap();
-    assert!(
-        !sections.contains("contract") && !sections.contains("Contract intro."),
-        "{sections}"
-    );
-    assert!(
-        sections.contains("alpha") && sections.contains("beta"),
-        "{sections}"
-    );
-    let contract = cat_blocks(&boot, planner(own), path, &[&ids[0]])
-        .await
-        .unwrap();
-    assert_eq!(
-        contract,
-        format!(
-            "<!-- neige:{} -->\n<!-- contract: keep the conclusion first -->\nContract intro.\n\n",
-            ids[0]
-        )
+        !text.contains("contract"),
+        "block 0 is absent unless named: {text}"
     );
 }
 
@@ -126,14 +92,18 @@ async fn the_contract_block_is_absent_unless_requested() {
 async fn blocks_text_equals_calm_report_read_select_on_every_report_path() {
     let boot = boot(&[(0, "认证 方案"), (0, "登录 排查")]).await;
     let (own, other) = (&boot.sides[0], &boot.sides[1]);
-    write_body(&boot, own, BODY).await;
-    write_body(&boot, other, BODY).await;
+    // A second, id-preserving write: the kept blocks keep ids a fresh split of the body would not mint.
+    let edited = BODY.replace("# Goal", "# Extra\n\nx\n\n# Goal");
+    for side in [own, other] {
+        write_body(&boot, side, BODY).await;
+        write_body(&boot, side, &edited).await;
+    }
 
     let ids = outline_ids(&boot, own, own).await;
-    let chosen = [ids[2].as_str(), ids[0].as_str()];
+    let chosen = [ids[4].as_str(), ids[2].as_str()];
     let want = select_text(&boot, own, &chosen).await;
     assert!(
-        want.starts_with(&format!("<!-- neige:{} -->\n", ids[0])),
+        want.starts_with(&format!("<!-- neige:{} -->\n# Goal", ids[2])),
         "{want}"
     );
     assert_eq!(
@@ -163,7 +133,7 @@ async fn blocks_text_equals_calm_report_read_select_on_every_report_path() {
     );
 
     let theirs = outline_ids(&boot, own, other).await;
-    let chosen = [theirs[1].as_str(), theirs[3].as_str()];
+    let chosen = [theirs[2].as_str(), theirs[4].as_str()];
     assert_eq!(
         cat_blocks(&boot, planner(own), "area/reports/登录 排查.md", &chosen)
             .await

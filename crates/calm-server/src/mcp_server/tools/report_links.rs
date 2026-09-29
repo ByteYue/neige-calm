@@ -186,7 +186,27 @@ fn outline_response(
     Value::Object(response)
 }
 
-pub(crate) fn block_heading(block: &calm_types::track_report::ReportBlock) -> String {
+/// The refusal of a block selection naming `id`, which is no block of `blocks`: the report's blocks
+/// as `<id>  <heading>` lines, so the caller can pick again.
+pub(crate) fn unknown_block(
+    blocks: &[calm_types::track_report::ReportBlock],
+    id: &str,
+) -> RpcError {
+    let listed: Vec<String> = blocks
+        .iter()
+        .map(|block| {
+            format!("  {}  {}", block.id, block_heading(block))
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    RpcError::invalid_params(format!(
+        "unknown block id `{id}`; this report's blocks are:\n{}",
+        listed.join("\n")
+    ))
+}
+
+fn block_heading(block: &calm_types::track_report::ReportBlock) -> String {
     if block.kind != calm_types::report_blocks::KIND_PROSE {
         if block.kind == calm_types::report_blocks::KIND_TASK {
             let field = if block.payload.get("kind").and_then(Value::as_str) == Some("terminal") {

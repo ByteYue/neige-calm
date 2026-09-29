@@ -12,6 +12,7 @@ use crate::mcp_server::result::ToolResult;
 use crate::mcp_server::tools::lifecycle_args::{
     lifecycle_schema, message_schema, parse_write_args,
 };
+use crate::mcp_server::tools::report_links::unknown_block;
 use crate::mcp_server::tools::track_report_hydrate::{hydrated_block_index, parse_resolve_arg};
 use crate::model::{Card, CardRole, Track, TrackLifecycle};
 use crate::track_report::{ReportDocOp, TrackReportPayload};
@@ -171,11 +172,10 @@ pub(crate) async fn report_read(
         ReadSelect::Index => None,
         ReadSelect::Blocks(ids) => {
             // Markers are unconditional here: a partial text is only addressable through them. An unknown id is the caller's mistake.
-            Some(selected_blocks_text(&snapshot.blocks, ids).map_err(|id| {
-                RpcError::invalid_params(format!(
-                    "calm.report.read: select.blocks: unknown block id `{id}`"
-                ))
-            })?)
+            Some(
+                selected_blocks_text(&snapshot.blocks, ids)
+                    .map_err(|id| unknown_block(&snapshot.blocks, id))?,
+            )
         }
         ReadSelect::Full if with_markers => Some(marked_blocks_text(&snapshot.blocks)),
         ReadSelect::Full => Some(snapshot.body.clone()),
