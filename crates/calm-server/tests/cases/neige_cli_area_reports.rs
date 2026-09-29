@@ -325,3 +325,43 @@ async fn a_worker_is_refused_area_reports_through_neige() {
     }
     assert_eq!(ok(&boot, &["cat", "report.md"]).await, "own\n");
 }
+
+const BLOCKS_BODY: &str =
+    "Contract intro.\n\n# Goal\n\nalpha\n\n# Findings\n\nbeta\n\n# Next\n\ngamma\n";
+
+/// The report's block ids in document order, from the snapshot `calm.area.outline` also reads.
+async fn block_ids(boot: &CardBoot, report_card: &str) -> Vec<String> {
+    calm_server::track_report_read::load_report_doc_snapshot(boot.repo.as_ref(), report_card)
+        .await
+        .unwrap()
+        .blocks
+        .into_iter()
+        .map(|block| block.id)
+        .collect()
+}
+
+/// #1874 through the real `neige` path: `cat <report> --blocks` prints the chosen blocks with their
+/// marker lines, the same bytes under `--json`, and a refusal exits 4.
+#[tokio::test]
+async fn planner_reads_chosen_report_blocks_through_neige() {
+    let boot = boot_with_role(CardRole::Planner).await;
+    let area = area_of(&boot).await;
+    let login = add_track(&boot, &area, "登录 排查").await;
+    let ids = block_ids(&boot, &add_report(&boot, &login, BLOCKS_BODY).await).await;
+    assert_eq!(ids.len(), 4, "{ids:?}");
+
+    let path = "area/reports/登录 排查.md";
+    let chosen = format!("{},{}", ids[3], ids[1]);
+    let want = format!(
+        "<!-- neige:{} -->\n# Goal\n\nalpha\n\n<!-- neige:{} -->\n# Next\n\ngamma\n",
+        ids[1], ids[3]
+    );
+    assert_eq!(ok(&boot, &["cat", path, "--blocks", &chosen]).await, want);
+    assert_eq!(
+        ok(&boot, &["--json", "cat", "--blocks", &chosen, path]).await,
+        want
+    );
+    let (stdout, stderr, exit) = neige(&boot, &["cat", path, "--blocks", "b_nope"]).await;
+    assert_eq!((exit, stdout.as_str()), (4, ""));
+    assert!(stderr.contains("unknown block id `b_nope`"), "{stderr}");
+}

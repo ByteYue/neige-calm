@@ -89,6 +89,40 @@ fn find_maps_path_name_and_tag_each_at_most_once() {
     );
 }
 
+/// #1874: `--blocks` is the comma-separated CLI spelling of `select: { blocks }`; the pieces reach the
+/// tool verbatim (an empty piece is the tool's to refuse).
+#[test]
+fn cat_blocks_sends_the_comma_separated_ids_as_an_array() {
+    let parsed =
+        parse_args(&["cat", "area/reports/认证 方案.md", "--blocks", "b_1,b_2"]).expect("parse");
+    assert_eq!(parsed.tool, "calm.track.cat");
+    assert_eq!(parsed.render, Render::Content);
+    assert_eq!(
+        parsed.args,
+        json!({ "path": "area/reports/认证 方案.md", "blocks": ["b_1", "b_2"] })
+    );
+    assert_eq!(
+        tool_args(&["cat", "--blocks", "b_1", "report.md"]),
+        json!({ "path": "report.md", "blocks": ["b_1"] })
+    );
+    assert_eq!(
+        tool_args(&["cat", "report.md", "--blocks", "b_1,,"]),
+        json!({ "path": "report.md", "blocks": ["b_1", "", ""] })
+    );
+    assert_eq!(
+        tool_args(&["cat", "report.md"]),
+        json!({ "path": "report.md" })
+    );
+    assert_eq!(
+        refusal(&["cat", "report.md", "--blocks"]),
+        "cat requires a value after --blocks"
+    );
+    assert_eq!(
+        refusal(&["cat", "report.md", "--blocks", "b_1", "--blocks", "b_2"]),
+        "cat accepts --blocks once"
+    );
+}
+
 #[test]
 fn state_takes_no_arguments() {
     assert_eq!(tool_args(&["state"]), json!({}));

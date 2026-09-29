@@ -70,12 +70,28 @@ async fn load_report_doc_snapshot_with_track(
                 "track_report: report card {report_card_id} vanished mid-read"
             ))
         })?;
-    let payload: TrackReportPayload =
-        serde_json::from_value(card.payload.clone()).map_err(|e| {
-            CalmError::Internal(format!(
-                "track_report: malformed payload on card {report_card_id}: {e}"
-            ))
-        })?;
+    let doc = report_doc_snapshot(
+        report_card_id,
+        card.updated_at,
+        card.payload,
+        bytes.as_deref(),
+    )?;
+    Ok((card.track_id, doc))
+}
+
+/// The document snapshot of one report card row (`payload` and `body_crdt` read together), shared by
+/// [`load_report_doc_snapshot`] and the `area/reports/` block read so their block ids cannot drift.
+pub(crate) fn report_doc_snapshot(
+    report_card_id: &str,
+    updated_at: i64,
+    payload: serde_json::Value,
+    body_crdt: Option<&[u8]>,
+) -> Result<ReportDocSnapshot, CalmError> {
+    let payload: TrackReportPayload = serde_json::from_value(payload).map_err(|e| {
+        CalmError::Internal(format!(
+            "track_report: malformed payload on card {report_card_id}: {e}"
+        ))
+    })?;
     let derive = |body: &str| {
         calm_types::report_blocks::reassign_ids(&[], &calm_types::report_blocks::split_body(body))
     };
@@ -90,21 +106,18 @@ async fn load_report_doc_snapshot_with_track(
         body
     };
     // Pure legacy row (no CRDT yet): the seed will run `reassign_ids` over the same body with the same hints.
-    let Some(bytes) = bytes else {
+    let Some(bytes) = body_crdt else {
         let blocks = normalize_legacy_terminal_task_blocks(&derive(&payload.body));
         let body = flatten(&blocks);
-        return Ok((
-            card.track_id,
-            ReportDocSnapshot {
-                updated_at: card.updated_at,
-                doc_rev: 0,
-                summary: payload.summary,
-                body,
-                blocks,
-            },
-        ));
+        return Ok(ReportDocSnapshot {
+            updated_at,
+            doc_rev: 0,
+            summary: payload.summary,
+            body,
+            blocks,
+        });
     };
-    let mut doc = crate::track_report_doc::ReportDoc::from_bytes(&bytes).map_err(|e| {
+    let mut doc = crate::track_report_doc::ReportDoc::from_bytes(bytes).map_err(|e| {
         CalmError::Internal(format!(
             "track_report: load CRDT for card {report_card_id}: {e}"
         ))
@@ -119,31 +132,58 @@ async fn load_report_doc_snapshot_with_track(
     if let Some(blocks) = payload.blocks {
         let blocks = normalize_legacy_terminal_task_blocks(&blocks);
         let body = flatten(&blocks);
-        return Ok((
-            card.track_id,
-            ReportDocSnapshot {
-                updated_at: card.updated_at,
-                doc_rev,
-                summary: payload.summary,
-                body,
-                blocks,
-            },
-        ));
+        return Ok(ReportDocSnapshot {
+            updated_at,
+            doc_rev,
+            summary: payload.summary,
+            body,
+            blocks,
+        });
     }
     let internal =
         |e: anyhow::Error| CalmError::Internal(format!("track_report: card {report_card_id}: {e}"));
     doc.ensure_blocks_layout(None).map_err(internal)?;
     let (summary, body) = doc.project().map_err(internal)?;
     let blocks = doc.blocks_snapshot().map_err(internal)?;
-    Ok((
-        card.track_id,
-        ReportDocSnapshot {
-            updated_at: card.updated_at,
-            doc_rev,
-            summary,
-            body,
-            blocks,
-        },
+    Ok(ReportDocSnapshot {
+        updated_at,
+        doc_rev,
+        summary,
+        body,
+        blocks,
+    })
+}
+
+/// `blocks`' text with a `<!-- neige:b_x -->` marker line before each block, in the given order.
+pub fn marked_blocks_text<'a>(blocks: impl IntoIterator<Item = &'a ReportBlock>) -> String {
+    let mut text = String::new();
+    for block in blocks {
+        calm_types::report_blocks::append_block_text(
+            &mut text,
+            &format!(
+                "{}{}",
+                calm_types::report_blocks::marker_line(&block.id),
+                calm_types::report_blocks::flat_text(block)
+            ),
+        );
+    }
+    text
+}
+
+/// The `select: { blocks }` text: exactly the blocks `ids` names, in document order, each preceded by
+/// its marker line. `Err` carries the first id that names no block of `blocks`.
+pub fn selected_blocks_text<'a>(
+    blocks: &[ReportBlock],
+    ids: &'a [String],
+) -> Result<String, &'a str> {
+    if let Some(unknown) = ids
+        .iter()
+        .find(|id| !blocks.iter().any(|block| &block.id == *id))
+    {
+        return Err(unknown);
+    }
+    Ok(marked_blocks_text(
+        blocks.iter().filter(|block| ids.contains(&block.id)),
     ))
 }
 

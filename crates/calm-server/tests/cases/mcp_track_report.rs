@@ -2167,6 +2167,10 @@ async fn select_blocks_returns_only_those_blocks_in_document_order_with_markers(
     .expect_err("unknown block id must be refused");
     assert_eq!(err.code, RpcError::INVALID_PARAMS, "{err:?}");
     assert!(err.message.contains("b_doesnotexist"), "{err:?}");
+    assert!(
+        err.message.contains(&format!("blocks are:\n  {b1}  One")),
+        "the refusal lists the report's `<id>  <heading>` blocks: {err:?}"
+    );
 
     for bad in [
         json!({"select": "everything"}),

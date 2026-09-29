@@ -705,3 +705,6 @@ async fn more_reports_than_the_cap_are_refused_not_truncated() {
         "reading is not capped"
     );
 }
+
+#[path = "mcp_area_report_blocks.rs"]
+mod blocks;

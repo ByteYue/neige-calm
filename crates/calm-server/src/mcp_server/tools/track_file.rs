@@ -7,8 +7,12 @@ use crate::mcp_server::registry::{
     AppContext, ToolCallIdentity, ToolDescriptor, ToolHandler, ToolHandlerFuture, ToolRegistry,
     read_only_annotations, require_role_any,
 };
+use crate::mcp_server::tools::report_links::unknown_block;
+use crate::mcp_server::tools::track_report::load_report_for_track;
 use crate::model::{Card, CardRole, Track};
-use crate::track_fs_view::{TrackFsError, TrackFsView, normalize_path};
+use crate::track_fs_view::{TrackFsContent, TrackFsError, TrackFsView, normalize_path};
+use crate::track_report::ReportBlock;
+use crate::track_report_read::{load_report_doc_snapshot, selected_blocks_text};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -63,7 +67,13 @@ fn cat_descriptor() -> ToolDescriptor {
             "type": "object",
             "required": ["path"],
             "properties": {
-                "path": { "type": "string" }
+                "path": { "type": "string" },
+                "blocks": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "description": "Report paths only: print just these blocks, as calm.report.read select.blocks does."
+                }
             }
         }),
         annotations: Some(read_only_annotations()),
@@ -98,8 +108,21 @@ async fn track_cat(
 ) -> Result<Value, RpcError> {
     require_role_any(&identity, &[CardRole::Planner, CardRole::Worker])?;
     let path = parse_path_arg(&args, true)?;
+    let blocks = parse_blocks_arg(&args)?;
     if let Some(area_path) = area_reports::classify(&path) {
-        return super::area_reports::cat(&ctx, &identity, area_path).await;
+        return super::area_reports::cat(&ctx, &identity, &path, area_path, blocks.as_deref())
+            .await;
+    }
+    if let Some(ids) = blocks {
+        if path != OWN_REPORT {
+            return Err(not_a_report(&path));
+        }
+        let (_, track) = resolve_track_for_identity(&ctx, &identity).await?;
+        let (report_card, _) = load_report_for_track(&ctx, &track).await?;
+        let snapshot = load_report_doc_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
+            .await
+            .map_err(|e| RpcError::internal(format!("track_file: {e}")))?;
+        return report_blocks_content(&snapshot.blocks, &ids);
     }
     let (_, track) = resolve_track_for_identity(&ctx, &identity).await?;
     // `plan/<key>/gate.log` is enabled only here (MCP carries a card identity); the gate-logs dir is the configured one, never recomputed from env.
@@ -129,6 +152,50 @@ fn parse_path_arg(args: &Value, required: bool) -> Result<String, RpcError> {
         .as_str()
         .ok_or_else(|| RpcError::invalid_params("calm.track: `path` must be a string"))?;
     Ok(normalize_path(path))
+}
+
+/// The caller's own report in the track view.
+const OWN_REPORT: &str = "report.md";
+
+/// `blocks` (`neige cat --blocks b_x,b_y`, #1874): absent reads the whole file.
+fn parse_blocks_arg(args: &Value) -> Result<Option<Vec<String>>, RpcError> {
+    match args.get("blocks") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(ids)) if !ids.is_empty() => ids
+            .iter()
+            .map(|id| id.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .map(Some)
+            .ok_or_else(blocks_shape_error),
+        Some(_) => Err(blocks_shape_error()),
+    }
+}
+
+fn blocks_shape_error() -> RpcError {
+    RpcError::invalid_params("calm.track.cat: `blocks` must be a non-empty array of block ids")
+}
+
+/// The one refusal of `blocks` on a path that names no report.
+pub(crate) fn not_a_report(path: &str) -> RpcError {
+    RpcError::invalid_params(format!(
+        "`{path}` is not a report; --blocks reads blocks of `{OWN_REPORT}` or `{}/<name>.md` \
+         only",
+        area_reports::REPORTS_DIR
+    ))
+}
+
+/// A report narrowed to `ids`: the exact `text` of `calm.report.read { select: { blocks: ids } }`.
+/// An unknown id is refused with the report's blocks as `<id>  <heading>` lines.
+pub(crate) fn report_blocks_content(
+    blocks: &[ReportBlock],
+    ids: &[String],
+) -> Result<Value, RpcError> {
+    let content = selected_blocks_text(blocks, ids).map_err(|id| unknown_block(blocks, id))?;
+    serde_json::to_value(TrackFsContent {
+        content,
+        content_type: "text/markdown".into(),
+    })
+    .map_err(|e| RpcError::internal(format!("track_file: json serialization: {e}")))
 }
 
 pub(crate) async fn resolve_track_for_identity(

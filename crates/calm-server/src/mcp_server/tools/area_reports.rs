@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::track_file::track_fs_error_to_rpc;
+use super::track_file::{not_a_report, report_blocks_content, track_fs_error_to_rpc};
 use crate::area_reports::{self, AreaPath, Filter, REPORTS_DIR};
 use crate::mcp_server::framing::RpcError;
 use crate::mcp_server::registry::{
@@ -108,13 +108,25 @@ pub(crate) async fn ls(
     entries.map_err(|e| RpcError::internal(format!("area reports: json serialization: {e}")))
 }
 
-/// `calm.track.cat` on a path under `area/`.
+/// `calm.track.cat` on `raw` (classified as `path`), a path under `area/`; `blocks` narrows a report
+/// to those blocks (#1874).
 pub(crate) async fn cat(
     ctx: &AppContext,
     identity: &ToolCallIdentity,
+    raw: &str,
     path: Result<AreaPath<'_>, String>,
+    blocks: Option<&[String]>,
 ) -> Result<Value, RpcError> {
     require_planner(identity)?;
+    if let Some(ids) = blocks {
+        let Ok(AreaPath::Report(file)) = path else {
+            return Err(not_a_report(raw));
+        };
+        let blocks = area_reports::read_blocks(pool(ctx)?, &identity.area_id, file)
+            .await
+            .map_err(track_fs_error_to_rpc)?;
+        return report_blocks_content(&blocks, ids);
+    }
     let file = match path.map_err(RpcError::invalid_params)? {
         AreaPath::Report(file) => file,
         dir @ (AreaPath::Root | AreaPath::Reports) => {
