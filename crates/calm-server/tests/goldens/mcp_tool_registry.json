@@ -2264,6 +2264,39 @@
     "visible_to_roles": []
   },
   {
+    "name": "calm.track.publish",
+    "description_sha256": "10f23a86de7118f1e202ce26186044969136602c750eb73f6f02773e4bdf5ad8",
+    "input_schema": {
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "idempotency_key",
+        "title",
+        "body"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "visible_to_roles": [
+      "planner"
+    ]
+  },
+  {
     "name": "calm.track.rename",
     "description_sha256": "2dd7391dead22d39548e85c2eb657116426d54e89524223079d1805209b98c43",
     "input_schema": {
