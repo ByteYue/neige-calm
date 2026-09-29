@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::track_file::{not_a_report, report_blocks_content, track_fs_error_to_rpc};
+use super::track_file::{Selection, not_a_report, report_blocks_content, track_fs_error_to_rpc};
 use crate::area_reports::{self, AreaPath, Filter, REPORTS_DIR};
 use crate::mcp_server::framing::RpcError;
 use crate::mcp_server::registry::{
@@ -108,24 +108,25 @@ pub(crate) async fn ls(
     entries.map_err(|e| RpcError::internal(format!("area reports: json serialization: {e}")))
 }
 
-/// `calm.track.cat` on `raw` (classified as `path`), a path under `area/`; `blocks` narrows a report
-/// to those blocks (#1874).
+/// `calm.track.cat` on `raw` (classified as `path`), a path under `area/`; `selection` narrows a report
+/// to those blocks (#1874) or sections (#1877).
 pub(crate) async fn cat(
     ctx: &AppContext,
     identity: &ToolCallIdentity,
     raw: &str,
     path: Result<AreaPath<'_>, String>,
-    blocks: Option<&[String]>,
+    selection: Option<&Selection>,
 ) -> Result<Value, RpcError> {
     require_planner(identity)?;
-    if let Some(ids) = blocks {
+    if let Some(selection) = selection {
         let Ok(AreaPath::Report(file)) = path else {
-            return Err(not_a_report(raw));
+            return Err(not_a_report(raw, selection));
         };
         let blocks = area_reports::read_blocks(pool(ctx)?, &identity.area_id, file)
             .await
             .map_err(track_fs_error_to_rpc)?;
-        return report_blocks_content(&blocks, ids);
+        let ids = selection.block_ids(&blocks)?;
+        return report_blocks_content(&blocks, &ids);
     }
     let file = match path.map_err(RpcError::invalid_params)? {
         AreaPath::Report(file) => file,

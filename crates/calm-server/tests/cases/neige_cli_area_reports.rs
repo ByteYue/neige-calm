@@ -364,4 +364,16 @@ async fn planner_reads_chosen_report_blocks_through_neige() {
     let (stdout, stderr, exit) = neige(&boot, &["cat", path, "--blocks", "b_nope"]).await;
     assert_eq!((exit, stdout.as_str()), (4, ""));
     assert!(stderr.contains("unknown block id `b_nope`"), "{stderr}");
+
+    // #1877: --sections names whole H1 sections and prints the same bytes.
+    assert_eq!(
+        ok(&boot, &["cat", path, "--sections", "Next,Goal"]).await,
+        want
+    );
+    let (stdout, stderr, exit) = neige(&boot, &["cat", path, "--sections", "Nope"]).await;
+    assert_eq!((exit, stdout.as_str()), (4, ""));
+    assert!(
+        stderr.contains("unknown section `Nope`; this report's sections are:\n  # Goal"),
+        "{stderr}"
+    );
 }

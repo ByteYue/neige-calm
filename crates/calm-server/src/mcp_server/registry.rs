@@ -188,6 +188,8 @@ pub struct AppContext {
     pub series_resolver: Arc<crate::report_series::SeriesResolver>,
     /// Transient ring of Planner plugin results `calm.source.capture` reads.
     pub plugin_results: Arc<crate::plugin_results::PluginResults>,
+    /// What each session last read of a report; `calm.report.commit`'s default anchors (#1877).
+    pub read_ledger: Arc<crate::report_read_ledger::ReadLedger>,
     /// #1780 preview gateway registrations; the gateway listeners read the same `Arc`.
     pub preview: Arc<crate::preview::PreviewRegistry>,
     /// The repo's sqlite pool for **read-only** statements; writes never go through this.
@@ -228,6 +230,7 @@ impl AppContext {
             scheduler_poke: Arc::new(tokio::sync::OnceCell::new()),
             series_resolver,
             plugin_results: Arc::new(crate::plugin_results::PluginResults::new()),
+            read_ledger: Arc::new(crate::report_read_ledger::ReadLedger::new()),
             preview: Arc::new(crate::preview::PreviewRegistry::disabled()),
             sqlite_pool,
         })
@@ -533,6 +536,7 @@ mod tests {
             scheduler_poke: Arc::new(tokio::sync::OnceCell::new()),
             series_resolver: Arc::new(crate::report_series::SeriesResolver::new_unstarted(None)),
             plugin_results: Arc::new(crate::plugin_results::PluginResults::new()),
+            read_ledger: Arc::new(crate::report_read_ledger::ReadLedger::new()),
             preview: Arc::new(crate::preview::PreviewRegistry::disabled()),
             sqlite_pool,
         })

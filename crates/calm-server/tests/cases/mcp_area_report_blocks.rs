@@ -273,3 +273,82 @@ async fn ambiguous_and_cross_area_names_are_still_refused_with_blocks() {
         );
     }
 }
+
+/// #1877: `sections` (`neige cat <report> --sections`) prints whole H1 sections, byte-equal to
+/// `calm.report.read { select: { sections } }` on every report path, with one shared refusal.
+#[tokio::test]
+async fn sections_text_equals_calm_report_read_select_on_every_report_path() {
+    let boot = boot(&[(0, "认证 方案")]).await;
+    let own = &boot.sides[0];
+    write_body(
+        &boot,
+        own,
+        &BODY.replace("# Next", "## Detail\n\ndelta\n\n# Next"),
+    )
+    .await;
+    let sections = ["Next", "Findings"];
+    let want = call(
+        &boot,
+        TOOL_REPORT_READ,
+        planner(own),
+        json!({ "select": { "sections": sections } }),
+    )
+    .await
+    .expect("select.sections")["text"]
+        .as_str()
+        .expect("text")
+        .to_string();
+    let ids = outline_ids(&boot, own, own).await;
+    assert_eq!(
+        want,
+        select_text(&boot, own, &[&ids[2], &ids[3], &ids[4]]).await,
+        "a section is its H1 block and the blocks up to the next H1, in document order"
+    );
+    for path in ["report.md", "area/reports/认证 方案.md"] {
+        let value = call(
+            &boot,
+            TOOL_TRACK_CAT,
+            planner(own),
+            json!({ "path": path, "sections": sections }),
+        )
+        .await
+        .expect("cat sections");
+        assert_eq!(value["content"].as_str(), Some(want.as_str()), "{path}");
+        let err = call(
+            &boot,
+            TOOL_TRACK_CAT,
+            planner(own),
+            json!({ "path": path, "sections": ["Goal", "Nope"] }),
+        )
+        .await
+        .expect_err("unknown section");
+        assert_eq!(err.code, INVALID_PARAMS, "{path}: {err:?}");
+        assert_eq!(
+            err.message,
+            "unknown section `Nope`; this report's sections are:\n  # Goal\n  # Findings\n  # Next",
+            "{path}"
+        );
+    }
+    assert_refused(
+        call(
+            &boot,
+            TOOL_TRACK_CAT,
+            planner(own),
+            json!({ "path": "index.md", "sections": ["Goal"] }),
+        )
+        .await,
+        INVALID_PARAMS,
+        "is not a report; --sections reads sections of `report.md`",
+    );
+    assert_refused(
+        call(
+            &boot,
+            TOOL_TRACK_CAT,
+            planner(own),
+            json!({ "path": "report.md", "sections": ["Goal"], "blocks": [&ids[1]] }),
+        )
+        .await,
+        INVALID_PARAMS,
+        "pass `blocks` or `sections`, not both",
+    );
+}

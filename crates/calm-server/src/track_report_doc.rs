@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use calm_types::report_blocks::tasks::normalize_legacy_terminal_task_block;
 use calm_types::report_blocks::{
     BlockSlice, KIND_PROSE, flat_text, mint_id, parse_fence, reassign_ids, reassign_ids_with_hints,
-    render_fence, split_body,
+    reassign_ids_with_hints_reserving, render_fence, split_body,
 };
 
 use crate::track_report::{ReportBlock, TrackReportPayload};
@@ -214,6 +214,39 @@ impl ReportDoc {
         let current = self.blocks_snapshot()?;
         let aligned = reassign_ids_with_hints(&current, slices, hints);
         self.apply_aligned_blocks(&current, &aligned)
+    }
+
+    /// [`Self::update_with_hints`] bounded to `range` of the current block list (#1877 section replace):
+    /// only that part is matched against `slices`, every other block is kept as it is, and the
+    /// summary is untouched. Returns the blocks that now stand in `range`'s place.
+    pub fn replace_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        slices: &[BlockSlice],
+        hints: &[Option<String>],
+    ) -> Result<Vec<ReportBlock>> {
+        let current = self.blocks_snapshot()?;
+        ensure!(
+            range.start <= range.end && range.end <= current.len(),
+            "replace_range: {range:?} out of range (len {})",
+            current.len()
+        );
+        let (before, rest) = current.split_at(range.start);
+        let (old, after) = rest.split_at(range.len());
+        let reserved: HashSet<String> = before
+            .iter()
+            .chain(after)
+            .map(|block| block.id.clone())
+            .collect();
+        let replaced = reassign_ids_with_hints_reserving(old, slices, hints, &reserved);
+        let aligned: Vec<ReportBlock> = before
+            .iter()
+            .chain(&replaced)
+            .chain(after)
+            .cloned()
+            .collect();
+        self.apply_aligned_blocks(&current, &aligned)?;
+        Ok(replaced)
     }
 
     /// `(summary, body)` projection; a not-yet-migrated legacy doc projects `ROOT.body` unchanged.

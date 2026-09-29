@@ -51,10 +51,10 @@ pub(crate) fn render_system_prompt(template: &str, track_id: &str) -> String {
 
 #[cfg(test)]
 const TASK_BLOCK_PROTOCOL_GOLDEN: &str = concat!(
-    "   * Maintain task declarations as report `task` blocks. Read the report with ",
-    "`calm.report.read`; for create, pass its `docRev` as `if_doc_rev`, while ",
-    "replace passes the target block's `rev` as `if_rev`. Use ",
-    "`calm.report.blocks.upsert` for both operations. To start an authorized Planner task, ",
+    "   * Maintain task declarations as report `task` blocks. Read the report (or the section ",
+    "that holds the task) with `calm.report.read`, then create or replace the task block with ",
+    "an `upsert` op of `calm.report.commit`; pass no revisions, the kernel anchors the op to ",
+    "your read. To start an authorized Planner task, ",
     "its payload needs a per-track-unique ",
     "`key`, `kind` (`codex`, `claude`, or `terminal`), `ready: true`, ",
     "and `declared_by: \"spec\"`; it may also carry `acceptance`, `depends_on` ",

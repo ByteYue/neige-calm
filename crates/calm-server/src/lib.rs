@@ -597,6 +597,8 @@ pub mod workspace_recycle;
 pub mod workspace_repoint;
 pub use calm_types::track_fs_dto;
 pub mod report_backlinks;
+pub mod report_read_ledger;
+pub mod report_sections;
 pub mod report_series;
 pub mod report_sources;
 pub mod report_tags;

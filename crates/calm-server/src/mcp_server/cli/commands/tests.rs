@@ -121,6 +121,10 @@ fn cat_blocks_sends_the_comma_separated_ids_as_an_array() {
         refusal(&["cat", "report.md", "--blocks", "b_1", "--blocks", "b_2"]),
         "cat accepts --blocks once"
     );
+    assert_eq!(
+        tool_args(&["cat", "report.md", "--sections", "已完成,Next steps"]),
+        json!({ "path": "report.md", "sections": ["已完成", "Next steps"] })
+    );
 }
 
 #[test]
