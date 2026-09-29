@@ -500,28 +500,31 @@ jobs:
       # mold via ld takeover rather than RUSTFLAGS: RUSTFLAGS feeds the rust-cache key.
       - uses: rui314/setup-mold@v1
 
-      # EXPERIMENT (#1835): time every linker invocation without touching cargo's fingerprint inputs.
-      - name: "experiment: wrap ld with a timer"
+      # EXPERIMENT (#1835): rustc 1.98 links x86_64-linux with its bundled rust-lld (gcc-ld/ld.lld), not the system ld
+      # that setup-mold took over. Time every rust-lld invocation without touching cargo's fingerprint inputs.
+      - name: "experiment: wrap rust-lld (gcc-ld/ld.lld) with a timer"
         run: |
           set -euo pipefail
-          nproc; free -g; cc --version | head -1
-          ls -l /usr/bin/ld /usr/bin/x86_64-linux-gnu-ld; ld --version | head -1
-          sudo mkdir -p /usr/local/libexec; sudo cp "$(readlink -f /usr/bin/ld)" /usr/local/libexec/mold-real
-          mold_bin=/usr/local/libexec/mold-real
-          sudo tee /usr/local/bin/ld-timed >/dev/null <<SH
+          nproc; free -g
+          gccld="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
+          ls -l "$gccld"
+          mv "$gccld/ld.lld" "$gccld/ld.lld.real"
+          real="$gccld/ld.lld.real"
+          if [ "${EXPERIMENT_LINKER:-lld}" = mold ]; then real=/usr/local/bin/mold; fi
+          cat > "$gccld/ld.lld" <<SH
           #!/bin/bash
           out=?; prev=
           for a in "\$@"; do if [ "\$prev" = -o ]; then out=\$a; fi; prev=\$a; done
           s=\$(date +%s.%N)
-          $mold_bin "\$@"; rc=\$?
+          $real "\$@"; rc=\$?
           e=\$(date +%s.%N)
           echo "\$s \$e \$rc \$out" >> /tmp/ld-times.log
           exit \$rc
           SH
-          sudo chmod +x /usr/local/bin/ld-timed
-          sudo ln -sf /usr/local/bin/ld-timed /usr/bin/x86_64-linux-gnu-ld
-          sudo ln -sf /usr/local/bin/ld-timed /usr/bin/ld
-          ld --version | head -1
+          chmod +x "$gccld/ld.lld"
+          cat "$gccld/ld.lld"
+        env:
+          EXPERIMENT_LINKER: lld
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -535,6 +538,7 @@ jobs:
       - name: cargo nextest archive --workspace --locked
         run: |
           set -euo pipefail
+          touch /tmp/build-start
           cargo build --locked -p calm-worker-runtime --bin calm-worker-boundary
           cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst $EXPERIMENT_CARGO_ARGS --timings
           ls -l nextest-archive.tar.zst
@@ -550,11 +554,12 @@ jobs:
           awk '{d=$2-$1; t+=d; n++; printf "%.2f %s\n", d, $4}' /tmp/ld-times.log | sort -rn > exp/ld-durations.txt
           echo "links: $(wc -l < exp/ld-durations.txt) total_s: $(awk '{t+=$1} END{print t}' exp/ld-durations.txt)"
           head -40 exp/ld-durations.txt
-          find target/debug/deps -maxdepth 1 -type f -executable -printf '%s %p\n' | sort -rn > exp/bin-sizes.txt
+          find target/debug/deps -maxdepth 1 -type f -executable -newer /tmp/build-start -printf '%s %p\n' | sort -rn > exp/bin-sizes.txt
           echo "test/bin executables: $(wc -l < exp/bin-sizes.txt) total_bytes: $(awk '{t+=$1} END{print t}' exp/bin-sizes.txt)"
           head -20 exp/bin-sizes.txt
           b=$(head -1 exp/bin-sizes.txt | awk '{print $2}'); readelf -p .comment "$b" | tee exp/comment.txt
-          readelf -S -W "$b" | grep -E 'debug|text' | tee exp/sections.txt
+          readelf -S -W "$b" | tee exp/sections.txt
+          size -A "$b" | sort -k2 -rn | head -15
           cp target/cargo-timings/cargo-timing-*.html exp/ || true
           ls -l exp
 
