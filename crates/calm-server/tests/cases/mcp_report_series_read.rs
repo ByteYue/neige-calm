@@ -363,26 +363,14 @@ async fn read_never_calls_the_plugin() {
 async fn write_does_not_trigger_resolution() {
     let fx = SeriesFixture::boot(FixtureOptions::default()).await;
     fx.reply_structured(seam_fixture()["reply"].clone());
-    // `commit` without any read: the initial document is pinned at docRev 3 after boot's seeding.
-    let if_doc_rev = {
-        let card = fx
-            .boot
-            .repo
-            .card_get(fx.boot.report_card_id.as_str())
-            .await
-            .unwrap()
-            .expect("report card");
-        let payload: calm_server::track_report::TrackReportPayload =
-            serde_json::from_value(card.payload).unwrap();
-        payload.doc_rev
-    };
+    // The read before the write shows no `chart.series` block, so it has nothing to resolve.
+    fx.read(json!({})).await;
     call_tool(
         &fx.boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&fx.boot),
         json!({
-            "if_doc_rev": if_doc_rev,
-            "message": "one chart.series block, never read",
+            "message": "one chart.series block, never read since",
             "ops": [{ "op": "upsert", "kind": KIND_CHART_SERIES, "payload": frozen_block() }]
         }),
     )

@@ -1,14 +1,12 @@
-//! `chart.series` through the real MCP write ends (`calm.report.blocks.upsert` and a `calm.report.commit` upsert op).
+//! `chart.series` through the real MCP write end, a `calm.report.commit` upsert op.
 //! A cutoff in the future is accepted on purpose: `calm-types` has no clock.
 
 #![cfg(unix)]
 
 use std::time::Duration;
 
-use crate::mcp_track_report::{Boot, boot, call_tool, planner_identity};
-use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT,
-};
+use crate::mcp_track_report::{Boot, boot, call_tool, planner_identity, upsert_block};
+use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_COMMIT;
 use calm_server::plugin_host::mcp::RpcError;
 use calm_server::track_report::TrackReportPayload;
 use calm_types::report_blocks::{KIND_CHART_SERIES, parse_fence, split_body};
@@ -63,13 +61,12 @@ fn chart_series_fences(read_out: &Value) -> Vec<Value> {
 
 /// One `calm.report.commit` carrying exactly one `chart.series` upsert op.
 async fn commit_one_series(boot: &Boot, payload: Value) -> Result<Value, RpcError> {
-    let if_doc_rev = doc_rev(boot).await;
+    read(boot, json!({})).await;
     call_tool(
         boot,
         TOOL_REPORT_COMMIT,
         planner_identity(boot),
         json!({
-            "if_doc_rev": if_doc_rev,
             "message": "one chart.series block",
             "ops": [
                 { "op": "upsert", "kind": KIND_CHART_SERIES, "payload": payload }
@@ -108,11 +105,10 @@ async fn upsert_chart_series_lands_as_canonical_fence() {
         "as_of": "2026-09-10"
     });
     let if_doc_rev = doc_rev(&boot).await;
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": KIND_CHART_SERIES, "payload": payload, "if_doc_rev": if_doc_rev }),
+        json!({ "kind": KIND_CHART_SERIES, "payload": payload}),
     )
     .await
     .expect("chart.series upsert succeeds");

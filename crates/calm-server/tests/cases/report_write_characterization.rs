@@ -12,9 +12,6 @@ use calm_server::db::prelude::*;
 use calm_server::db::sqlite::SqlxRepo;
 use calm_server::event::EventBus;
 use calm_server::ids::TrackId;
-use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_WRITE_MARKDOWN,
-};
 use calm_server::model::{NewArea, NewCard, NewTrack};
 use calm_server::plugin_host::{PluginHost, PluginRegistry};
 use calm_server::routes;
@@ -26,8 +23,8 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 
 use crate::mcp_track_report::{
-    Boot, assistant_identity, boot, call_tool, planner_identity,
-    seed_non_root_session_with_provider,
+    Boot, assistant_identity, boot, planner_identity, read_then_write_markdown,
+    seed_non_root_session_with_provider, upsert_block,
 };
 use crate::support::mcp::set_persisted_card_role;
 use calm_server::mcp_server::ToolCallIdentity;
@@ -99,15 +96,13 @@ async fn mcp_planner_document_write_is_planner_attributed() {
     let boot = boot().await;
     let pool = mcp_pool(&boot);
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Planner wrote this\n",
             "summary": "planner summary",
-            "message": "characterization write",
-            "if_doc_rev": 0
+            "message": "characterization write"
         }),
     )
     .await
@@ -126,14 +121,12 @@ async fn mcp_assistant_block_write_is_assistant_attributed() {
     let boot = boot().await;
     let pool = mcp_pool(&boot);
 
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
         json!({
             "kind": "prose",
-            "markdown": "# Assistant wrote this\n",
-            "if_doc_rev": 0
+            "markdown": "# Assistant wrote this\n"
         }),
     )
     .await
@@ -159,15 +152,13 @@ async fn mcp_report_write_consults_the_recorder_gate_before_it_commits() {
         .await
         .expect("retire the planner session");
 
-    let error = call_tool(
+    let error = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Denied\n",
             "summary": "denied",
-            "message": "characterization write",
-            "if_doc_rev": 0
+            "message": "characterization write"
         }),
     )
     .await
@@ -264,15 +255,13 @@ async fn mcp_report_write_is_refused_when_the_recorder_gate_is_the_only_objectio
         thread_id: "foreign-planner-thread".to_string(),
     };
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         identity,
         json!({
             "body": "# Denied\n",
             "summary": "denied",
-            "message": "characterization write",
-            "if_doc_rev": 0
+            "message": "characterization write"
         }),
     )
     .await
@@ -314,14 +303,12 @@ async fn mcp_assistant_block_write_from_a_foreign_track_is_refused_without_the_p
         thread_id: "foreign-assistant-thread".to_string(),
     };
 
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         identity,
         json!({
             "kind": "prose",
-            "markdown": "# Denied\n",
-            "if_doc_rev": 0
+            "markdown": "# Denied\n"
         }),
     )
     .await
@@ -356,15 +343,13 @@ async fn mcp_report_write_probe_reads_the_written_track_not_the_callers_claimed_
         ..planner_identity(&boot)
     };
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         identity,
         json!({
             "body": "# Denied\n",
             "summary": "denied",
-            "message": "characterization write",
-            "if_doc_rev": 0
+            "message": "characterization write"
         }),
     )
     .await
@@ -417,9 +402,8 @@ async fn mcp_claude_assistant_block_write_is_actored_to_the_claude_session() {
         .await
         .expect("re-seed the role cache from the cards table");
 
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         ToolCallIdentity {
             card_id: card.id.as_str().to_string(),
             role: CardRole::Assistant,
@@ -431,8 +415,7 @@ async fn mcp_claude_assistant_block_write_is_actored_to_the_claude_session() {
         },
         json!({
             "kind": "prose",
-            "markdown": "# Claude assistant wrote this\n",
-            "if_doc_rev": 0
+            "markdown": "# Claude assistant wrote this\n"
         }),
     )
     .await

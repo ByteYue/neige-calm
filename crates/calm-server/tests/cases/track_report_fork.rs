@@ -16,9 +16,6 @@ use calm_server::error::CalmError;
 use calm_server::event::{EditAuthor, EventBus};
 use calm_server::ids::{ActorId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_UPSERT,
-};
 use calm_server::mcp_server::tools::track_state::TOOL_TRACK_STATE;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack};
@@ -1365,27 +1362,20 @@ async fn forked_user_tombstone_is_normalized_to_planner_and_stays_planner_editab
         "declared_by": tombstone["payload"]["declared_by"].clone(),
         "tombstoned_by": tombstone["payload"]["tombstoned_by"].clone()
     });
-    let upsert = call_planner_tool(
+    crate::support::report_writes::upsert_block(
         &ctx,
         &registry,
-        TOOL_REPORT_BLOCKS_UPSERT,
         identity.clone(),
-        json!({
-            "id": tombstone["id"],
-            "kind": "task",
-            "payload": rewritten,
-            "if_rev": tombstone["rev"]
-        }),
+        json!({ "id": tombstone["id"], "kind": "task", "payload": rewritten }),
     )
     .await
     .expect("planner author must be able to rewrite a forked tombstone");
 
-    let delete = call_planner_tool(
+    let delete = crate::support::report_writes::read_then_commit(
         &ctx,
         &registry,
-        TOOL_REPORT_BLOCKS_DELETE,
         identity,
-        json!({ "id": tombstone["id"], "if_rev": upsert["rev"] }),
+        json!([{ "op": "delete", "id": tombstone["id"] }]),
     )
     .await
     .expect("planner author must be able to delete a forked tombstone");

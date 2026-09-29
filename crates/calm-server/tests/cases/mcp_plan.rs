@@ -13,7 +13,6 @@ use calm_server::mcp_server::registry::AppContext;
 use calm_server::mcp_server::tools::plan::{
     TOOL_PLAN_CANCEL, TOOL_PLAN_LIST, TOOL_PLAN_UPSERT, plan_cancel_after_pre_read_for_test,
 };
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack, TaskStatus, TrackPatch, now_ms};
 use calm_server::plugin_host::mcp::RpcError;
@@ -31,7 +30,6 @@ struct Boot {
     track_id: TrackId,
     planner_card_id: CardId,
     worker_card_id: CardId,
-    report_card_id: CardId,
 }
 
 async fn boot() -> Boot {
@@ -180,7 +178,6 @@ async fn boot() -> Boot {
         track_id: track.id,
         planner_card_id: planner_card.id,
         worker_card_id: worker_card.id,
-        report_card_id: report_card.id,
     }
 }
 
@@ -260,18 +257,11 @@ async fn write_task_block(boot: &Boot, mut payload: Value) -> Value {
         "declared_by".into(),
         json!(calm_types::report_blocks::tasks::PLANNER_DECLARATION_AUTHOR),
     );
-    let report = boot
-        .repo
-        .card_get(boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .expect("report card");
-    let report: TrackReportPayload = serde_json::from_value(report.payload).unwrap();
-    call_tool(
-        boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
+    crate::support::report_writes::upsert_block(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(boot),
-        json!({"kind": "task", "payload": payload, "if_doc_rev": report.doc_rev}),
+        json!({"kind": "task", "payload": payload}),
     )
     .await
     .expect("task block write")
@@ -407,7 +397,7 @@ async fn plan_upsert_shim_returns_migration_and_writes_nothing() {
     .expect("registered compatibility shim");
 
     assert!(out["error"].as_str().unwrap().contains("retired (#985)"));
-    assert_eq!(out["migration"]["use"], "calm.report.blocks.upsert");
+    assert_eq!(out["migration"]["use"], "calm.report.commit");
     assert!(
         out["migration"]["shape"]
             .as_str()

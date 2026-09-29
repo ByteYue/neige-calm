@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use calm_server::db::prelude::*;
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
 use calm_server::model::NewPlugin;
 use calm_server::plugin_host::{Manifest, PluginHost, PluginRegistry, PluginRuntimeStatus};
 use calm_server::report_series::{Enqueue, Job, ResolveOutcome, SeriesRequest, SeriesResolver};
@@ -21,6 +20,7 @@ use tokio::sync::OnceCell;
 use tokio::time::{Instant, sleep};
 
 use crate::mcp_track_report::{Boot, boot, call_tool, planner_identity};
+use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_COMMIT;
 
 pub(crate) const SERIES_BIN: &str = env!("CARGO_BIN_EXE_plugin-host-stub-series");
 pub(crate) const MARKET_PLUGIN_ID: &str = "dev-neige-market";
@@ -330,45 +330,50 @@ impl SeriesFixture {
         .expect("snapshot")
     }
 
-    async fn doc_rev(&self) -> u64 {
-        self.snapshot().await.doc_rev
-    }
-
-    /// Create one `chart.series` block through the real upsert tool.
-    pub async fn write_series_block(&self, payload: Value) -> String {
-        let if_doc_rev = self.doc_rev().await;
-        let out = call_tool(
-            &self.boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
-            planner_identity(&self.boot),
-            json!({ "kind": KIND_CHART_SERIES, "payload": payload, "if_doc_rev": if_doc_rev }),
-        )
-        .await
-        .expect("chart.series upsert succeeds");
-        out["id"].as_str().expect("upsert returns id").to_string()
-    }
-
-    /// Replace an existing block's payload; returns the new rev.
-    pub async fn rewrite_series_block(&self, block_id: &str, payload: Value) -> u64 {
-        let rev = self
+    /// One real commit `upsert` op, anchored by a read that hydrates nothing: fixture plumbing must
+    /// not enqueue on the block under test. Returns the written block's index entry.
+    pub async fn upsert(&self, mut op: Value) -> Value {
+        let resolve: serde_json::Map<String, Value> = self
             .snapshot()
             .await
             .blocks
             .iter()
-            .find(|b| b.id == block_id)
-            .map(|b| u64::from(b.rev))
-            .expect("block is in the index");
+            .map(|block| (block.id.clone(), json!("none")))
+            .collect();
+        self.read(json!({ "resolve": resolve })).await;
+        op["op"] = json!("upsert");
+        let target = op.get("id").cloned();
         let out = call_tool(
             &self.boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
+            TOOL_REPORT_COMMIT,
             planner_identity(&self.boot),
-            json!({
-                "id": block_id, "kind": KIND_CHART_SERIES, "payload": payload, "if_rev": rev
-            }),
+            json!({ "message": "fixture write", "ops": [op] }),
         )
         .await
-        .expect("chart.series rewrite succeeds");
-        out["rev"].as_u64().expect("rewrite returns rev")
+        .expect("fixture upsert succeeds");
+        let blocks = out["blocks"].as_array().expect("commit returns the index");
+        match target {
+            Some(id) => blocks.iter().find(|block| block["id"] == id),
+            None => blocks.last(),
+        }
+        .cloned()
+        .expect("the written block is in the index")
+    }
+
+    /// Create one `chart.series` block (appended) through a real commit `upsert` op.
+    pub async fn write_series_block(&self, payload: Value) -> String {
+        let block = self
+            .upsert(json!({ "kind": KIND_CHART_SERIES, "payload": payload }))
+            .await;
+        block["id"].as_str().expect("block id").to_string()
+    }
+
+    /// Replace an existing block's payload; returns the new rev.
+    pub async fn rewrite_series_block(&self, block_id: &str, payload: Value) -> u64 {
+        let block = self
+            .upsert(json!({ "id": block_id, "kind": KIND_CHART_SERIES, "payload": payload }))
+            .await;
+        block["rev"].as_u64().expect("block rev")
     }
 
     /// The real `calm.report.read` as the planner.

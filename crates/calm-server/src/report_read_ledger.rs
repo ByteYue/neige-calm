@@ -1,7 +1,8 @@
-//! What each worker session last read of a report (#1877), so `calm.report.commit` can default its
-//! `if_doc_rev` / `if_rev` / section anchors to it. Two entry points: a read that returned report
-//! text records exactly the snapshot it rendered, and [`ReadLedger::record_authored`] records only
-//! what the session's own commit wrote. The check itself stays in the persist tx.
+//! What each worker session last read of a report (#1877): the anchors of every agent report write,
+//! which takes no revisions (#1883). A `calm.report.read` that returned text records exactly the
+//! snapshot it rendered; an own `write_markdown` records its post-write document the same way; and
+//! [`ReadLedger::record_authored`] records only what the session's own commit wrote. The check
+//! itself stays in the persist tx.
 //! Process memory like [`crate::plugin_results`]: a kernel restart forgets it and the next write is
 //! refused until the session reads again. Eviction is lazy: the TTL on every access, and a session's
 //! first read drops every other session's entries of the same card (at most one session of a card
@@ -10,7 +11,7 @@
 //! that section's recorded list, so the next write of the section needs a re-read; likewise an own
 //! `move` into, out of or within a recorded section does not refresh that section's list.
 //! Known gap, out of scope: a foreign delete whose id is later reused at the same rev can match a
-//! stale anchor; the same ABA exists for explicit `if_rev` on main.
+//! stale anchor; the same ABA exists for the REST `if_rev`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,10 +26,12 @@ pub const TTL_MS: i64 = 2 * 60 * 60 * 1000;
 
 /// One session's reads of one report, merged: the `docRev` of its latest read, and every block and
 /// whole section any of its reads rendered, at the rev it rendered.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastRead {
-    /// Only a read that showed the docRev, summary and index (`calm.report.read`) sets it.
-    pub doc_rev: Option<u64>,
+    pub doc_rev: u64,
+    /// The session has seen every block at `doc_rev`: set by a read that rendered all of them,
+    /// cleared by a partial read at another docRev, kept across own commits that advanced `doc_rev`.
+    pub whole: bool,
     pub blocks: HashMap<String, u32>,
     /// Section title → its ordered `(id, rev)` list; only sections a read rendered whole.
     pub sections: HashMap<String, Vec<(String, u32)>>,
@@ -79,15 +82,15 @@ impl ReadLedger {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Record one text-returning read: `blocks` is the snapshot it rendered from, `rendered` the ids
-    /// of the blocks its text carries, `doc_rev` the docRev it showed, if it showed one. A section
-    /// counts as read only when all its blocks were rendered; a read of every block replaces the record.
+    /// Record one text-returning read: `blocks` is the snapshot at `doc_rev` it rendered from,
+    /// `rendered` the ids of the blocks its text carries. A section counts as read only when all its
+    /// blocks were rendered; a read of every block replaces the record.
     pub fn record(
         &self,
         session_id: &str,
         caller_card_id: &str,
         report_card_id: &str,
-        doc_rev: Option<u64>,
+        doc_rev: u64,
         blocks: &[ReportBlock],
         rendered: &[String],
     ) {
@@ -101,18 +104,23 @@ impl ReadLedger {
             .entry((session_id.to_string(), report_card_id.to_string()))
             .or_insert_with(|| Entry {
                 caller_card_id: caller_card_id.to_string(),
-                read: LastRead::default(),
+                read: LastRead {
+                    doc_rev,
+                    whole: false,
+                    blocks: HashMap::new(),
+                    sections: HashMap::new(),
+                },
                 recorded_at: now,
             });
         entry.recorded_at = now;
         let seen = |block: &ReportBlock| rendered.contains(&block.id);
-        if blocks.iter().all(seen) {
+        let all_seen = blocks.iter().all(seen);
+        if all_seen {
             entry.read.blocks.clear();
             entry.read.sections.clear();
         }
-        if doc_rev.is_some() {
-            entry.read.doc_rev = doc_rev;
-        }
+        entry.read.whole = all_seen || (entry.read.whole && entry.read.doc_rev == doc_rev);
+        entry.read.doc_rev = doc_rev;
         for block in blocks.iter().filter(|block| seen(block)) {
             entry.read.blocks.insert(block.id.clone(), block.rev);
         }
@@ -175,7 +183,7 @@ impl ReadLedger {
                 }
             }
         }
-        if doc_rev.is_some() {
+        if let Some(doc_rev) = doc_rev {
             read.doc_rev = doc_rev;
         }
     }
@@ -205,16 +213,13 @@ mod tests {
     fn records_rendered_blocks_and_only_whole_sections() {
         let ledger = ReadLedger::new();
         let blocks = reassign_ids(&[], &split_body("intro\n# A\na\n## A1\nx\n# B\nb\n"));
-        ledger.record(
-            "s",
-            "planner",
-            "report",
-            Some(3),
-            &blocks,
-            &ids(&blocks, &[1, 3]),
-        );
+        ledger.record("s", "planner", "report", 3, &blocks, &ids(&blocks, &[1, 3]));
         let read = ledger.last_read("s", "report").expect("recorded");
-        assert_eq!(read.doc_rev, Some(3));
+        assert_eq!(read.doc_rev, 3);
+        assert!(
+            !read.whole,
+            "a partial read is not a read of the whole report"
+        );
         assert_eq!(read.blocks.len(), 2);
         assert_eq!(
             read.sections.keys().collect::<Vec<_>>(),
@@ -231,16 +236,9 @@ mod tests {
         let ledger = ReadLedger::with_clock(Arc::new(move || now.load(Ordering::SeqCst)));
         let blocks = reassign_ids(&[], &split_body("# A\na\n"));
         let all = ids(&blocks, &[0]);
-        ledger.record("old", "planner", "report", Some(1), &blocks, &all);
-        ledger.record(
-            "assistant",
-            "assistant-card",
-            "report",
-            Some(1),
-            &blocks,
-            &all,
-        );
-        ledger.record("new", "planner", "report", Some(1), &blocks, &all);
+        ledger.record("old", "planner", "report", 1, &blocks, &all);
+        ledger.record("assistant", "assistant-card", "report", 1, &blocks, &all);
+        ledger.record("new", "planner", "report", 1, &blocks, &all);
         assert_eq!(ledger.last_read("old", "report"), None, "superseded");
         assert!(ledger.last_read("assistant", "report").is_some());
         clock.store(TTL_MS + 1, Ordering::SeqCst);
@@ -248,11 +246,35 @@ mod tests {
     }
 
     #[test]
+    fn whole_is_a_read_of_every_block_at_the_recorded_doc_rev() {
+        let ledger = ReadLedger::new();
+        let blocks = reassign_ids(&[], &split_body("# A\na\n# B\nb\n"));
+        let whole = |ledger: &ReadLedger| ledger.last_read("s", "report").expect("recorded").whole;
+        ledger.record("s", "planner", "report", 1, &blocks, &ids(&blocks, &[0]));
+        assert!(!whole(&ledger), "a partial first read");
+        ledger.record("s", "planner", "report", 1, &blocks, &ids(&blocks, &[0, 1]));
+        assert!(whole(&ledger), "a read of every block");
+        ledger.record("s", "planner", "report", 1, &blocks, &ids(&blocks, &[1]));
+        assert!(whole(&ledger), "a partial read at the same docRev keeps it");
+        ledger.record_authored("s", "report", &[], Some(2));
+        assert!(
+            whole(&ledger),
+            "an own commit that advanced the docRev keeps it"
+        );
+        assert_eq!(ledger.last_read("s", "report").unwrap().doc_rev, 2);
+        ledger.record("s", "planner", "report", 3, &blocks, &ids(&blocks, &[1]));
+        assert!(
+            !whole(&ledger),
+            "a partial read at another docRev clears it"
+        );
+    }
+
+    #[test]
     fn blocks_an_own_write_removed_are_forgotten() {
         let ledger = ReadLedger::new();
         let blocks = reassign_ids(&[], &split_body("# A\na\n## A1\nx\n# B\nb\n"));
         let all = ids(&blocks, &[0, 1, 2]);
-        ledger.record("s", "planner", "report", Some(1), &blocks, &all);
+        ledger.record("s", "planner", "report", 1, &blocks, &all);
         let (x, y) = (all[1].clone(), all[2].clone());
         ledger.record_authored(
             "s",

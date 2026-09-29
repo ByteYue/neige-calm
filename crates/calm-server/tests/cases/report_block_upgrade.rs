@@ -4,12 +4,10 @@ use super::*;
 async fn edit_preupgrade_report(missing_cache: bool, boundary_match: bool) {
     let boot = boot().await;
     for markdown in ["# First\nlocal prose", "# Second\noriginal decision"] {
-        call_tool(
+        upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
-            json!({"kind": "prose", "markdown": markdown,
-                "if_doc_rev": read(&boot, json!({})).await["docRev"]}),
+            json!({"kind": "prose", "markdown": markdown}),
         )
         .await
         .unwrap();
@@ -84,16 +82,12 @@ async fn edit_preupgrade_report(missing_cache: bool, boundary_match: bool) {
         .find(|b| b.payload["markdown"] == old)
         .expect("the edited prose block")
         .clone();
-    let upsert = |markdown: &str| {
-        json!([{"op": "upsert", "id": target.id, "if_rev": target.rev, "kind": "prose",
-            "markdown": markdown}])
-    };
     let edited = call_tool(
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"if_doc_rev": snapshot["docRev"], "message": "edit pre-upgrade report",
-            "ops": upsert(new)}),
+        json!({ "message": "edit pre-upgrade report",
+            "ops": [{"op": "upsert", "id": target.id, "kind": "prose", "markdown": new}]}),
     )
     .await
     .expect("edit must land on the CRDT truth, not the obsolete body cache");
@@ -110,22 +104,11 @@ async fn edit_preupgrade_report(missing_cache: bool, boundary_match: bool) {
     );
     assert!(after.body.contains(boundary), "{}", after.body);
     assert_eq!(edited["docRev"].as_u64(), Some(after.doc_rev));
-    let stale = call_tool(
-        &boot,
-        TOOL_REPORT_COMMIT,
-        planner_identity(&boot),
-        json!({"if_doc_rev": snapshot["docRev"], "message": "stale snapshot",
-            "ops": upsert("stale")}),
-    )
-    .await
-    .expect_err("stale revision must refuse");
-    assert_eq!(stale.code, RPC_REV_CONFLICT);
-    assert_eq!(current_payload(&boot).await, after);
     call_tool(
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"if_doc_rev": edited["docRev"], "message": "reuse returned revision",
+        json!({ "message": "continue from the own write",
             "summary": "reused"}),
     )
     .await
@@ -163,12 +146,10 @@ async fn empty_blocks_have_equal_plain_and_stripped_marked_projections() {
     ] {
         let boot = boot().await;
         for text in &parts {
-            call_tool(
+            upsert_block(
                 &boot,
-                TOOL_REPORT_BLOCKS_UPSERT,
                 planner_identity(&boot),
-                json!({"kind": "prose", "markdown": text,
-                    "if_doc_rev": read(&boot, json!({})).await["docRev"]}),
+                json!({"kind": "prose", "markdown": text}),
             )
             .await
             .unwrap();
@@ -192,11 +173,10 @@ async fn empty_blocks_have_equal_plain_and_stripped_marked_projections() {
             before,
             "rendering must not mutate empty ids or stored content"
         );
-        call_tool(
+        read_then_write_markdown(
             &boot,
-            TOOL_REPORT_WRITE_MARKDOWN,
             planner_identity(&boot),
-            json!({"body": marked["text"], "if_doc_rev": marked["docRev"]}),
+            json!({"body": marked["text"]}),
         )
         .await
         .unwrap();

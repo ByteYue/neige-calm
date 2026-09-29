@@ -406,9 +406,9 @@ async fn plan_upsert(
     Ok(json!({
         "error": "calm.plan.upsert was retired (#985); no task declaration was written",
         "migration": {
-            "use": "calm.report.blocks.upsert",
-            "shape": "{ kind: \"task\", payload: { key, kind, goal (codex/claude) | command (terminal), acceptance?, depends_on?, priority?, gate?, ready: true, declared_by: \"spec\" }, if_doc_rev }",
-            "notes": "Read docRev with calm.report.read. The kernel projects ready task blocks, schedules tasks, and runs verification gates; use calm.plan.list for status."
+            "use": "calm.report.commit",
+            "shape": "{ message, ops: [{ op: \"upsert\", kind: \"task\", payload: { key, kind, goal (codex/claude) | command (terminal), acceptance?, depends_on?, priority?, gate?, ready: true, declared_by: \"spec\" } }] }",
+            "notes": "Read the report with calm.report.read first. The kernel projects ready task blocks, schedules tasks, and runs verification gates; use calm.plan.list for status."
         }
     }))
 }

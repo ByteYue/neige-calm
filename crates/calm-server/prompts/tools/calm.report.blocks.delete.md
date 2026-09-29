@@ -1,1 +1,0 @@
-Planner-only: delete a report block. `if_rev` is REQUIRED (destructive op): pass the rev you last read; a mismatch returns error -32001 (rev conflict) and deletes nothing. Returns `{ updated_at, docRev }`. Takes no `message` — passing one is refused (-32602); carry it with `calm.report.commit`.

@@ -7,11 +7,11 @@
 
 use crate::mcp_track_report::{
     Boot, assistant_b_identity, assistant_identity, boot, call_tool, planner_identity,
+    read_then_write_markdown, upsert_block,
 };
 use calm_server::mcp_server::registry::ToolCallIdentity;
 use calm_server::mcp_server::tools::track_report_blocks::{
-    RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_MOVE, TOOL_REPORT_BLOCKS_UPSERT,
-    TOOL_REPORT_WRITE_MARKDOWN,
+    RPC_REV_CONFLICT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
 };
 use serde_json::{Value, json};
 
@@ -78,15 +78,13 @@ fn assert_untouched(after_a: &Persisted, after_b: &Persisted, mouth: &str) {
 
 /// Two H1 sections of plain prose (no task fences, so only a conflict is under test).
 async fn seed(boot: &Boot) {
-    call_tool(
+    read_then_write_markdown(
         boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
         json!({
             "body": "# A\n\nalpha\n\n# B\n\nbeta\n",
             "summary": "seeded",
-            "message": "seed",
-            "if_doc_rev": 0
+            "message": "seed"
         }),
     )
     .await
@@ -143,7 +141,7 @@ async fn read_both(boot: &Boot) -> (Value, Value) {
     (a_read, b_read)
 }
 
-/// -32001 is shared by the `if_rev` and `if_doc_rev` comparators; `detail` is the fragment only
+/// -32001 is shared by the block-rev and docRev comparators; `detail` is the fragment only
 /// one of them can produce, including the exact stale rev B was holding.
 fn assert_rev_conflict(err: calm_server::plugin_host::mcp::RpcError, mouth: &str, detail: &str) {
     assert_eq!(
@@ -174,15 +172,13 @@ async fn two_assistant_sessions_replacing_one_block_second_writer_gets_rev_confl
     );
 
     // 2. A writes with the rev A read.
-    let a_out = call_tool(
+    let a_out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
         json!({
             "id": a_target["id"],
             "kind": "prose",
             "payload": {"markdown": "# A\n\nalpha, as A revised it\n"},
-            "if_rev": a_target["rev"],
         }),
     )
     .await
@@ -194,24 +190,24 @@ async fn two_assistant_sessions_replacing_one_block_second_writer_gets_rev_confl
     );
     let after_a = persisted(&boot).await;
 
-    // 3. B writes with the rev B read, which A has just invalidated.
+    // 3. B writes anchored by the rev B read, which A has just invalidated.
     let err = call_tool(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
+        TOOL_REPORT_COMMIT,
         assistant_b_identity(&boot),
-        json!({
+        json!({ "message": "B", "ops": [{
+            "op": "upsert",
             "id": b_target["id"],
             "kind": "prose",
             "payload": {"markdown": "# A\n\nalpha, as B would have it\n"},
-            "if_rev": b_target["rev"],
-        }),
+        }] }),
     )
     .await
     .expect_err("B is writing over A's change with a stale block rev");
     // The block-level comparator, not the document-level one that shares the code.
     assert_rev_conflict(
         err,
-        "blocks.upsert",
+        "commit upsert",
         &format!(
             "rev conflict on block {}: current rev is {}, expected if_rev {}",
             b_target["id"].as_str().expect("block id is a string"),
@@ -222,7 +218,7 @@ async fn two_assistant_sessions_replacing_one_block_second_writer_gets_rev_confl
 
     // 4. And B's bytes are nowhere.
     let after_b = persisted(&boot).await;
-    assert_untouched(&after_a, &after_b, "blocks.upsert");
+    assert_untouched(&after_a, &after_b, "commit upsert");
     assert!(
         after_b.read["text"]
             .as_str()
@@ -252,13 +248,9 @@ async fn two_assistant_sessions_reordering_blocks_second_writer_gets_doc_rev_con
     // A reorders, consuming the docRev both of them read.
     call_tool(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
+        TOOL_REPORT_COMMIT,
         assistant_identity(&boot),
-        json!({
-            "id": a_last["id"],
-            "to_index": 0,
-            "if_doc_rev": doc_rev(&a_read),
-        }),
+        json!({ "message": "A", "ops": [{ "op": "move", "id": a_last["id"], "to_index": 0 }] }),
     )
     .await
     .expect("A's move lands: it is holding the current docRev");
@@ -270,32 +262,28 @@ async fn two_assistant_sessions_reordering_blocks_second_writer_gets_doc_rev_con
          still be current"
     );
 
-    // B reorders with the docRev it read before A's move.
+    // B reorders anchored by the docRev it read before A's move.
     let err = call_tool(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
+        TOOL_REPORT_COMMIT,
         assistant_b_identity(&boot),
-        json!({
-            "id": b_last["id"],
-            "to_index": 1,
-            "if_doc_rev": doc_rev(&b_read),
-        }),
+        json!({ "message": "B", "ops": [{ "op": "move", "id": b_last["id"], "to_index": 1 }] }),
     )
     .await
     .expect_err("B is reordering on top of A's move with a stale docRev");
     // The document-level comparator, naming the docRev B held.
     assert_rev_conflict(
         err,
-        "blocks.move",
+        "commit move",
         &format!(
-            "document revision conflict: current doc_rev is {}, expected if_doc_rev {}",
+            "document revision conflict: current doc_rev is {}, this session last read docRev {}",
             doc_rev(&after_a.read),
             doc_rev(&b_read),
         ),
     );
 
     let after_b = persisted(&boot).await;
-    assert_untouched(&after_a, &after_b, "blocks.move");
+    assert_untouched(&after_a, &after_b, "commit move");
 }
 
 #[tokio::test]
@@ -311,7 +299,6 @@ async fn two_assistant_sessions_rewriting_the_whole_document_second_writer_gets_
         assistant_identity(&boot),
         json!({
             "body": "# A\n\nalpha, whole-document rewrite by A\n\n# B\n\nbeta\n",
-            "if_doc_rev": doc_rev(&a_read),
         }),
     )
     .await
@@ -329,7 +316,6 @@ async fn two_assistant_sessions_rewriting_the_whole_document_second_writer_gets_
         assistant_b_identity(&boot),
         json!({
             "body": "# A\n\nalpha, whole-document rewrite by B\n\n# B\n\nbeta\n",
-            "if_doc_rev": doc_rev(&b_read),
         }),
     )
     .await
@@ -338,7 +324,7 @@ async fn two_assistant_sessions_rewriting_the_whole_document_second_writer_gets_
         err,
         "write_markdown",
         &format!(
-            "document revision conflict: current doc_rev is {}, expected if_doc_rev {}",
+            "document revision conflict: current doc_rev is {}, this session last read docRev {}",
             doc_rev(&after_a.read),
             doc_rev(&b_read),
         ),

@@ -49,14 +49,11 @@ async fn a_fresh_template_can_report_repository_mismatch_without_tasks_or_ratifi
         })
         .unwrap();
     let message = "# 待你定\n\nrepo_mismatch: input.repo=owner/expected, cwd.origin=owner/observed. Please confirm the repository before any changes.\n";
-    let result = call_planner_tool(
+    let result = crate::support::report_writes::upsert_block(
         &ctx,
         &registry,
-        TOOL_REPORT_BLOCKS_UPSERT,
         identity,
-        json!({
-            "id": block.id, "if_rev": block.rev, "kind": "prose", "payload": {"markdown": message},
-        }),
+        json!({ "id": block.id, "kind": "prose", "payload": {"markdown": message} }),
     )
     .await
     .unwrap();

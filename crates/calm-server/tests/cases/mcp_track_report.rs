@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::support::mcp::set_persisted_card_role;
+use crate::support::report_writes;
 use calm_server::card_role_cache::CardRoleCache;
 use calm_server::db::RepoEventWrite;
 use calm_server::db::prelude::*;
@@ -364,6 +365,33 @@ pub(crate) async fn call_tool_raw(
         .map(|result| serde_json::to_value(&result).expect("serialize tool result"))
 }
 
+/// [`report_writes::upsert_block`] on this fixture.
+pub(crate) async fn upsert_block(
+    boot: &Boot,
+    identity: ToolCallIdentity,
+    op: Value,
+) -> Result<Value, RpcError> {
+    report_writes::upsert_block(&boot.ctx, &boot.registry, identity, op).await
+}
+
+/// [`report_writes::read_then_commit`] on this fixture.
+pub(crate) async fn read_then_commit(
+    boot: &Boot,
+    identity: ToolCallIdentity,
+    ops: Value,
+) -> Result<Value, RpcError> {
+    report_writes::read_then_commit(&boot.ctx, &boot.registry, identity, ops).await
+}
+
+/// [`report_writes::read_then_write_markdown`] on this fixture.
+pub(crate) async fn read_then_write_markdown(
+    boot: &Boot,
+    identity: ToolCallIdentity,
+    args: Value,
+) -> Result<Value, RpcError> {
+    report_writes::read_then_write_markdown(&boot.ctx, &boot.registry, identity, args).await
+}
+
 async fn current_doc_rev(boot: &Boot) -> u64 {
     calm_server::track_report_read::load_report_read_snapshot(
         boot.repo.as_ref(),
@@ -450,25 +478,19 @@ async fn recv_env(
         .expect("bus open")
 }
 
-/// `calm.report.commit` arguments replacing the report's only block with `markdown` — the planner's local edit.
+/// `calm.report.commit` arguments replacing the report's only block with `markdown` — the planner's
+/// local edit, anchored by the planner's read here.
 async fn commit_replacing_only_block(boot: &Boot, markdown: &str, message: &str) -> Value {
-    let index = call_tool(
-        boot,
-        TOOL_REPORT_READ,
-        planner_identity(boot),
-        json!({"select": "index"}),
-    )
-    .await
-    .expect("planner reads the index");
-    let blocks = index["blocks"].as_array().expect("blocks");
-    assert_eq!(blocks.len(), 1, "the fixture report has one block: {index}");
+    let read = call_tool(boot, TOOL_REPORT_READ, planner_identity(boot), json!({}))
+        .await
+        .expect("planner reads the report");
+    let blocks = read["blocks"].as_array().expect("blocks");
+    assert_eq!(blocks.len(), 1, "the fixture report has one block: {read}");
     json!({
-        "if_doc_rev": index["docRev"],
         "message": message,
         "ops": [{
             "op": "upsert",
             "id": blocks[0]["id"],
-            "if_rev": blocks[0]["rev"],
             "kind": "prose",
             "markdown": markdown
         }]
@@ -505,23 +527,25 @@ async fn read_refuses_worker() {
 }
 
 #[tokio::test]
-async fn whole_document_write_requires_if_doc_rev_and_rejects_stale_planner_writer() {
+async fn whole_document_write_requires_a_read_and_rejects_stale_planner_writer() {
     let boot = boot().await;
     let missing = call_tool(
         &boot,
         TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({"body": "# A\n", "message": "missing revision"}),
+        json!({"body": "# A\n", "message": "no read"}),
     )
     .await
     .unwrap_err();
     assert_eq!(missing.code, -32602);
 
-    call_tool(
+    call_tool(&boot, TOOL_REPORT_READ, planner_identity(&boot), json!({}))
+        .await
+        .unwrap();
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({"body": "# First\n", "message": "first writer", "if_doc_rev": 0}),
+        assistant_identity(&boot),
+        json!({"body": "# First\n", "message": "first writer"}),
     )
     .await
     .unwrap();
@@ -529,13 +553,13 @@ async fn whole_document_write_requires_if_doc_rev_and_rejects_stale_planner_writ
         &boot,
         TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({"body": "# Stale\n", "message": "second writer", "if_doc_rev": 0}),
+        json!({"body": "# Stale\n", "message": "second writer"}),
     )
     .await
     .unwrap_err();
     assert_eq!(conflict.code, -32001);
     assert!(conflict.message.contains("current doc_rev is 1"));
-    assert!(conflict.message.contains("expected if_doc_rev 0"));
+    assert!(conflict.message.contains("this session last read docRev 0"));
     assert!(conflict.message.contains("re-read"));
     let read = call_tool(&boot, TOOL_REPORT_READ, planner_identity(&boot), json!({}))
         .await
@@ -552,15 +576,13 @@ async fn write_markdown_replaces_body_and_emits_card_updated() {
     let sub = tokio::spawn(async move { collect_n(&events, 2).await });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let out = call_tool(
+    let out = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Goal\n\nrefactored everything\n",
             "summary": "done refactoring",
-            "message": "rewrite report",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "rewrite report"
         }),
     )
     .await
@@ -660,7 +682,7 @@ async fn commit_requires_non_empty_message() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "summary": "missing message", "if_doc_rev": current_doc_rev(&boot).await }),
+        json!({ "summary": "missing message"}),
     )
     .await
     .expect_err("missing message must be rejected");
@@ -674,7 +696,7 @@ async fn commit_requires_non_empty_message() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "summary": "empty message", "message": "\n\t ", "if_doc_rev": current_doc_rev(&boot).await }),
+        json!({ "summary": "empty message", "message": "\n\t "}),
     )
     .await
     .expect_err("empty message must be rejected");
@@ -690,14 +712,12 @@ async fn write_markdown_records_agent_message_and_leaves_the_track_open() {
     let boot = boot().await;
     let mut rx = boot.ctx.events.subscribe();
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "plain body\n",
-            "message": "plain write",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "plain write"
         }),
     )
     .await
@@ -751,14 +771,12 @@ async fn write_markdown_with_a_lifecycle_key_is_refused_and_writes_nothing() {
         .unwrap();
     let mut rx = boot.ctx.events.subscribe();
 
-    let err = call_tool(
+    let err = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "should rollback\n",
             "message": "illegal report lifecycle",
-            "if_doc_rev": current_doc_rev(&boot).await,
             "lifecycle": "done"
         }),
     )
@@ -791,15 +809,13 @@ async fn write_markdown_with_a_lifecycle_key_is_refused_and_writes_nothing() {
 #[tokio::test]
 async fn commit_emits_track_report_edited_alongside_card_updated() {
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
             "summary": "before-summary",
-            "message": "seed report",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "seed report"
         }),
     )
     .await
@@ -856,15 +872,13 @@ async fn commit_emits_track_report_edited_alongside_card_updated() {
 #[tokio::test]
 async fn write_markdown_with_unchanged_content_still_emits_track_report_edited() {
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "stable body\n",
             "summary": "stable summary",
-            "message": "first stable report",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "first stable report"
         }),
     )
     .await
@@ -889,15 +903,13 @@ async fn write_markdown_with_unchanged_content_still_emits_track_report_edited()
     let sub = tokio::spawn(async move { collect_n(&events, 2).await });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "stable body\n",
             "summary": "stable summary",
-            "message": "second stable report",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "second stable report"
         }),
     )
     .await
@@ -952,15 +964,13 @@ async fn write_markdown_with_unchanged_content_still_emits_track_report_edited()
 #[tokio::test]
 async fn track_report_edited_persisted_with_track_and_card_scope_columns() {
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "scoped body\n",
             "summary": "scoped summary",
-            "message": "scoped report",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "scoped report"
         }),
     )
     .await
@@ -1031,24 +1041,21 @@ async fn historical_task_context_advanced_payload_survives_events_since() {
 #[tokio::test]
 async fn write_markdown_preserves_summary_when_omitted() {
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "a",
             "summary": "preserved",
-            "message": "set summary",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "set summary"
         }),
     )
     .await
     .unwrap();
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "body": "b", "message": "preserve summary", "if_doc_rev": current_doc_rev(&boot).await }),
+        json!({ "body": "b", "message": "preserve summary"}),
     )
     .await
     .unwrap();
@@ -1067,11 +1074,10 @@ async fn write_markdown_preserves_summary_when_omitted() {
 #[tokio::test]
 async fn write_markdown_rejects_missing_body() {
     let boot = boot().await;
-    let err = call_tool(
+    let err = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "summary": "no body", "message": "missing body", "if_doc_rev": current_doc_rev(&boot).await }),
+        json!({ "summary": "no body", "message": "missing body"}),
     )
     .await
     .expect_err("missing body must be rejected");
@@ -1082,14 +1088,12 @@ async fn write_markdown_rejects_missing_body() {
 #[tokio::test]
 async fn commit_records_agent_message_and_leaves_the_track_open() {
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
-            "message": "seed edit no lifecycle",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "seed edit no lifecycle"
         }),
     )
     .await
@@ -1131,14 +1135,12 @@ async fn commit_records_agent_message_and_leaves_the_track_open() {
 #[tokio::test]
 async fn commit_with_a_lifecycle_key_is_refused_and_writes_nothing() {
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
-            "message": "seed illegal edit",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "seed illegal edit"
         }),
     )
     .await
@@ -1260,15 +1262,13 @@ async fn planner_from_different_track_cannot_reach_this_track_report() {
         area_id: area2.id.as_str().to_string(),
         thread_id: "planner2-thread".to_string(),
     };
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner2_identity,
         json!({
             "body": "track 2 only\n",
             "summary": "track 2",
-            "message": "track 2 report",
-            "if_doc_rev": current_doc_rev(&boot).await
+            "message": "track 2 report"
         }),
     )
     .await
@@ -1316,15 +1316,13 @@ async fn seed_large_body(boot: &Boot) -> String {
         "fixture body is {} bytes",
         body.len()
     );
-    call_tool(
+    read_then_write_markdown(
         boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
         json!({
             "body": body,
             "summary": "a large report",
-            "message": "seed large body",
-            "if_doc_rev": current_doc_rev(boot).await
+            "message": "seed large body"
         }),
     )
     .await
@@ -1382,12 +1380,14 @@ async fn full_read_summary_line_stays_short_for_a_long_cjk_summary() {
     let boot = boot().await;
     let body = seed_large_body(&boot).await;
     let summary = "报".repeat(200);
+    call_tool(&boot, TOOL_REPORT_READ, planner_identity(&boot), json!({}))
+        .await
+        .expect("planner reads before the summary commit");
     call_tool(
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
         json!({
-            "if_doc_rev": current_doc_rev(&boot).await,
             "message": "long cjk summary",
             "summary": summary,
         }),
@@ -1552,27 +1552,36 @@ async fn select_blocks_returns_only_those_blocks_in_document_order_with_markers(
 
 #[tokio::test]
 async fn rev_conflicts_carry_the_current_revisions_in_error_data() {
-    use calm_server::mcp_server::tools::track_report_blocks::{
-        RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_UPSERT,
-    };
+    use calm_server::mcp_server::tools::track_report_blocks::RPC_REV_CONFLICT;
     let boot = boot().await;
     seed_large_body(&boot).await;
+    let read = call_tool(&boot, TOOL_REPORT_READ, planner_identity(&boot), json!({}))
+        .await
+        .unwrap();
+    let id = read["blocks"][0]["id"].as_str().unwrap().to_string();
+    let other = upsert_block(
+        &boot,
+        assistant_identity(&boot),
+        json!({"id": id, "kind": "prose", "markdown": "# One\n\nby another writer\n"}),
+    )
+    .await
+    .expect("another session edits the first block");
+    let rev = other["rev"].as_u64().unwrap();
     let current = current_doc_rev(&boot).await;
-    assert!(current > 0);
 
     for (tool, args) in [
         (
             TOOL_REPORT_COMMIT,
-            json!({"if_doc_rev": current - 1, "message": "stale commit", "summary": "stale"}),
+            json!({"message": "stale commit", "summary": "stale"}),
         ),
         (
             TOOL_REPORT_WRITE_MARKDOWN,
-            json!({"body": "# stale\n", "message": "stale write", "if_doc_rev": current - 1}),
+            json!({"body": "# stale\n", "message": "stale write"}),
         ),
     ] {
         let err = call_tool(&boot, tool, planner_identity(&boot), args)
             .await
-            .expect_err("stale if_doc_rev must conflict");
+            .expect_err("a stale read must conflict");
         assert_eq!(err.code, RPC_REV_CONFLICT, "{tool}: {err:?}");
         assert!(
             err.message
@@ -1586,27 +1595,16 @@ async fn rev_conflicts_carry_the_current_revisions_in_error_data() {
         );
     }
 
-    let index = call_tool(
-        &boot,
-        TOOL_REPORT_READ,
-        planner_identity(&boot),
-        json!({"select": "index"}),
-    )
-    .await
-    .unwrap();
-    let block = &index["blocks"][0];
-    let (id, rev) = (
-        block["id"].as_str().unwrap(),
-        block["rev"].as_u64().unwrap(),
-    );
     let err = call_tool(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"id": id, "kind": "prose", "markdown": "# stomp\n", "if_rev": rev + 41}),
+        json!({"message": "stomp", "ops": [
+            {"op": "upsert", "id": id, "kind": "prose", "markdown": "# stomp\n"}
+        ]}),
     )
     .await
-    .expect_err("stale if_rev must conflict");
+    .expect_err("a stale block read must conflict");
     assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
     assert!(
         err.message.contains(&format!("current rev is {rev}")),

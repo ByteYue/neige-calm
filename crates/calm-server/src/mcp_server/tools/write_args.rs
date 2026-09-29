@@ -28,9 +28,8 @@ pub(crate) fn parse_write_args(args: &Value, tool: &str) -> Result<String, RpcEr
         .to_string())
 }
 
-/// The optional twin of [`parse_write_args`] for the block channel
-/// (`calm.report.blocks.upsert`, `calm.report.write_markdown`): `message`
-/// may be omitted, but when present it must be a non-empty string.
+/// The optional twin of [`parse_write_args`] for `calm.report.write_markdown`:
+/// `message` may be omitted, but when present it must be a non-empty string.
 pub(crate) fn parse_optional_write_args(
     args: &Value,
     tool: &str,

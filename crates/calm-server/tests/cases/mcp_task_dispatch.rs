@@ -1,6 +1,7 @@
 //! Production registry dispatch coverage; no provider or real Worker is started.
 use crate::mcp_track_report::{
-    Boot, assistant_identity, boot as report_boot, call_tool, planner_identity, worker_identity,
+    Boot, assistant_identity, boot as report_boot, call_tool, planner_identity, read_then_commit,
+    upsert_block, worker_identity,
 };
 use calm_server::mcp_server::tools::task_dispatch::TOOL_TASK_DISPATCH;
 use calm_server::track_report::TrackReportPayload;
@@ -99,8 +100,7 @@ async fn track_state_lists_a_dispatched_task_as_pending_without_a_worker() {
 async fn dispatch_creates_planner_declaration_and_replays_exact_contract_without_writes() {
     let b = boot().await;
     policy(&b, "auto-declare").await;
-    call_tool(&b, "calm.report.blocks.upsert", planner_identity(&b),
-        json!({"kind":"prose","markdown":"# Existing notes\nPreserve this unrelated report block.","if_doc_rev":0})).await.unwrap();
+    upsert_block(&b, planner_identity(&b), json!({"kind":"prose","markdown":"# Existing notes\nPreserve this unrelated report block."})).await.unwrap();
     let before = payload(&b).await;
     let first = dispatch(&b, args()).await.unwrap();
     let after = payload(&b).await;
@@ -338,11 +338,10 @@ async fn dispatch_replay_after_declaration_edit_or_removal_preserves_original_id
         .unwrap();
     let mut changed = block.payload.clone();
     changed["goal"] = json!("Edited through the report");
-    call_tool(
+    upsert_block(
         &b,
-        "calm.report.blocks.upsert",
         planner_identity(&b),
-        json!({"id":block.id,"kind":"task","payload":changed,"if_rev":block.rev}),
+        json!({"id":block.id,"kind":"task","payload":changed}),
     )
     .await
     .unwrap();
@@ -364,11 +363,10 @@ async fn dispatch_replay_after_declaration_edit_or_removal_preserves_original_id
         .into_iter()
         .find(|x| x.kind == "task")
         .unwrap();
-    call_tool(
+    read_then_commit(
         &b,
-        "calm.report.blocks.delete",
         planner_identity(&b),
-        json!({"id":block.id,"if_rev":block.rev}),
+        json!([{"op": "delete", "id":block.id}]),
     )
     .await
     .unwrap();

@@ -18,10 +18,7 @@ fn expected_planner_toolset() -> Vec<&'static str> {
         "calm.preview.register",
         "calm.preview.unregister",
         "calm.ratify.request",
-        "calm.report.blocks.delete",
         "calm.report.blocks.kinds",
-        "calm.report.blocks.move",
-        "calm.report.blocks.upsert",
         "calm.report.commit",
         "calm.report.links.backlinks",
         "calm.report.read",
@@ -108,13 +105,19 @@ async fn tools_list_for_planner_role_does_not_leak_aliases() {
     }
 }
 
-/// #1874: the Planner writes the report through `commit` and `write_markdown` only; the two
-/// compatibility writers are neither listed nor callable under their old names.
+/// #1874 / #1883: the Planner writes the report through `commit` and `write_markdown` only; the
+/// retired writers are neither listed nor callable under their old names.
 #[tokio::test]
 async fn retired_report_write_and_edit_are_neither_listed_nor_registered() {
     let names = tools_list_names_for_role(CardRole::Planner).await;
     let registry = calm_server::mcp_server::build_default_registry();
-    for retired in ["calm.report.write", "calm.report.edit"] {
+    for retired in [
+        "calm.report.write",
+        "calm.report.edit",
+        "calm.report.blocks.upsert",
+        "calm.report.blocks.move",
+        "calm.report.blocks.delete",
+    ] {
         assert!(
             !names.iter().any(|name| name == retired),
             "retired report writer in the Planner's tools/list: {retired}; names={names:?}",
@@ -152,19 +155,18 @@ async fn tools_list_for_worker_role_returns_completion_tools() {
 }
 
 /// `calm.report.read` is deliberately absent: an assistant can call it, but its descriptor is visible only to Planner.
+/// #1883: the single-op `calm.report.blocks.*` writers are gone; the assistant writes through `commit`.
 #[tokio::test]
-async fn tools_list_for_assistant_role_returns_block_channel_only() {
+async fn tools_list_for_assistant_role_returns_the_report_write_surface_only() {
     let names = tools_list_names_for_role(CardRole::Assistant).await;
     assert_eq!(
         names,
         vec![
-            "calm.report.blocks.delete",
             "calm.report.blocks.kinds",
-            "calm.report.blocks.move",
-            "calm.report.blocks.upsert",
+            "calm.report.commit",
             "calm.report.write_markdown",
         ],
-        "assistant tools/list must be exactly the report block channel",
+        "assistant tools/list must be exactly the report write surface",
     );
 }
 

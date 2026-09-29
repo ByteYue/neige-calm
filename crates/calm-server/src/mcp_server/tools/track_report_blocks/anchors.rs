@@ -1,4 +1,4 @@
-//! `calm.report.commit`'s default anchors (#1877): what this session last read, from the read ledger.
+//! `calm.report.commit`'s anchors (#1877): what this session last read, from the read ledger.
 
 use super::required_string;
 use crate::mcp_server::framing::RpcError;
@@ -20,7 +20,7 @@ pub(super) fn parse_section_op(
             "{at}: op `{op}` does not take `section` (only \"replace\" and \"delete\" do)"
         )));
     }
-    if let Some(key) = ["id", "if_rev", "kind", "payload", "position", "to_index"]
+    if let Some(key) = ["id", "kind", "payload", "position", "to_index"]
         .into_iter()
         .find(|key| obj.contains_key(*key))
     {
@@ -48,19 +48,18 @@ pub(super) fn parse_section_op(
     Ok(BatchBlockOp::DeleteSection { section, read })
 }
 
-/// An id op's `if_rev`: the one passed, else the rev this session last read of that block.
+/// An id op's `if_rev`: the rev this session last read of that block.
 pub(super) fn block_anchor(
-    if_rev: Option<u32>,
     last_read: Option<&LastRead>,
     id: &str,
     at: &str,
 ) -> Result<u32, RpcError> {
-    if_rev
-        .or_else(|| last_read.and_then(|read| read.blocks.get(id).copied()))
+    last_read
+        .and_then(|read| read.blocks.get(id).copied())
         .ok_or_else(|| {
             RpcError::invalid_params(format!(
                 "{at}: block `{id}` has not been read by this session — read it first \
-                 (calm.report.read {{ select: {{ blocks: [\"{id}\"] }} }}) or pass `if_rev`"
+                 (calm.report.read {{ select: {{ blocks: [\"{id}\"] }} }})"
             ))
         })
 }

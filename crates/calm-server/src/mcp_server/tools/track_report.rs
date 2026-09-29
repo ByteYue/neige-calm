@@ -1,5 +1,5 @@
 //! Track-report MCP read tool `calm.report.read`, plus the report resolution helpers the write tools in `track_report_blocks` share.
-//! `read` admits the Planner and the Assistant (the only source of `docRev` / per-block `rev`).
+//! `read` admits the Planner and the Assistant; its text is what anchors their report writes.
 
 use crate::mcp_server::framing::RpcError;
 use crate::mcp_server::registry::{
@@ -142,7 +142,7 @@ pub(crate) async fn report_read(
     identity: ToolCallIdentity,
     args: Value,
 ) -> Result<Value, RpcError> {
-    // Assistant reads too: this is the ONLY source of `docRev` / per-block `rev`s, which every block-channel write needs. The write channel stays Planner-only.
+    // Assistant reads too: this is the read every agent report write is anchored by (#1883).
     require_role_any(&identity, &[CardRole::Planner, CardRole::Assistant])?;
     let select = parse_select_arg(&args, "calm.report.read")?;
     let with_markers = match args.get("with_markers") {
@@ -160,7 +160,7 @@ pub(crate) async fn report_read(
     let snapshot = load_report_read_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
         .await
         .map_err(|e| RpcError::internal(format!("track_report: {e}")))?;
-    // The index is always present; it is what a `docRev` / `if_rev` retry needs.
+    // The index is always present.
     let all = || {
         snapshot
             .blocks
@@ -186,7 +186,7 @@ pub(crate) async fn report_read(
             &identity.session_id,
             &identity.card_id,
             report_card.id.as_str(),
-            Some(snapshot.doc_rev),
+            snapshot.doc_rev,
             &snapshot.blocks,
             rendered,
         );

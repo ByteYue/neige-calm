@@ -235,9 +235,8 @@ pub(crate) fn not_a_report(path: &str, selection: &Selection) -> RpcError {
     ))
 }
 
-/// The caller's own `report.md`, whole or narrowed, from one snapshot. Every text it returns is
-/// recorded as this session's read of those blocks (#1877), but not as a read of the docRev: cat
-/// shows no summary, docRev or index, so it cannot anchor a whole-document write.
+/// The caller's own `report.md`, whole or narrowed, from one snapshot. A view only: it anchors no
+/// report write (#1883).
 async fn own_report(
     ctx: &Arc<AppContext>,
     identity: &ToolCallIdentity,
@@ -248,29 +247,13 @@ async fn own_report(
     let snapshot = load_report_doc_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
         .await
         .map_err(|e| RpcError::internal(format!("track_file: {e}")))?;
-    let (content, rendered) = match selection {
+    match selection {
         Some(selection) => {
             let ids = selection.block_ids(&snapshot.blocks)?;
-            (report_blocks_content(&snapshot.blocks, &ids)?, ids)
+            report_blocks_content(&snapshot.blocks, &ids)
         }
-        None => (
-            markdown_content(snapshot.body.clone())?,
-            snapshot
-                .blocks
-                .iter()
-                .map(|block| block.id.clone())
-                .collect(),
-        ),
-    };
-    ctx.read_ledger.record(
-        &identity.session_id,
-        &identity.card_id,
-        report_card.id.as_str(),
-        None,
-        &snapshot.blocks,
-        &rendered,
-    );
-    Ok(content)
+        None => markdown_content(snapshot.body),
+    }
 }
 
 /// A report narrowed to `ids`: the exact `text` of `calm.report.read { select: { blocks: ids } }`.

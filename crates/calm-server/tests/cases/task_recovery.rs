@@ -1,6 +1,5 @@
 //! Task continuity through the public Planner entry points.
 
-use crate::mcp_track_report::{boot, call_tool, planner_identity, worker_identity};
 use serde_json::json;
 
 #[tokio::test]
@@ -26,13 +25,13 @@ async fn task_recovery_planner_surface_is_available_and_worker_is_forbidden() {
     );
 }
 
-use crate::mcp_track_report::Boot;
+use crate::mcp_track_report::{
+    Boot, boot, call_tool, planner_identity, upsert_block, worker_identity,
+};
 use calm_server::db::sqlite::{
     TaskReporter, begin_immediate_tx, task_claim_pending_tx, task_fail_from_worker_tx,
     task_report_success_from_worker_tx,
 };
-use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
 use calm_server::model::{Task, TaskStatus};
 use calm_server::task_context::TaskContextMonitor;
 use serde_json::Value;
@@ -43,14 +42,10 @@ pub(super) fn declaration(key: &str, dependencies: &[&str]) -> Value {
 }
 
 pub(super) async fn declare(boot: &Boot, payload: Value) -> (String, u64) {
-    let report = call_tool(boot, TOOL_REPORT_READ, planner_identity(boot), json!({}))
-        .await
-        .unwrap();
-    let out = call_tool(
+    let out = upsert_block(
         boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(boot),
-        json!({"kind": "task", "payload": payload, "if_doc_rev": report["docRev"]}),
+        json!({"kind": "task", "payload": payload}),
     )
     .await
     .unwrap();
@@ -277,16 +272,15 @@ async fn task_recovery_planner_limit_and_late_worker_result_are_fenced() {
 #[tokio::test]
 async fn task_recovery_contract_change_is_rejected_before_allocation() {
     let boot = boot().await;
-    let (id, rev) = declare(&boot, declaration("b", &[])).await;
+    let (id, _) = declare(&boot, declaration("b", &[])).await;
     let b = current(&boot, "b").await;
     finish(&boot, &b, false).await;
     let mut changed = declaration("b", &[]);
     changed["command"] = json!("false");
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"id": id, "kind": "task", "payload": changed, "if_rev": rev}),
+        json!({"id": id, "kind": "task", "payload": changed}),
     )
     .await
     .unwrap();
@@ -453,18 +447,17 @@ async fn task_recovery_closed_track_and_declared_wait_never_grant_planner_retry(
 #[tokio::test]
 async fn task_recovery_pending_rebuild_keeps_identity_and_changed_contract_cannot_spawn() {
     let boot = boot().await;
-    let (id, rev) = declare(&boot, declaration("b", &[])).await;
+    let (id, _) = declare(&boot, declaration("b", &[])).await;
     let b = current(&boot, "b").await;
     finish(&boot, &b, false).await;
     recover(&boot, &b, "request").await;
     let recovered = current(&boot, "b").await;
     let mut payload = declaration("b", &[]);
     payload["ready"] = json!(false);
-    let out = call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"id": id, "kind": "task", "payload": payload, "if_rev": rev}),
+        json!({"id": id, "kind": "task", "payload": payload}),
     )
     .await
     .unwrap();
@@ -486,21 +479,19 @@ async fn task_recovery_pending_rebuild_keeps_identity_and_changed_contract_canno
     assert_eq!(view.current.as_ref().unwrap().attempt_id, recovered.id);
     assert_eq!(view.current.as_ref().unwrap().status, "awaiting_projection");
     payload["ready"] = json!(true);
-    let out = call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"id": id, "kind": "task", "payload": payload, "if_rev": out["rev"]}),
+        json!({"id": id, "kind": "task", "payload": payload}),
     )
     .await
     .unwrap();
     assert_eq!(current(&boot, "b").await.id, recovered.id);
     payload["command"] = json!("false");
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"id": id, "kind": "task", "payload": payload, "if_rev": out["rev"]}),
+        json!({"id": id, "kind": "task", "payload": payload}),
     )
     .await
     .unwrap();
@@ -524,7 +515,7 @@ async fn task_recovery_pending_rebuild_keeps_identity_and_changed_contract_canno
 #[tokio::test]
 async fn task_recovery_spawn_rechecks_current_declaration_permission_after_claim() {
     let boot = boot().await;
-    let (block_id, revision) = declare(&boot, declaration("b", &[])).await;
+    let (block_id, _) = declare(&boot, declaration("b", &[])).await;
     let b = current(&boot, "b").await;
     finish(&boot, &b, false).await;
     recover(&boot, &b, "request").await;
@@ -550,11 +541,10 @@ async fn task_recovery_spawn_rechecks_current_declaration_permission_after_claim
     tx.commit().await.unwrap();
     let mut withdrawn = declaration("b", &[]);
     withdrawn["ready"] = json!(false);
-    call_tool(
+    upsert_block(
         &boot,
-        "calm.report.blocks.upsert",
         planner_identity(&boot),
-        json!({"id":block_id,"kind":"task","payload":withdrawn,"if_rev":revision}),
+        json!({"id":block_id,"kind":"task","payload":withdrawn}),
     )
     .await
     .unwrap();

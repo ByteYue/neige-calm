@@ -15,7 +15,6 @@ use calm_server::event::EventBus;
 use calm_server::harness::HarnessRegistry;
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
 use calm_server::mcp_server::{McpServer, ToolRegistry, auth, build_default_registry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewPlugin, NewTrack, now_ms};
 use calm_server::operation::codex_adapter::CodexWorkerAdapter;
@@ -563,23 +562,12 @@ pub fn spawn_dispatcher_with_harness(fx: &Fixture) -> Dispatcher {
 
 pub async fn plan_codex_task(fx: &Fixture, key: &str, goal: &str) {
     fx.used_injected_plan.store(true, Ordering::SeqCst);
-    let report = fx
-        .repo_dyn
-        .card_get(fx.report_card_id.as_str())
-        .await
-        .expect("read report card")
-        .expect("report card");
-    let report: TrackReportPayload = serde_json::from_value(report.payload).unwrap();
-    let handler = fx
-        .registry
-        .lookup(TOOL_REPORT_BLOCKS_UPSERT)
-        .expect("task block writer registered");
-    handler(
-        fx.ctx.clone(),
+    super::report_writes::upsert_block(
+        &fx.ctx,
+        &fx.registry,
         planner_identity(fx),
         json!({
             "kind": "task",
-            "if_doc_rev": report.doc_rev,
             "payload": {
                 "key": key,
                 "kind": "codex",

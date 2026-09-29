@@ -1,5 +1,5 @@
 //! One real scheduler/Operation/native-report loop with a runtime-owned fake provider.
-use crate::mcp_track_report::{boot, call_tool, planner_identity};
+use crate::mcp_track_report::{boot, call_tool, planner_identity, upsert_block};
 use crate::task_recovery::{current, declare};
 use calm_server::{
     isolated_codex::config::{Backend, IsolatedCodexConfig},
@@ -214,7 +214,7 @@ async fn run_case(scenario: &str, expected: calm_server::model::TaskStatus) {
     let declaration = json!({"key":"pilot","kind":"codex","goal":"Write result.txt containing 42 and report completion through native MCP.",
         "declared_by":calm_types::report_blocks::tasks::PLANNER_DECLARATION_AUTHOR,"ready":true,
         "no_gate_reason":"Report-driven single-task fixture.","context":{"neige_execution":{"version":"isolated-codex-v1","workspace":"empty"}}});
-    let (block, revision) = declare(&boot, declaration.clone()).await;
+    let (block, _) = declare(&boot, declaration.clone()).await;
     let task = current(&boot, "pilot").await;
     let scheduler = state.dispatcher.scheduler();
     scheduler.mark_boot_sweep_complete();
@@ -295,11 +295,10 @@ async fn run_case(scenario: &str, expected: calm_server::model::TaskStatus) {
         );
         let mut withdrawn = declaration.clone();
         withdrawn["ready"] = json!(false);
-        call_tool(
+        upsert_block(
             &boot,
-            calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
-            json!({"id":block,"kind":"task","payload":withdrawn,"if_rev":revision}),
+            json!({"id":block,"kind":"task","payload":withdrawn}),
         )
         .await
         .unwrap();

@@ -417,7 +417,7 @@ async fn rest_whole_document_write_stomping_a_data_block_is_refused_and_writes_n
         )
         .unwrap();
         assert!(text.contains(&id), "{body:?} → {text}");
-        assert!(text.contains("blocks.upsert"), "guidance: {text}");
+        assert!(text.contains("block-level endpoints"), "guidance: {text}");
     }
     assert_eq!(report().await, before);
     let no_event = tokio::time::timeout(Duration::from_millis(150), sub.recv()).await;

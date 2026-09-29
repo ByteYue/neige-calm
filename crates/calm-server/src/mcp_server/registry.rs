@@ -188,7 +188,7 @@ pub struct AppContext {
     pub series_resolver: Arc<crate::report_series::SeriesResolver>,
     /// Transient ring of Planner plugin results `calm.source.capture` reads.
     pub plugin_results: Arc<crate::plugin_results::PluginResults>,
-    /// What each session last read of a report; `calm.report.commit`'s default anchors (#1877).
+    /// What each session last read of a report: the anchors of the agent report writes (#1877, #1883).
     pub read_ledger: Arc<crate::report_read_ledger::ReadLedger>,
     /// #1780 preview gateway registrations; the gateway listeners read the same `Arc`.
     pub preview: Arc<crate::preview::PreviewRegistry>,

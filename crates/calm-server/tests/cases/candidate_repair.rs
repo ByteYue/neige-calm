@@ -1,5 +1,6 @@
 //! One linked repair through production MCP, report writer, scheduler and retained files.
 use super::*;
+use crate::mcp_track_report::upsert_block;
 
 const FINDINGS: [&str; 2] = [
     "Reject nonnumeric input explicitly",
@@ -427,11 +428,10 @@ async fn edit_task(fx: &Fixture, key: &str, pointer: &str, replacement: Value) -
         .unwrap();
     let mut payload = block.payload;
     let previous = std::mem::replace(payload.pointer_mut(pointer).unwrap(), replacement);
-    call_tool(
+    upsert_block(
         &fx.boot,
-        "calm.report.blocks.upsert",
         planner_identity(&fx.boot),
-        json!({"id":block.id,"kind":"task","payload":payload,"if_rev":block.rev}),
+        json!({"id":block.id,"kind":"task","payload":payload}),
     )
     .await
     .unwrap();

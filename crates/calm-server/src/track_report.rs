@@ -359,12 +359,13 @@ pub enum ReportDocOp {
     },
     /// `calm.report.write_markdown`: wholesale replace whose body may carry `<!-- neige:b_xxxx -->`
     /// marker lines, stripped in-tx and used as exact id-reuse hints. `summary: None` keeps the current summary.
+    /// `if_doc_rev` is the docRev at which the session last read the whole report.
     WriteMarkdown {
         summary: Option<String>,
         body: String,
         if_doc_rev: u64,
     },
-    /// `calm.report.blocks.upsert`. `id: None` creates and requires `if_doc_rev`; `id: Some`
+    /// The block-level REST upsert. `id: None` creates and requires `if_doc_rev`; `id: Some`
     /// replaces and requires `if_rev`. `content` is the block's flat text.
     UpsertBlock {
         id: Option<String>,
@@ -374,17 +375,17 @@ pub enum ReportDocOp {
         if_doc_rev: Option<u64>,
         position: Option<usize>,
     },
-    /// `calm.report.blocks.move`: reorder only, rev untouched; requires `if_doc_rev` because it mutates block order.
+    /// The block-level REST move: reorder only, rev untouched; requires `if_doc_rev` because it mutates block order.
     MoveBlock {
         id: String,
         to_index: usize,
         if_doc_rev: u64,
     },
-    /// `calm.report.blocks.delete`: `if_rev` is mandatory.
+    /// The block-level REST delete: `if_rev` is mandatory.
     DeleteBlock { id: String, if_rev: u32 },
     /// `calm.report.commit`: an ordered list of block ops + optional summary under ONE document anchor.
     /// A failure anywhere aborts the whole persist transaction; the doc rev advances exactly once.
-    /// A `Delete` inside a batch carries no live-task exemption (only the single `DeleteBlock` may retire one).
+    /// A `Delete` op may retire a live task it names by id; a section op may not.
     Batch {
         doc_anchor: DocAnchor,
         summary: Option<String>,
@@ -395,13 +396,11 @@ pub enum ReportDocOp {
 /// The document-wide anchor of a [`ReportDocOp::Batch`] (#1877).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocAnchor {
-    /// The caller's `if_doc_rev`: always checked.
-    Explicit(u64),
     /// The `docRev` this session last read: checked only when the batch needs a document anchor
     /// (a `summary`, a created or moved block, a created section), so a section or block edit is not
     /// refused over an unrelated edit elsewhere.
     LastRead(u64),
-    /// No `if_doc_rev` and no read by this session: a batch that needs the anchor is refused.
+    /// No read by this session: a batch that needs the anchor is refused.
     Unread,
 }
 
@@ -657,7 +656,7 @@ pub(crate) fn apply_report_op_traced(
             body,
             if_doc_rev,
         } => {
-            check_doc_rev(doc, *if_doc_rev)?;
+            check_doc_anchor(doc, DocAnchor::LastRead(*if_doc_rev), true)?;
             let summary = tx_summary(doc, summary)?;
             let marked = calm_types::report_blocks::strip_markers_and_split(body);
             // Normalize AFTER the markers are stripped: a `with_markers` read puts the marker on line 1
@@ -865,13 +864,20 @@ pub(crate) fn apply_report_op_traced(
             .map(|block| block.id.clone())
             .collect(),
     };
-    // The block-level delete endpoint is the ONLY way a live task declaration may leave the
+    // A delete that names the block by id is the ONLY way a live task declaration may leave the
     // document. `op` is the normalized op, so a user delete rewritten into a tombstone grants no exemption.
-    let block_delete_id = match &op {
-        ReportDocOp::DeleteBlock { id, .. } => Some(id.as_str()),
-        _ => None,
+    let deleted_by_id: Vec<&str> = match &op {
+        ReportDocOp::DeleteBlock { id, .. } => vec![id.as_str()],
+        ReportDocOp::Batch { ops, .. } => ops
+            .iter()
+            .filter_map(|op| match op {
+                BatchBlockOp::Delete { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     };
-    guard_task_declarations(&before, &after, author, block_delete_id)?;
+    guard_task_declarations(&before, &after, author, &deleted_by_id)?;
     Ok(ReportOpTrace {
         block: outcome,
         written_prose_block_ids,
@@ -895,12 +901,10 @@ fn apply_persisted_report_op(
     Ok((trace, doc_rev))
 }
 
-/// A batch's document anchor: an explicit one always, the session's last read only when `needed`.
-/// `Ok(true)` when the doc is the one the anchor names (checked, or equal though not needed), so the
-/// author knew the whole document before this write.
+/// A document anchor, checked only when `needed`. `Ok(true)` when the doc is the one the anchor
+/// names (checked, or equal though not needed), so the author knew the whole document before this write.
 fn check_doc_anchor(doc: &ReportDoc, anchor: DocAnchor, needed: bool) -> Result<bool, CalmError> {
     match anchor {
-        DocAnchor::Explicit(expected) => check_doc_rev(doc, expected).map(|()| true),
         DocAnchor::LastRead(read) => {
             let current = doc
                 .doc_rev()
@@ -1432,7 +1436,7 @@ mod tests {
         apply_report_op(
             &mut doc,
             &ReportDocOp::Batch {
-                doc_anchor: DocAnchor::Explicit(0),
+                doc_anchor: DocAnchor::LastRead(0),
                 summary: None,
                 ops: vec![BatchBlockOp::Upsert {
                     id: None,
@@ -1453,7 +1457,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Batch {
-                doc_anchor: DocAnchor::Explicit(0),
+                doc_anchor: DocAnchor::LastRead(0),
                 summary: None,
                 ops: vec![BatchBlockOp::Upsert {
                     id: None,
@@ -1518,7 +1522,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Batch {
-                doc_anchor: DocAnchor::Explicit(0),
+                doc_anchor: DocAnchor::LastRead(0),
                 summary: None,
                 ops: vec![BatchBlockOp::Upsert {
                     id: Some(id),

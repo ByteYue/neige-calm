@@ -213,21 +213,12 @@ async fn series_route_404_for_missing_or_non_series_block() {
     let fx = SeriesFixture::boot(FixtureOptions::default()).await;
     let route = Route::new(&fx).await;
     let series_block = fx.write_series_block(seam_fixture()["block"].clone()).await;
-    let prose_id = {
-        use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
-        let read = fx
-            .read(json!({ "resolve": { series_block.clone(): "none" } }))
-            .await;
-        let out = crate::mcp_track_report::call_tool(
-            &fx.boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
-            crate::mcp_track_report::planner_identity(&fx.boot),
-            json!({ "kind": "prose", "markdown": "words", "if_doc_rev": read["docRev"] }),
-        )
-        .await
-        .expect("prose upsert");
-        out["id"].as_str().unwrap().to_string()
-    };
+    let prose_id = fx
+        .upsert(json!({ "kind": "prose", "markdown": "words" }))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let (status, body) = route.get(fx.track_id(), "b-nope", "?rev=1").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");

@@ -842,11 +842,18 @@ async fn isolated_plugin_dispatch_environment_tracks_edited_current_declaration(
     payload["context"]["neige_execution"]["plugin_tools"] = json!([COLLIDING_EXPOSED_NAME]);
     send_frame(
         &mut wr,
+        tools_call_frame(3, "calm.report.read", &thread, json!({})),
+    )
+    .await;
+    let read = recv_frame(&mut rd).await;
+    assert!(read.get("error").is_none(), "{read}");
+    send_frame(
+        &mut wr,
         tools_call_frame(
-            3,
-            "calm.report.blocks.upsert",
+            4,
+            "calm.report.commit",
             &thread,
-            json!({"id":block["id"],"kind":"task","payload":payload,"if_rev":block["rev"]}),
+            json!({"message":"grant the colliding tool","ops":[{"op":"upsert","id":block["id"],"kind":"task","payload":payload}]}),
         ),
     )
     .await;
@@ -854,7 +861,7 @@ async fn isolated_plugin_dispatch_environment_tracks_edited_current_declaration(
     assert!(edit.get("error").is_none(), "{edit}");
     send_frame(
         &mut wr,
-        tools_call_frame(4, "calm.task.dispatch", &thread, args),
+        tools_call_frame(5, "calm.task.dispatch", &thread, args),
     )
     .await;
     let replay = recv_frame(&mut rd).await;

@@ -1,6 +1,6 @@
 //! Review regressions against the actual MCP dispatch and report writer.
 use crate::mcp_task_dispatch::{args, boot, counts, dispatch, payload, policy};
-use crate::mcp_track_report::{Boot, call_tool, planner_identity};
+use crate::mcp_track_report::{Boot, planner_identity, upsert_block};
 use serde_json::json;
 
 async fn claim_dispatch(b: &Boot, key: &str) {
@@ -47,11 +47,10 @@ async fn dispatch_acceptance_drift_remains_visible_after_claim_and_ready_changes
         .unwrap();
     let mut changed = block.payload.clone();
     changed["acceptance"] = json!("A different acceptance contract");
-    call_tool(
+    upsert_block(
         &b,
-        "calm.report.blocks.upsert",
         planner_identity(&b),
-        json!({"id":block.id,"kind":"task","payload":changed,"if_rev":block.rev}),
+        json!({"id":block.id,"kind":"task","payload":changed}),
     )
     .await
     .unwrap();
@@ -73,11 +72,10 @@ async fn dispatch_acceptance_drift_remains_visible_after_claim_and_ready_changes
         .into_iter()
         .find(|x| x.kind == "task")
         .unwrap();
-    call_tool(
+    upsert_block(
         &b,
-        "calm.report.blocks.upsert",
         planner_identity(&b),
-        json!({"id":block.id,"kind":"task","payload":block.payload,"if_rev":block.rev}),
+        json!({"id":block.id,"kind":"task","payload":block.payload}),
     )
     .await
     .unwrap();
@@ -111,11 +109,10 @@ async fn dispatch_acceptance_drift_remains_visible_after_claim_and_ready_changes
             .unwrap();
         let mut changed = block.payload;
         changed["ready"] = json!(ready);
-        call_tool(
+        upsert_block(
             &b,
-            "calm.report.blocks.upsert",
             planner_identity(&b),
-            json!({"id":block.id,"kind":"task","payload":changed,"if_rev":block.rev}),
+            json!({"id":block.id,"kind":"task","payload":changed}),
         )
         .await
         .unwrap();

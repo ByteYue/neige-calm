@@ -62,7 +62,7 @@ async fn planner_close_stamps_closed_at_and_refuses_a_lifecycle_key() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "ops": [], "message": "old habit", "if_doc_rev": 0, "lifecycle": "done" }),
+        json!({ "ops": [], "message": "old habit", "lifecycle": "done" }),
     )
     .await
     .expect_err("a lifecycle key is refused");
