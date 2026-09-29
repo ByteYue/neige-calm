@@ -526,7 +526,7 @@ jobs:
           chmod +x "$bin/rust-lld"
           cat "$bin/rust-lld"
         env:
-          EXPERIMENT_LINKER: lld
+          EXPERIMENT_LINKER: mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -554,7 +554,7 @@ jobs:
           cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst ${EXPERIMENT_CARGO_ARGS[@]+"${EXPERIMENT_CARGO_ARGS[@]}"} --timings
           ls -l nextest-archive.tar.zst
         env:
-          EXPERIMENT_WS_PROFILE_KV: "codegen-units=256"
+          EXPERIMENT_WS_PROFILE_KV: ""
 
       - name: "experiment: collect link times, binary sizes, linker identity"
         if: always()
