@@ -158,6 +158,7 @@ async fn blocks_upsert(
         card,
         block,
         warnings,
+        ..
     } = outcome;
     let block = block
         .ok_or_else(|| RpcError::internal(format!("{tool}: upsert produced no block outcome")))?;
@@ -335,12 +336,25 @@ async fn commit(
     reject_duplicate_block_ids(&ops, tool)?;
     let doc_anchor = match (if_doc_rev, &last_read) {
         (Some(if_doc_rev), _) => DocAnchor::Explicit(if_doc_rev),
-        (None, Some(read)) => DocAnchor::LastRead(read.doc_rev),
-        (None, None) => DocAnchor::Unread,
+        (
+            None,
+            Some(LastRead {
+                doc_rev: Some(read),
+                ..
+            }),
+        ) => DocAnchor::LastRead(*read),
+        (None, _) => DocAnchor::Unread,
     };
     let track_id = track.id.clone();
     let lifecycle_before = track.lifecycle;
-    let ReportOpCommit { card, warnings, .. } = CardDecisionSink::from_app_context(&ctx)
+    let report_card_id = report_card.id.clone();
+    let ReportOpCommit {
+        card,
+        warnings,
+        authored,
+        doc_anchor_checked,
+        ..
+    } = CardDecisionSink::from_app_context(&ctx)
         .commit_report_op(
             &identity,
             track,
@@ -357,6 +371,12 @@ async fn commit(
         .await
         .map_err(|e| map_commit_err(tool, e))?;
     let doc_rev = updated_report_doc_rev(&card, tool)?;
+    ctx.read_ledger.record_authored(
+        &identity.session_id,
+        report_card_id.as_str(),
+        &authored,
+        doc_anchor_checked.then_some(doc_rev),
+    );
     // Read off the persisted payload so it is exactly what the next `calm.report.read` would return.
     let blocks = card
         .payload

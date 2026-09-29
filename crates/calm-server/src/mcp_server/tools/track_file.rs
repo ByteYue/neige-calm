@@ -13,9 +13,7 @@ use crate::model::{Card, CardRole, Track};
 use crate::report_sections::section_block_ids;
 use crate::track_fs_view::{TrackFsContent, TrackFsError, TrackFsView, normalize_path};
 use crate::track_report::ReportBlock;
-use crate::track_report_read::{
-    load_report_doc_snapshot, load_report_markdown_with_snapshot, selected_blocks_text,
-};
+use crate::track_report_read::{load_report_doc_snapshot, selected_blocks_text};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -237,8 +235,9 @@ pub(crate) fn not_a_report(path: &str, selection: &Selection) -> RpcError {
     ))
 }
 
-/// The caller's own `report.md`, whole or narrowed; every text it returns is recorded as this
-/// session's read of the report (#1877), from the same row snapshot it printed.
+/// The caller's own `report.md`, whole or narrowed, from one snapshot. Every text it returns is
+/// recorded as this session's read of those blocks (#1877), but not as a read of the docRev: cat
+/// shows no summary, docRev or index, so it cannot anchor a whole-document write.
 async fn own_report(
     ctx: &Arc<AppContext>,
     identity: &ToolCallIdentity,
@@ -246,39 +245,28 @@ async fn own_report(
 ) -> Result<Value, RpcError> {
     let (_, track) = resolve_track_for_identity(ctx, identity).await?;
     let (report_card, _) = load_report_for_track(ctx, &track).await?;
-    let internal = |e| RpcError::internal(format!("track_file: {e}"));
-    let (content, snapshot, rendered) = match selection {
+    let snapshot = load_report_doc_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
+        .await
+        .map_err(|e| RpcError::internal(format!("track_file: {e}")))?;
+    let (content, rendered) = match selection {
         Some(selection) => {
-            let snapshot = load_report_doc_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
-                .await
-                .map_err(internal)?;
             let ids = selection.block_ids(&snapshot.blocks)?;
-            (
-                report_blocks_content(&snapshot.blocks, &ids)?,
-                snapshot,
-                ids,
-            )
+            (report_blocks_content(&snapshot.blocks, &ids)?, ids)
         }
-        None => {
-            let (markdown, snapshot) =
-                load_report_markdown_with_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
-                    .await
-                    .map_err(internal)?;
-            let all = snapshot
+        None => (
+            markdown_content(snapshot.body.clone())?,
+            snapshot
                 .blocks
                 .iter()
                 .map(|block| block.id.clone())
-                .collect();
-            let content = serde_json::to_value(markdown)
-                .map_err(|e| RpcError::internal(format!("track_file: json serialization: {e}")))?;
-            (content, snapshot, all)
-        }
+                .collect(),
+        ),
     };
     ctx.read_ledger.record(
         &identity.session_id,
         &identity.card_id,
         report_card.id.as_str(),
-        snapshot.doc_rev,
+        None,
         &snapshot.blocks,
         &rendered,
     );
@@ -291,7 +279,10 @@ pub(crate) fn report_blocks_content(
     blocks: &[ReportBlock],
     ids: &[String],
 ) -> Result<Value, RpcError> {
-    let content = selected_blocks_text(blocks, ids).map_err(|id| unknown_block(blocks, id))?;
+    markdown_content(selected_blocks_text(blocks, ids).map_err(|id| unknown_block(blocks, id))?)
+}
+
+fn markdown_content(content: String) -> Result<Value, RpcError> {
     serde_json::to_value(TrackFsContent {
         content,
         content_type: "text/markdown".into(),

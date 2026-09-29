@@ -104,7 +104,8 @@ READ 用 `calm.report.read`（或 `neige cat report.md`）。第一次整读之�
 
   * **局部 / 结构化修改 · 一次用户意图 = 一次 `calm.report.commit`** — 默认路径：读要改的章节 → `calm.report.commit(message, ops, summary?, lifecycle?)`，`ops` 用章节操作：`{ op: "replace", section: "标题", markdown: "# 标题\n…" }` 整节替换（`markdown` 是整节，以该节的 `# ` 标题行开头，不含别的 H1；读到的 `<!-- neige:b_xxxx -->` 标记行把块钉回原 id，深链 / 反链不会失效），`{ op: "delete", section: "标题" }` 删整节；契约里声明了但文档里还没有的章节，直接 replace 就会按契约位置创建。单个块也可以用 `upsert` / `delete` / `move` 块操作（按 `id` 寻址）。改几节 + 改 summary + 推进 lifecycle 就用这一个调用，任一项失败整次提交回滚。
     - 读之后别人改了你要改的那一节：返回 -32001 并点名该节 → 重读这一节、合并、重试。只改别的章节不会打回你的章节写入；但带 `summary`、新建或移动块、新建章节的提交要校验整份文档，读之后任何地方有改动都会被打回，同样重读后重试。
-    - 没读过就写会被拒（-32602），先读再写。自己提交之后要再改同一节，先重读。
+    - 没读过就写会被拒（-32602），先读再写。你自己刚提交写入的章节算已读，可以直接再改。
+    - `neige cat report.md` 只锚定它打印的块与章节，不提供 `docRev`：带 `summary`、新建或移动块、新建章节的提交要先用 `calm.report.read` 读。
   * **整文档重写** — 先 `calm.report.read({ with_markers: true })` 拿到每个块前面带 `<!-- neige:b_xxxx -->` 标记行的正文，在这份文本上改，改完用 `calm.report.write_markdown(body, if_doc_rev, summary?)` 写回（`if_doc_rev` 取这次读返回的 `docRev`）。标记行把每个块钉回原来的 id（服务端剥掉，永不入库），这是整文档重写里 **唯一** 能保住块 id 的通道。
 
 `summary` 是侧栏的 1-行预览，~80 字符以内。

@@ -6,7 +6,7 @@ use crate::error::CalmError;
 use crate::report_sections::{block_h1_title, find_section, h1_title, section_error_message};
 use crate::track_report_doc::ReportDoc;
 use crate::track_report_guard::validate_body_fences;
-use calm_types::report_blocks::{KIND_PROSE, flat_text, strip_markers_and_split};
+use calm_types::report_blocks::{flat_text, strip_markers_and_split};
 use calm_types::report_contract::parse_line;
 use calm_types::track_report::ReportBlock;
 use std::ops::Range;
@@ -16,9 +16,24 @@ fn snapshot(doc: &ReportDoc) -> Result<Vec<ReportBlock>, CalmError> {
         .map_err(|e| CalmError::Internal(format!("track_report: section snapshot: {e}")))
 }
 
-fn locate(blocks: &[ReportBlock], name: &str) -> Result<Option<Range<usize>>, CalmError> {
-    find_section(blocks, name)
-        .map_err(|error| CalmError::BadRequest(section_error_message(blocks, &error)))
+/// Section `name`'s range, checked against this session's read of it; a section the session read
+/// that is gone now is a conflict for every section op, a section it never read that is gone is `None`.
+fn locate_read(
+    blocks: &[ReportBlock],
+    name: &str,
+    read: &SectionRead,
+) -> Result<Option<Range<usize>>, CalmError> {
+    let found = find_section(blocks, name)
+        .map_err(|error| CalmError::BadRequest(section_error_message(blocks, &error)))?;
+    match (found, read) {
+        (Some(range), _) => {
+            check_section_read(name, &blocks[range.clone()], read).map(|()| Some(range))
+        }
+        (None, SectionRead::Seen(_)) => Err(CalmError::Conflict(format!(
+            "section `{name}` was removed since this session read it — re-read the report and retry"
+        ))),
+        (None, SectionRead::Unseen) => Ok(None),
+    }
 }
 
 /// The implicit check: the section as this session last read it must be the section now.
@@ -49,31 +64,21 @@ fn check_section_read(
 
 /// Replace section `name` with `markdown` under `write_markdown` rules, matching old and new blocks
 /// inside the section only; an absent section the contract declares is created at its declared
-/// position. Returns the ids of the prose blocks now in the section.
+/// position. Returns the blocks now in the section, and whether the document anchor was checked.
 pub(super) fn apply_replace_section(
     doc: &mut ReportDoc,
     name: &str,
     markdown: &str,
     read: &SectionRead,
     doc_anchor: DocAnchor,
-) -> Result<Vec<String>, CalmError> {
+) -> Result<(Vec<ReportBlock>, bool), CalmError> {
     let current = snapshot(doc)?;
-    let range = match locate(&current, name)? {
-        Some(range) => {
-            check_section_read(name, &current[range.clone()], read)?;
-            range
-        }
-        None if matches!(read, SectionRead::Seen(_)) => {
-            return Err(CalmError::Conflict(format!(
-                "section `{name}` was removed since this session read it — re-read the report \
-                 and retry"
-            )));
-        }
+    let (range, checked) = match locate_read(&current, name, read)? {
+        Some(range) => (range, false),
         None => {
             let at = declared_position(&current, name)?;
             // Creating a section places it among the others: a whole-document edit.
-            check_doc_anchor(doc, doc_anchor, true)?;
-            at..at
+            (at..at, check_doc_anchor(doc, doc_anchor, true)?)
         }
     };
     let marked = strip_markers_and_split(markdown);
@@ -109,11 +114,7 @@ pub(super) fn apply_replace_section(
     let replaced = doc
         .replace_range(range, &marked.slices, &marked.hints)
         .map_err(block_op_internal)?;
-    Ok(replaced
-        .into_iter()
-        .filter(|block| block.kind == KIND_PROSE)
-        .map(|block| block.id)
-        .collect())
+    Ok((replaced, checked))
 }
 
 /// Delete every block of section `name`; the batch's live-task guard still refuses a live task.
@@ -123,13 +124,12 @@ pub(super) fn apply_delete_section(
     read: &SectionRead,
 ) -> Result<(), CalmError> {
     let current = snapshot(doc)?;
-    let range = locate(&current, name)?.ok_or_else(|| {
+    let range = locate_read(&current, name, read)?.ok_or_else(|| {
         CalmError::BadRequest(section_error_message(
             &current,
             &crate::report_sections::SectionError::Unknown(name.to_string()),
         ))
     })?;
-    check_section_read(name, &current[range.clone()], read)?;
     for block in &current[range] {
         doc.delete_block(&block.id).map_err(block_op_internal)?;
     }

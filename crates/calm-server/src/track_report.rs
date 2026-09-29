@@ -458,6 +458,18 @@ pub struct BlockOpOutcome {
 pub struct ReportOpTrace {
     pub block: Option<BlockOpOutcome>,
     pub written_prose_block_ids: Vec<String>,
+    /// A batch's own writes, in op order, for the author's read ledger (#1877).
+    pub authored: Vec<Authored>,
+    /// Whether the batch checked its document anchor, i.e. the author knew the whole document.
+    pub doc_anchor_checked: bool,
+}
+
+/// One write a batch itself applied, with the revs it produced; never another writer's block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Authored {
+    Block(String, u32),
+    Section(String, Vec<(String, u32)>),
+    SectionDeleted(String),
 }
 
 /// Which blocks an op wrote, before the post-op snapshot exists.
@@ -621,6 +633,8 @@ pub(crate) fn apply_report_op_traced(
         CalmError::Internal(format!("track_report: snapshot before task guard: {e}"))
     })?;
     let mut written = Written::None;
+    let mut authored = Vec::new();
+    let mut doc_anchor_checked = false;
     let outcome: Result<Option<BlockOpOutcome>, CalmError> = match &op {
         ReportDocOp::Replace {
             summary,
@@ -730,7 +744,7 @@ pub(crate) fn apply_report_op_traced(
                         BatchBlockOp::Upsert { id: None, .. } | BatchBlockOp::Move { .. }
                     )
                 });
-            check_doc_anchor(doc, *doc_anchor, needs_doc_anchor)?;
+            doc_anchor_checked = check_doc_anchor(doc, *doc_anchor, needs_doc_anchor)?;
             if ops.len() > MAX_BATCH_OPS {
                 return Err(CalmError::BadRequest(format!(
                     "batch carries {} ops; at most {MAX_BATCH_OPS} per commit",
@@ -762,8 +776,11 @@ pub(crate) fn apply_report_op_traced(
                                             .into(),
                                     )
                                 })?;
-                                apply_upsert_existing(doc, id, kind, content, expected, true)
-                                    .map_err(step)?
+                                let outcome =
+                                    apply_upsert_existing(doc, id, kind, content, expected, true)
+                                        .map_err(step)?;
+                                authored.push(Authored::Block(outcome.id.clone(), outcome.rev));
+                                outcome
                             }
                             None => apply_upsert_new(doc, kind, content, *position, true)
                                 .map_err(step)?,
@@ -783,7 +800,7 @@ pub(crate) fn apply_report_op_traced(
                         markdown,
                         read,
                     } => {
-                        let replaced = sections::apply_replace_section(
+                        let (replaced, checked) = sections::apply_replace_section(
                             doc,
                             section,
                             markdown,
@@ -791,10 +808,24 @@ pub(crate) fn apply_report_op_traced(
                             *doc_anchor,
                         )
                         .map_err(step)?;
-                        written_ids.extend(replaced);
+                        doc_anchor_checked |= checked;
+                        written_ids.extend(
+                            replaced
+                                .iter()
+                                .filter(|block| block.kind == KIND_PROSE)
+                                .map(|block| block.id.clone()),
+                        );
+                        authored.push(Authored::Section(
+                            section.clone(),
+                            replaced
+                                .into_iter()
+                                .map(|block| (block.id, block.rev))
+                                .collect(),
+                        ));
                     }
                     BatchBlockOp::DeleteSection { section, read } => {
                         sections::apply_delete_section(doc, section, read).map_err(step)?;
+                        authored.push(Authored::SectionDeleted(section.clone()));
                     }
                 }
             }
@@ -830,6 +861,8 @@ pub(crate) fn apply_report_op_traced(
     Ok(ReportOpTrace {
         block: outcome,
         written_prose_block_ids,
+        authored,
+        doc_anchor_checked,
     })
 }
 
@@ -849,9 +882,10 @@ fn apply_persisted_report_op(
 }
 
 /// A batch's document anchor: an explicit one always, the session's last read only when `needed`.
-fn check_doc_anchor(doc: &ReportDoc, anchor: DocAnchor, needed: bool) -> Result<(), CalmError> {
+/// `Ok(true)` when it was checked.
+fn check_doc_anchor(doc: &ReportDoc, anchor: DocAnchor, needed: bool) -> Result<bool, CalmError> {
     match anchor {
-        DocAnchor::Explicit(expected) => check_doc_rev(doc, expected),
+        DocAnchor::Explicit(expected) => check_doc_rev(doc, expected).map(|()| true),
         DocAnchor::LastRead(read) if needed => {
             let current = doc
                 .doc_rev()
@@ -862,15 +896,14 @@ fn check_doc_anchor(doc: &ReportDoc, anchor: DocAnchor, needed: bool) -> Result<
                      read docRev {read} — re-read the report and retry"
                 )));
             }
-            Ok(())
+            Ok(true)
         }
         DocAnchor::Unread if needed => Err(CalmError::BadRequest(
-            "this session has not read the report: a summary, a created or moved block and a \
-             created section need the docRev of a read — read the report (calm.report.read or \
-             `neige cat report.md`) and retry"
+            "this session has not read the report's docRev: a summary, a created or moved block \
+             and a created section need it — read the report with calm.report.read and retry"
                 .into(),
         )),
-        DocAnchor::LastRead(_) | DocAnchor::Unread => Ok(()),
+        DocAnchor::LastRead(_) | DocAnchor::Unread => Ok(false),
     }
 }
 

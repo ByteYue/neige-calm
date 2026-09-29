@@ -45,6 +45,9 @@ pub struct ReportOpCommit {
     pub card: Card,
     pub block: Option<BlockOpOutcome>,
     pub warnings: Vec<SourceLinkWarning>,
+    /// What a batch itself wrote and whether it checked its document anchor (#1877).
+    pub authored: Vec<crate::track_report::Authored>,
+    pub doc_anchor_checked: bool,
 }
 
 impl CardDecisionSink {
@@ -501,6 +504,8 @@ impl CardDecisionSink {
             card,
             block: trace.block,
             warnings,
+            authored: trace.authored,
+            doc_anchor_checked: trace.doc_anchor_checked,
         })
     }
 }

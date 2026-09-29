@@ -466,3 +466,131 @@ async fn a_section_replace_may_not_reach_outside_its_section() {
     }
     assert_eq!(payload(&boot).await.body, before.body);
 }
+
+async fn read_full(boot: &Boot) {
+    call_tool(boot, TOOL_REPORT_READ, planner_identity(boot), json!({}))
+        .await
+        .expect("full read");
+}
+
+#[tokio::test]
+async fn a_section_deleted_then_read_again_is_created_by_a_replace() {
+    let boot = boot().await;
+    seed(
+        &boot,
+        &SECTIONS.replace("# 已完成", "# 待你定\n\nq0\n\n# 已完成"),
+    )
+    .await;
+    read_full(&boot).await;
+    commit(
+        &boot,
+        planner_identity(&boot),
+        json!({ "ops": [{ "op": "delete", "section": "待你定" }] }),
+    )
+    .await
+    .expect("delete");
+    read_full(&boot).await;
+    commit(
+        &boot,
+        planner_identity(&boot),
+        replace("待你定", "# 待你定\n\nq1\n"),
+    )
+    .await
+    .expect("a section gone at the latest read is created, not a stale read");
+    assert!(
+        payload(&boot)
+            .await
+            .body
+            .contains("a2\n\n# 待你定\n\nq1\n# 已完成\n")
+    );
+}
+
+#[tokio::test]
+async fn a_section_another_writer_removed_is_a_conflict_until_the_report_is_read_again() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    read_full(&boot).await;
+    let (id, rev) = section_blocks(&boot, "# 决策").await.remove(0);
+    call_tool(
+        &boot,
+        calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_DELETE,
+        assistant_identity(&boot),
+        json!({ "id": id, "if_rev": rev }),
+    )
+    .await
+    .expect("the other writer deletes the section");
+    let delete = || json!({ "ops": [{ "op": "delete", "section": "决策" }] });
+    let err = commit(&boot, planner_identity(&boot), delete())
+        .await
+        .expect_err("stale");
+    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
+    assert!(
+        err.message.contains("section `决策` was removed"),
+        "{err:?}"
+    );
+    read_full(&boot).await;
+    let err = commit(&boot, planner_identity(&boot), delete())
+        .await
+        .expect_err("gone");
+    assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
+    assert!(
+        err.message
+            .ends_with("unknown section `决策`; this report's sections are:\n  # 概要\n  # 已完成"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cat_read_does_not_anchor_a_summary_over_one_it_never_showed() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    let doc_rev = payload(&boot).await.doc_rev;
+    call_tool(
+        &boot,
+        TOOL_REPORT_WRITE_MARKDOWN,
+        assistant_identity(&boot),
+        json!({ "body": payload(&boot).await.body, "summary": "用户的", "if_doc_rev": doc_rev }),
+    )
+    .await
+    .expect("another writer sets the summary");
+    call_tool(
+        &boot,
+        TOOL_TRACK_CAT,
+        planner_identity(&boot),
+        json!({ "path": "report.md", "sections": ["决策"] }),
+    )
+    .await
+    .expect("cat --sections");
+    let err = commit(&boot, planner_identity(&boot), json!({ "summary": "mine" }))
+        .await
+        .expect_err("cat shows no docRev");
+    assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
+    assert!(
+        err.message.contains("has not read the report's docRev"),
+        "{err:?}"
+    );
+    assert_eq!(payload(&boot).await.summary, "用户的");
+}
+
+#[tokio::test]
+async fn an_own_commit_counts_as_read_but_another_writer_in_between_does_not() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    read_sections(&boot, planner_identity(&boot), &["概要"]).await;
+    for text in ["# 概要\n\nv1\n\n## 细节\n\nx\n", "# 概要\n\nv2\n"] {
+        commit(&boot, planner_identity(&boot), replace("概要", text))
+            .await
+            .expect("no re-read between own writes");
+    }
+    assert!(payload(&boot).await.body.contains("# 概要\n\nv2\n# 已完成"));
+
+    assistant_edits(&boot, "# 概要", "# 概要\n\nby assistant\n").await;
+    let err = commit(
+        &boot,
+        planner_identity(&boot),
+        replace("概要", "# 概要\n\nv3\n"),
+    )
+    .await
+    .expect_err("another writer's change stays a conflict");
+    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
+}

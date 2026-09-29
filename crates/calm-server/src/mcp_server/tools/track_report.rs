@@ -186,7 +186,7 @@ pub(crate) async fn report_read(
             &identity.session_id,
             &identity.card_id,
             report_card.id.as_str(),
-            snapshot.doc_rev,
+            Some(snapshot.doc_rev),
             &snapshot.blocks,
             rendered,
         );

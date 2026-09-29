@@ -77,7 +77,7 @@ const COMMANDS: &[CommandHelp] = &[
         "--sections does the same for whole H1 sections, named by their heading text (the `# `",
         "line without `# `): the text calm.report.read gives for select.sections. An unknown",
         "section is refused with the report's H1 sections listed. Reading your own report.md",
-        "anchors a later calm.report.commit that passes no revs.",
+        "anchors the section and block ops of a later calm.report.commit (not a summary).",
         "",
         "Options:",
         "      --blocks <id,...>            Print only these blocks of a report (comma-separated ids)",
