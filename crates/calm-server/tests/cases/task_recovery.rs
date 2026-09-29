@@ -173,7 +173,7 @@ async fn task_recovery_preserves_sibling_history_and_dependency_keys() {
         .tasks_by_track(boot.track_id.as_str())
         .await
         .unwrap();
-    let ready = calm_server::scheduler::compute_ready(&plan, 1);
+    let ready = calm_server::scheduler::compute_ready(&plan, true).unwrap();
     assert_eq!(
         ready
             .iter()
@@ -480,7 +480,6 @@ async fn task_recovery_pending_rebuild_keeps_identity_and_changed_contract_canno
         boot.track_id.as_str(),
         "b",
         calm_server::ids::ActorId::User,
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .unwrap();
@@ -626,7 +625,6 @@ async fn task_recovery_blocked_track_resumes_in_same_transaction() {
         boot.track_id.as_str(),
         "b",
         planner_identity(&boot).to_actor_id(),
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .unwrap();
@@ -767,7 +765,6 @@ async fn task_recovery_terminal_leader_exit_never_proves_descendant_write_stop()
             boot.track_id.as_str(),
             &b.key,
             calm_server::ids::ActorId::User,
-            calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
         )
         .await
         .unwrap();
@@ -969,7 +966,6 @@ async fn task_recovery_timed_out_ordinary_codex_worker_is_guided_to_a_new_task()
         &track_id,
         "b",
         calm_server::ids::ActorId::User,
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .unwrap();
@@ -1089,82 +1085,11 @@ async fn task_recovery_guidance_does_not_advertise_a_user_recovery_the_predecess
         boot.track_id.as_str(),
         "b",
         calm_server::ids::ActorId::User,
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .unwrap();
     assert!(!user_view.recovery.allowed);
     assert_eq!(user_view.recovery.code, "predecessor_not_quiescent");
-}
-
-#[tokio::test]
-async fn task_recovery_guidance_retained_follows_worktree_removal_and_reprovision() {
-    use calm_server::event::Event;
-    let boot = boot().await;
-    declare(&boot, ordinary_codex_declaration("b")).await;
-    let (_failed, lease_path, _lease_dir) = time_out_prepared_ordinary_worker(&boot, "b").await;
-    let retained = || async {
-        let list = call_tool(&boot, "calm.plan.list", planner_identity(&boot), json!({}))
-            .await
-            .unwrap();
-        listed_entry(&list, "b")["recovery"]["guidance"]["retained"].clone()
-    };
-    assert_eq!(retained().await, json!({"workspace_path": lease_path}));
-
-    // Removed with no provision recorded: nothing on disk is advertised.
-    append_worktree_event(
-        &boot,
-        Event::WorktreeRemoved {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            path: lease_path.clone(),
-        },
-    )
-    .await;
-    assert_eq!(retained().await, json!({"removed": true}));
-
-    // Re-provisioned after the removal (provisioned id > removed id).
-    append_worktree_event(
-        &boot,
-        Event::WorktreeProvisioned {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            path: lease_path.clone(),
-        },
-    )
-    .await;
-    assert_eq!(retained().await, json!({"workspace_path": lease_path}));
-
-    // A kernel-recorded commit, then removal again: the object survives.
-    append_worktree_event(
-        &boot,
-        Event::WorktreeCommitted {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            commit_sha: "abc123def".into(),
-            branch: "neige/recorded-branch".into(),
-            delivery_id: None,
-            base_is_ancestor: None,
-        },
-    )
-    .await;
-    assert_eq!(
-        retained().await,
-        json!({"workspace_path": lease_path, "branch": "neige/recorded-branch", "last_commit": "abc123def"})
-    );
-    append_worktree_event(
-        &boot,
-        Event::WorktreeRemoved {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            path: lease_path.clone(),
-        },
-    )
-    .await;
-    assert_eq!(
-        retained().await,
-        json!({"removed": true, "last_commit": "abc123def"})
-    );
 }
 
 #[tokio::test]

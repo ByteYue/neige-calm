@@ -117,27 +117,6 @@ pub async fn task_cancel_tx(tx: &mut Transaction<'_, Sqlite>, id: &str, now: i64
     Ok(res.rows_affected())
 }
 
-/// `pending → canceled` with a `status_detail`, for a pending predecessor that
-/// `calm.task.replace` supersedes (#1785). Returns rows moved (`0` = the task left `pending`).
-pub async fn task_cancel_pending_with_detail_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    id: &str,
-    status_detail: &str,
-    now: i64,
-) -> Result<u64> {
-    let res = sqlx::query(
-        r#"UPDATE tasks
-           SET status = 'canceled', status_detail = ?1, updated_at_ms = ?2, finished_at_ms = ?2
-           WHERE id = ?3 AND status = 'pending'"#,
-    )
-    .bind(status_detail)
-    .bind(now)
-    .bind(id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(res.rows_affected())
-}
-
 /// `running → canceled` for the Planner's in-flight cancel (#1785). The card guard pins the
 /// worker the caller marks for reaping; `dispatched` is excluded because its card may be unbound.
 /// Returns rows moved (`0` = the row left `running` or changed worker; the caller re-reads).
@@ -163,19 +142,17 @@ pub async fn task_cancel_running_tx(
 }
 
 /// The claim tx re-checks schedulability against this, not the pre-claim
-/// snapshot. `None` = track row gone; inner `None` = NULL `task_budget`.
-pub async fn track_lifecycle_and_budget_tx(
+/// snapshot. `None` = track row gone.
+pub async fn track_lifecycle_tx(
     tx: &mut Transaction<'_, Sqlite>,
     track_id: &str,
-) -> Result<Option<(TrackLifecycle, Option<i64>)>> {
-    let row: Option<(String, Option<i64>)> =
-        sqlx::query_as("SELECT lifecycle, task_budget FROM tracks WHERE id = ?1")
-            .bind(track_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    row.map(|(lifecycle, budget)| {
+) -> Result<Option<TrackLifecycle>> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT lifecycle FROM tracks WHERE id = ?1")
+        .bind(track_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    row.map(|(lifecycle,)| {
         TrackLifecycle::try_from(lifecycle)
-            .map(|lifecycle| (lifecycle, budget))
             .map_err(|e| CalmError::Internal(format!("tracks.lifecycle decode: {e}")))
     })
     .transpose()

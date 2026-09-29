@@ -28,7 +28,7 @@ use crate::db::sqlite::{
     SuccessReportFlip, TaskReporter, begin_immediate_tx, status_detail_with_reason,
     task_claim_pending_tx, task_fail_from_worker_tx, task_get_tx, task_mark_running_tx,
     task_mark_sub_track_running_tx, task_report_success_from_worker_tx,
-    task_stamp_missing_running_deadline_tx, tasks_by_track_tx, track_lifecycle_and_budget_tx,
+    task_stamp_missing_running_deadline_tx, tasks_by_track_tx, track_lifecycle_tx,
 };
 use crate::db::{Repo, write_with_actor_events_typed};
 use crate::error::{CalmError, Result};
@@ -44,20 +44,14 @@ use crate::operation::task_verify_adapter::{
     gate_attempt_key,
 };
 use crate::operation::terminal_adapter::TerminalWorkerOperationPayload;
-use crate::operation::workspace_lease::worker::is_in_tree_worker;
 use crate::operation::workspace_lease::{
     ReleaseDelivery, release_workspace_lease_for_card_repo, release_workspace_lease_for_card_tx,
-    track_idle_tx,
 };
 use crate::operation::{OperationKey, OperationOutcome, OperationRuntime, Tx};
 use crate::routes::terminal_cards::stable_payload_hash;
 use crate::state::WriteContext;
 use crate::task_context::{ContextMetrics, TaskContextMonitor, context_ref};
 use crate::track_lifecycle::auto_transition_if_current_in_tx;
-
-/// Kernel default per-track task budget when `tracks.task_budget` is NULL and
-/// `NEIGE_TRACK_TASK_BUDGET` is unset/invalid. 1 because workers and gates share one directory tree.
-pub const DEFAULT_TRACK_TASK_BUDGET: i64 = 1;
 
 /// Default reconcile-tick period (liveness backstop).
 pub const DEFAULT_RECONCILE_SECS: u64 = 300;
@@ -147,40 +141,32 @@ pub fn lifecycle_allows_scheduling(lifecycle: TrackLifecycle) -> bool {
     )
 }
 
-/// Ready-set computation over one track's plan rows (already in scheduler order).
-/// `verifying` deliberately occupies budget; deps are satisfied only by `done` siblings.
-fn track_capacity(tasks: &[Task], budget: i64) -> usize {
-    let running_cost = tasks
-        .iter()
-        .filter(|task| {
-            matches!(
-                task.status,
-                TaskStatus::Dispatched | TaskStatus::Running | TaskStatus::Verifying
-            )
-        })
-        .count() as i64;
-    (budget - running_cost).max(0) as usize
-}
-
-pub fn compute_ready(tasks: &[Task], budget: i64) -> Vec<Task> {
+/// Ready-set computation over one track's plan rows (already in scheduler order): pending rows
+/// whose deps are all `done`. A codex or claude task that runs in the track's checkout is ready
+/// only while the track is idle ([`crate::db::sqlite::track_idle`], #1830 S2 D5); the claim tx
+/// rechecks it, so one claim wins per pass and a claim that fails does not hold the others.
+/// Isolated, terminal and child-track tasks are not held.
+pub fn compute_ready(tasks: &[Task], track_idle: bool) -> Result<Vec<Task>> {
     let done_keys: BTreeSet<&str> = tasks
         .iter()
         .filter(|t| t.status == TaskStatus::Done)
         .map(|t| t.key.as_str())
         .collect();
-    if track_capacity(tasks, budget) == 0 {
-        return Vec::new();
+    let mut ready = Vec::new();
+    for task in tasks.iter().filter(|t| t.status == TaskStatus::Pending) {
+        if !task
+            .depends_on()
+            .iter()
+            .all(|dep| done_keys.contains(dep.as_str()))
+        {
+            continue;
+        }
+        if !track_idle && task.runs_in_track_checkout()? {
+            continue;
+        }
+        ready.push(task.clone());
     }
-    tasks
-        .iter()
-        .filter(|t| t.status == TaskStatus::Pending)
-        .filter(|t| {
-            t.depends_on()
-                .iter()
-                .all(|dep| done_keys.contains(dep.as_str()))
-        })
-        .cloned()
-        .collect()
+    Ok(ready)
 }
 
 /// Build the worker-operation payload as a pure function of the frozen task row, so a
@@ -501,15 +487,10 @@ pub struct Scheduler {
     /// Same `Weak` discipline as the dispatcher's `Inner` — the
     /// scheduler must not keep AppState resources alive after shutdown.
     operation_runtime: Weak<OperationRuntime>,
-    /// The dispatcher's global spawn semaphore: per-track budgets cap per-track
-    /// parallelism, this caps total cross-track spawn work.
+    /// The dispatcher's global spawn semaphore: caps total cross-track spawn work.
     semaphore: Arc<Semaphore>,
     /// Existing launch capacity, frozen at scheduler construction for durable reservations.
     candidate_verification_limit: usize,
-    /// Deployment fallback (`NEIGE_TRACK_TASK_BUDGET`, default 1). The live
-    /// `task_budget_default` setting overrides it, and `tracks.task_budget`
-    /// overrides both per track.
-    budget_default: i64,
     /// Persisted running liveness window, resolved once from
     /// `NEIGE_TASK_RUN_TIMEOUT_SECS`.
     task_run_timeout: Duration,
@@ -578,34 +559,6 @@ impl Scheduler {
             semaphore,
             gate_logs_dir,
             Self::task_run_timeout_from_env(),
-            Self::budget_from_env(DEFAULT_TRACK_TASK_BUDGET),
-            worker_idle,
-        )
-    }
-
-    /// Production boot seam: the environment-backed task budget is resolved
-    /// once by `AppState` and shared with every read surface that explains the
-    /// scheduler's decision.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_task_budget_default(
-        repo: Arc<dyn Repo>,
-        events: EventBus,
-        write: WriteContext,
-        operation_runtime: Weak<OperationRuntime>,
-        semaphore: Arc<Semaphore>,
-        gate_logs_dir: std::path::PathBuf,
-        task_budget_default: i64,
-        worker_idle: WorkerIdleWake,
-    ) -> Arc<Self> {
-        Self::new_with_timeouts(
-            repo,
-            events,
-            write,
-            operation_runtime,
-            semaphore,
-            gate_logs_dir,
-            Self::task_run_timeout_from_env(),
-            task_budget_default,
             worker_idle,
         )
     }
@@ -630,7 +583,6 @@ impl Scheduler {
             semaphore,
             gate_logs_dir,
             task_run_timeout,
-            Self::budget_from_env(DEFAULT_TRACK_TASK_BUDGET),
             worker_idle,
         )
     }
@@ -644,7 +596,6 @@ impl Scheduler {
         semaphore: Arc<Semaphore>,
         gate_logs_dir: std::path::PathBuf,
         task_run_timeout: Duration,
-        task_budget_default: i64,
         worker_idle: WorkerIdleWake,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -654,7 +605,6 @@ impl Scheduler {
             operation_runtime,
             candidate_verification_limit: semaphore.available_permits(),
             semaphore,
-            budget_default: task_budget_default,
             task_run_timeout,
             worker_idle,
             idle_checks: Self::new_idle_checks(),
@@ -714,19 +664,6 @@ impl Scheduler {
         Arc::clone(&self.context_metrics)
     }
 
-    /// Resolve the kernel default budget from `NEIGE_TRACK_TASK_BUDGET`
-    /// (parsed like `NEIGE_DISPATCHER_PERMITS`): unset / empty /
-    /// unparseable / non-positive → `default`.
-    pub fn budget_from_env(default: i64) -> i64 {
-        match std::env::var("NEIGE_TRACK_TASK_BUDGET") {
-            Ok(raw) => match raw.trim().parse::<i64>() {
-                Ok(n) if n > 0 => n,
-                _ => default,
-            },
-            Err(_) => default,
-        }
-    }
-
     /// Resolve a reconcile-tick period from an env var (non-positive /
     /// garbage → default).
     pub fn reconcile_secs_from_env_var(var: &str, default: u64) -> u64 {
@@ -751,17 +688,6 @@ impl Scheduler {
             "NEIGE_TASK_RUN_TIMEOUT_SECS",
             DEFAULT_TASK_RUN_TIMEOUT_SECS,
         ))
-    }
-
-    /// Configured kernel-default budget. Exposed for test assertions.
-    pub fn budget_default(&self) -> i64 {
-        self.budget_default
-    }
-
-    /// Resolve the live workspace setting over the boot-time deployment fallback.
-    pub async fn effective_budget_default(&self) -> Result<i64> {
-        let settings = crate::routes::settings::load_settings(self.repo.as_ref()).await?;
-        Ok(settings.task_budget_default.unwrap_or(self.budget_default))
     }
 
     pub fn task_run_timeout_ms(&self) -> i64 {
@@ -1001,8 +927,8 @@ impl Scheduler {
         }
     }
 
-    /// One pass under the track lock: lifecycle gate → budget → ready set → dispatch each
-    /// ready task sequentially.
+    /// One pass under the track lock: lifecycle gate → ready set → dispatch each ready task
+    /// sequentially.
     async fn schedule_pass(self: &Arc<Self>, track_id: &TrackId) -> Result<()> {
         let Some(track) = self.repo.track_get(track_id.as_str()).await? else {
             return Ok(());
@@ -1033,37 +959,17 @@ impl Scheduler {
             );
             return Ok(());
         }
-        let budget = self.track_budget(track_id).await?;
-        let capacity = track_capacity(&tasks, budget);
-        let ready = compute_ready(&tasks, budget);
-        let mut claimed = 0;
-        for task in ready {
-            if self.dispatch_task(task, &track).await {
-                claimed += 1;
-                if claimed == capacity {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `COALESCE(tracks.task_budget, live setting, deployment default)`.
-    async fn track_budget(&self, track_id: &TrackId) -> Result<i64> {
-        let budget_default = self.effective_budget_default().await?;
         let pool = self
             .repo
             .sqlite_pool()
             .ok_or_else(|| CalmError::Internal("scheduler requires a sqlite-backed Repo".into()))?;
-        let row: Option<(Option<i64>,)> =
-            sqlx::query_as("SELECT task_budget FROM tracks WHERE id = ?1")
-                .bind(track_id.as_str())
-                .fetch_optional(&pool)
+        let track_idle =
+            crate::db::sqlite::track_idle(&mut *pool.acquire().await?, track_id.as_str(), "")
                 .await?;
-        Ok(row
-            .and_then(|(budget,)| budget)
-            .unwrap_or(budget_default)
-            .max(0))
+        for task in compute_ready(&tasks, track_idle)? {
+            self.dispatch_task(task, &track).await;
+        }
+        Ok(())
     }
 
     /// Claim one ready task and drive its worker spawn. Every failure mode is contained
@@ -1118,7 +1024,7 @@ impl Scheduler {
                 ))
             )
         {
-            // Claim/budget remain serialized; file IO and the existing Operation
+            // The claim remains serialized; file IO and the existing Operation
             // wait must not hold the Track lock. Keep the same permit/singleflight.
             let this = self.clone();
             let track = track.clone();
@@ -1174,7 +1080,6 @@ impl Scheduler {
         };
         let task_id = task.id.clone();
         let track_id = track.id.clone();
-        let budget_default_fallback = self.budget_default;
         let claim_refs = closure.refs;
         let claim_doc_revs = closure.doc_revs;
         let claim_truncated = closure.closure_truncated;
@@ -1199,10 +1104,9 @@ impl Scheduler {
                     Box::pin(async move {
                         // Lifecycle gate, re-checked IN the claim tx: the pre-claim read can go stale across
                         // the semaphore wait. Loss is silent (race-lost, no event).
-                        let (lifecycle, task_budget) =
-                            track_lifecycle_and_budget_tx(tx, track_id.as_str())
-                                .await?
-                                .ok_or_else(race_lost_err)?;
+                        let lifecycle = track_lifecycle_tx(tx, track_id.as_str())
+                            .await?
+                            .ok_or_else(race_lost_err)?;
                         if !lifecycle_allows_scheduling(lifecycle) {
                             return Err(race_lost_err());
                         }
@@ -1288,42 +1192,11 @@ impl Scheduler {
                         {
                             return Err(race_lost_err());
                         }
-                        // Re-read the live default in this same write transaction so a concurrent Settings
-                        // change is fenced just like a per-track budget patch.
-                        let configured_default: Option<String> = sqlx::query_scalar(
-                            "SELECT value FROM settings WHERE key = ?1",
-                        )
-                        .bind(crate::routes::settings::TASK_BUDGET_DEFAULT_KEY)
-                        .fetch_optional(&mut **tx)
-                        .await?;
-                        let budget_default =
-                            crate::routes::settings::effective_task_budget_default(
-                                configured_default.as_deref(),
-                                budget_default_fallback,
-                            );
-                        let budget = task_budget.unwrap_or(budget_default).max(0);
-                        // `siblings` was read AFTER the claim flip, so the
-                        // in-flight count includes this row — it must fit
-                        // the budget, not stay strictly under it.
-                        let in_flight = siblings
-                            .iter()
-                            .filter(|t| {
-                                matches!(
-                                    t.status,
-                                    TaskStatus::Dispatched
-                                        | TaskStatus::Running
-                                        | TaskStatus::Verifying
-                                )
-                            })
-                            .count() as i64;
-                        let active_candidates = crate::file_delivery::candidate_verify::active_tx(tx,track_id.as_str()).await?;
-                        if in_flight + active_candidates > budget {
-                            return Err(race_lost_err());
-                        }
-                        // #1830 S2 D5: a codex/claude worker runs in the track's checkout, so on top
-                        // of the budget it needs the track idle apart from itself.
-                        if is_in_tree_worker(&frozen)?
-                            && !track_idle_tx(tx, track_id.as_str(), &task_id).await?
+                        // #1830 S2 D5: a codex/claude worker runs in the track's checkout, so it
+                        // needs the track idle apart from itself.
+                        if frozen.runs_in_track_checkout()?
+                            && !crate::db::sqlite::track_idle(tx, track_id.as_str(), &task_id)
+                                .await?
                         {
                             return Err(race_lost_err());
                         }
@@ -1393,24 +1266,6 @@ impl Scheduler {
     /// task.id`), `wait()` it to a terminal phase, then reconcile the row with guarded
     /// writes. Shared between the live dispatch path and the sweep's `dispatched` arm.
     async fn drive_spawn(&self, task: &Task, track: &Track) -> Result<()> {
-        // One transaction, before any route branch: whether this task is a `calm.task.replace`
-        // successor (its receipt) and the backend a created operation recorded. A successor
-        // edited off the replaceable route fails here, whatever route it names now (#1785).
-        let probe = task.clone();
-        let (successor, recorded) = crate::db::write_in_tx_typed(self.repo.as_ref(), move |tx| {
-            let probe = probe.clone();
-            Box::pin(async move {
-                let successor = crate::task_replace::route::is_successor_tx(tx, &probe).await?;
-                let recorded =
-                    crate::isolated_codex::lookup::recorded_worker_kind_tx(tx, &probe.id).await?;
-                Ok((successor, recorded))
-            })
-        })
-        .await?;
-        if successor && !crate::task_replace::route::on_route(task, track) {
-            let reason = crate::task_replace::route::route_changed_reason();
-            return self.fail_spawn(task, track, &reason).await;
-        }
         if task.spawn == calm_types::task_recovery::TASK_CHILD_TRACK_ROUTE {
             crate::isolated_codex::selected(task)?;
             return self.drive_child_track(task, track).await;
@@ -1422,6 +1277,13 @@ impl Scheduler {
             );
             return Ok(());
         };
+        let task_id = task.id.clone();
+        let recorded = crate::db::write_in_tx_typed(self.repo.as_ref(), move |tx| {
+            Box::pin(async move {
+                crate::isolated_codex::lookup::recorded_worker_kind_tx(tx, &task_id).await
+            })
+        })
+        .await?;
         let (op_kind, payload) = match recorded.as_deref() {
             Some(crate::isolated_codex::OPERATION_KIND) => {
                 let selected = build_worker_payload(task)?;
@@ -1468,7 +1330,7 @@ impl Scheduler {
         {
             Ok(op_id) => op_id,
             // The idempotency payload-hash conflict is PERMANENT: our resubmits always hash-match,
-            // so a mismatch is a foreign operation and would retry every sweep while pinning the budget.
+            // so a mismatch is a foreign operation and would retry every sweep while holding the task.
             Err(e) if crate::operation::is_idempotency_payload_conflict(&e) => {
                 tracing::warn!(
                     task_id = %task.id,

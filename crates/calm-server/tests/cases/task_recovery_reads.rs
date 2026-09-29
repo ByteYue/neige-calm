@@ -170,7 +170,6 @@ async fn task_recovery_list_keeps_absent_projection_with_ready_blocker() {
             boot.track_id.as_str(),
             "b",
             ActorId::User,
-            calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
         )
         .await
         .unwrap(),
@@ -209,7 +208,6 @@ async fn task_recovery_history_retains_current_dependency_blocker() {
             boot.track_id.as_str(),
             "c",
             ActorId::User,
-            calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
         )
         .await
         .unwrap(),
@@ -285,7 +283,6 @@ async fn task_recovery_deleted_frozen_reference_denies_only_affected_capability(
         boot.track_id.as_str(),
         "b",
         ActorId::User,
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .expect("missing frozen input is a task capability, not a missing requested task");
@@ -305,7 +302,6 @@ async fn task_recovery_deleted_frozen_reference_denies_only_affected_capability(
         boot.track_id.as_str(),
         "absent",
         ActorId::User,
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .unwrap_err();
@@ -377,30 +373,25 @@ async fn task_recovery_plan_inventory_pages_all_current_allocations() {
     );
 }
 
+/// #1830 S2 D5: a codex task waiting for another one in the track's checkout reads `trackBusy`,
+/// the same sentence on the report read and on the recovery view; a terminal task is not held.
 #[tokio::test]
-async fn task_recovery_blocker_uses_live_configured_budget_like_report_read() {
+async fn task_recovery_blocker_names_a_busy_track_like_report_read() {
     let boot = boot().await;
-    declare(&boot, declaration("a", &[])).await;
-    declare(&boot, declaration("b", &[])).await;
+    declare(&boot, ordinary_codex_declaration("a")).await;
+    declare(&boot, ordinary_codex_declaration("b")).await;
+    declare(&boot, declaration("c", &[])).await;
     let pool = boot.repo.sqlite_pool().unwrap();
     sqlx::query("UPDATE tasks SET status='running' WHERE track_id=?1 AND key='a'")
         .bind(boot.track_id.as_str())
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO settings(key,value,updated_at) VALUES(?1,'1',1) ON CONFLICT(key) DO UPDATE SET value='1',updated_at=excluded.updated_at",
-    )
-    .bind(calm_server::routes::settings::TASK_BUDGET_DEFAULT_KEY)
-    .execute(&pool)
-    .await
-    .unwrap();
     let view = task_recovery_view(
         boot.repo.as_ref(),
         boot.track_id.as_str(),
         "b",
         ActorId::User,
-        6,
     )
     .await
     .unwrap();
@@ -412,17 +403,25 @@ async fn task_recovery_blocker_uses_live_configured_budget_like_report_read() {
     )
     .await
     .unwrap();
-    let reason = report["taskDiagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["key"] == "b")
-        .unwrap()["pendingReason"]["message"]
-        .clone();
-    assert_eq!(reason, "Queued 1/1");
+    let pending_reason = |key: &str| {
+        report["taskDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["key"] == key)
+            .unwrap()["pendingReason"]
+            .clone()
+    };
+    let reason = pending_reason("b");
+    assert_eq!(reason["kind"], "trackBusy", "{reason}");
+    assert_eq!(
+        reason["message"],
+        "Waiting for the track's checkout: another task is using it"
+    );
+    assert!(pending_reason("c").is_null(), "a terminal task is not held");
     assert_eq!(
         serde_json::to_value(view).unwrap()["current"]["blocking_reason"],
-        reason
+        reason["message"]
     );
 }
 
@@ -484,7 +483,6 @@ async fn task_recovery_list_carries_the_worker_worktree_facts() {
         json!({
             "path": lease_path.to_string_lossy(),
             "state": "held",
-            "removed": false,
         }),
         "a per-card lease from before S2 names no branch (its row does not record one), no \
          last_commit: {entry}"
@@ -523,7 +521,6 @@ async fn task_recovery_list_carries_the_worker_worktree_facts() {
             "state": "held",
             "branch": event_branch,
             "last_commit": sha,
-            "removed": false,
         }),
         "{entry}"
     );
@@ -589,7 +586,6 @@ async fn task_recovery_list_names_the_worktree_base_sha_from_the_lease_row() {
             "path": lease_path.to_string_lossy(),
             "state": "held",
             "base_sha": base_sha,
-            "removed": false,
         }),
         "full detail names the recorded base: {entry}"
     );
@@ -621,202 +617,4 @@ async fn task_recovery_list_names_the_worktree_base_sha_from_the_lease_row() {
             "{args}: the released lease still names its base: {entry}"
         );
     }
-}
-
-/// Append one card-scoped kernel event for the worker card and return its event id.
-async fn append_worker_card_event(
-    boot: &crate::mcp_track_report::Boot,
-    event: calm_server::event::Event,
-) -> i64 {
-    let scope = calm_server::event::EventScope::Card {
-        card: boot.worker_card_id.clone(),
-        track: boot.track_id.clone(),
-        area: boot.area_id.clone(),
-    };
-    let (_, ids) = calm_server::db::write_with_actor_events_typed(
-        boot.repo.as_ref(),
-        None,
-        &boot.ctx.events,
-        &boot.ctx.write,
-        move |_| Box::pin(async move { Ok(((), vec![(ActorId::KernelDispatcher, scope, event)])) }),
-    )
-    .await
-    .unwrap();
-    ids[0]
-}
-
-/// A release only flips the row; `worktree.removed` (which only a per-card worktree before
-/// #1830 S2 ever got) hides the path and branch until the card is provisioned again.
-#[tokio::test]
-async fn task_recovery_list_worktree_facts_tell_a_removed_worktree_from_a_retained_one() {
-    let boot = boot().await;
-    declare(&boot, declaration("b", &[])).await;
-    let b = current(&boot, "b").await;
-    let pool = boot.repo.sqlite_pool().unwrap();
-    sqlx::query("UPDATE tasks SET worker_card_id=?1 WHERE id=?2")
-        .bind(boot.worker_card_id.as_str())
-        .bind(&b.id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let track = boot.track_id.as_str().to_string();
-    let card = boot.worker_card_id.as_str().to_string();
-    let repo_root = tempfile::tempdir().expect("tempdir");
-    let lease_path = repo_root
-        .path()
-        .join(".claude")
-        .join("worktrees")
-        .join(&track)
-        .join(&card);
-    let lease_path_json = json!(lease_path.to_string_lossy());
-    // The per-card branch a pre-S2 kernel commit named.
-    let naming_branch = format!("neige/{track}/{card}");
-
-    // Lease 1: acquired, then released through the flip-only production path.
-    calm_server::test_seams::acquire_workspace_lease_for_test(
-        &pool,
-        &card,
-        &track,
-        "test-owner",
-        &lease_path,
-    )
-    .await
-    .unwrap();
-    assert!(
-        calm_server::test_seams::release_workspace_lease_for_card_for_test(
-            boot.repo.as_ref(),
-            &boot.ctx.events,
-            &card,
-        )
-        .await
-        .unwrap(),
-        "lease 1 releases"
-    );
-    assert!(lease_path.is_dir(), "flip-only release keeps the checkout");
-    let entry = list_entry(&boot, json!({})).await;
-    assert_eq!(
-        entry["worktree"],
-        json!({
-            "path": lease_path_json,
-            "state": "released",
-            "removed": false,
-        }),
-        "released + retained: the path stays, removed:false: {entry}"
-    );
-
-    // Lease 2 on the same card and path. `acquire` stamps `created_at_ms` with the wall clock and
-    // ties break on a random uuid, so push lease 1 back by a tick to make "latest lease" deterministic.
-    sqlx::query(
-        "UPDATE workspace_leases SET created_at_ms = created_at_ms - 10 WHERE card_id = ?1",
-    )
-    .bind(&card)
-    .execute(&pool)
-    .await
-    .unwrap();
-    calm_server::test_seams::acquire_workspace_lease_for_test(
-        &pool,
-        &card,
-        &track,
-        "test-owner",
-        &lease_path,
-    )
-    .await
-    .unwrap();
-    let lease_2: String = sqlx::query_scalar(
-        "SELECT lease_id FROM workspace_leases WHERE card_id = ?1 AND state = 'held'",
-    )
-    .bind(&card)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    // The kernel committed on this worktree before it went away.
-    let sha = "0123456789abcdef0123456789abcdef01234567".to_string();
-    append_worker_card_event(
-        &boot,
-        calm_server::event::Event::WorktreeCommitted {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            commit_sha: sha.clone(),
-            branch: naming_branch.clone(),
-            delivery_id: None,
-            base_is_ancestor: None,
-        },
-    )
-    .await;
-    let entry = list_entry(&boot, json!({})).await;
-    assert_eq!(
-        entry["worktree"],
-        json!({
-            "path": lease_path_json,
-            "state": "held",
-            "branch": naming_branch,
-            "last_commit": sha,
-            "removed": false,
-        }),
-        "lease 2 held with a commit: {entry}"
-    );
-
-    // Lease 2 released, then its worktree removed (a pre-S2 per-card removal).
-    assert!(
-        calm_server::test_seams::release_workspace_lease_for_card_for_test(
-            boot.repo.as_ref(),
-            &boot.ctx.events,
-            &card,
-        )
-        .await
-        .unwrap(),
-        "lease 2 releases"
-    );
-    let released: String =
-        sqlx::query_scalar("SELECT state FROM workspace_leases WHERE lease_id = ?1")
-            .bind(&lease_2)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(released, "released");
-    append_worker_card_event(
-        &boot,
-        calm_server::event::Event::WorktreeRemoved {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            path: lease_path.to_string_lossy().to_string(),
-        },
-    )
-    .await;
-    let entry = list_entry(&boot, json!({})).await;
-    assert_eq!(
-        entry["worktree"],
-        json!({
-            "state": "released",
-            "last_commit": sha,
-            "removed": true,
-        }),
-        "released + removed: no path, no branch, sha kept, removed:true: {entry}"
-    );
-    // `detail:"summary"` carries `removed` too.
-    let compact = list_entry(&boot, json!({"detail":"summary","key":"b"})).await;
-    assert_eq!(compact["worktree"], entry["worktree"], "{compact}");
-
-    // Re-provisioned after the removal: the path is back.
-    append_worker_card_event(
-        &boot,
-        calm_server::event::Event::WorktreeProvisioned {
-            track_id: boot.track_id.clone(),
-            card_id: boot.worker_card_id.clone(),
-            path: lease_path.to_string_lossy().to_string(),
-        },
-    )
-    .await;
-    let entry = list_entry(&boot, json!({})).await;
-    assert_eq!(
-        entry["worktree"],
-        json!({
-            "path": lease_path_json,
-            "state": "released",
-            "branch": naming_branch,
-            "last_commit": sha,
-            "removed": false,
-        }),
-        "provisioned after removed: path and branch are back: {entry}"
-    );
 }

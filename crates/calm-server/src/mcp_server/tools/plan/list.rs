@@ -117,7 +117,6 @@ pub(super) fn summary(entry: &Value) -> Value {
             "worktree/last_commit",
             "worktree/base_sha",
             "worktree/state",
-            "worktree/removed",
             "candidate/binding",
             "candidate/reason",
             "candidate/delivery/state",
@@ -133,9 +132,6 @@ pub(super) fn summary(entry: &Value) -> Value {
             "candidate/verification/gate_attempt",
             "candidate/upstream/sha",
             "candidate/upstream/behind",
-            "candidate/carry/receipt_id",
-            "candidate/carry/carry_sha",
-            "candidate/carry/onto_sha",
             "recovery/guidance/blocking_condition",
             "recovery/guidance/supported_continuation",
             // An empty `{}` (terminal worker, no lease) must survive the summary.

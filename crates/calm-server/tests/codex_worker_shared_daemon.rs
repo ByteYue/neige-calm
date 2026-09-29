@@ -235,7 +235,6 @@ async fn boot(start_shared: bool) -> Boot {
         Arc::new(tokio::sync::OnceCell::new()),
         Arc::new(tokio::sync::OnceCell::new()),
         tmp.path().join("gate-logs"),
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .expect("spawn McpServer");
@@ -251,7 +250,6 @@ async fn boot(start_shared: bool) -> Boot {
         write: WriteContext::new(cache.clone(), wcc.clone()),
         daemon_token_hash: None,
         gate_logs_dir: tmp.path().join("gate-logs"),
-        task_budget_default: calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
         plugin_host: Arc::new(tokio::sync::OnceCell::new()),
         operation_runtime: Arc::new(tokio::sync::OnceCell::new()),
         scheduler_poke: Arc::new(tokio::sync::OnceCell::new()),
@@ -458,7 +456,6 @@ async fn worker_card_count_with_prefix(boot: &Boot, prefix: &str) -> usize {
 }
 
 struct PersistedEventRow {
-    id: i64,
     kind: String,
     payload: Value,
 }
@@ -497,8 +494,7 @@ async fn ordered_event_rows(repo: &SqlxRepo, kinds: &[&str]) -> Vec<PersistedEve
         .await
         .unwrap()
         .into_iter()
-        .map(|(id, kind, payload)| PersistedEventRow {
-            id,
+        .map(|(_, kind, payload)| PersistedEventRow {
             kind,
             payload: serde_json::from_str(&payload).unwrap(),
         })
@@ -639,7 +635,6 @@ async fn app_state_with_fake_worker_daemon() -> (AppState, Arc<SqlxRepo>, TrackI
         Arc::new(tokio::sync::OnceCell::new()),
         Arc::new(tokio::sync::OnceCell::new()),
         tmp.path().join("worker-recovery-gate-logs"),
-        calm_server::scheduler::DEFAULT_TRACK_TASK_BUDGET,
     )
     .await
     .expect("spawn worker recovery McpServer");
@@ -735,25 +730,18 @@ async fn worker_operation_verifies_the_track_worktree_before_session_started_and
     assert_eq!(lease.2, card_id);
     assert_eq!(lease.3, track_id.to_string());
 
-    let rows = ordered_event_rows(&repo, &["worktree.provisioned", "worker_session.started"]).await;
-    let provisioned = rows
-        .iter()
-        .find(|row| row.kind == "worktree.provisioned")
-        .expect("worktree.provisioned event");
+    let rows = ordered_event_rows(&repo, &["worker_session.started"]).await;
     let session_started = rows
         .iter()
         .find(|row| row.kind == "worker_session.started")
         .expect("worker_session.started event");
-    assert!(
-        provisioned.id < session_started.id,
-        "worktree.provisioned must precede worker_session.started"
-    );
-    assert_eq!(provisioned.payload["track_id"], track_id.to_string());
-    assert_eq!(provisioned.payload["card_id"], card_id);
-    assert_eq!(provisioned.payload["path"], cwd);
     assert_eq!(session_started.payload["card_id"], card_id);
+    assert_eq!(
+        event_count(&repo, "worktree.provisioned").await,
+        0,
+        "the spawn creates no worktree, so it records none"
+    );
 
-    let provisioned_before = event_count(&repo, "worktree.provisioned").await;
     let session_started_before = event_count(&repo, "worker_session.started").await;
     sqlx::query("UPDATE terminals SET exit_code = 0, signal_killed = 0 WHERE id = ?1")
         .bind(&terminal_id)
@@ -783,11 +771,6 @@ async fn worker_operation_verifies_the_track_worktree_before_session_started_and
     .unwrap();
 
     state.operation_runtime.drive().await.unwrap();
-    assert_eq!(
-        event_count(&repo, "worktree.provisioned").await,
-        provisioned_before,
-        "re-driving app_server_interact must not duplicate worktree.provisioned"
-    );
     assert_eq!(
         event_count(&repo, "worker_session.started").await,
         session_started_before,

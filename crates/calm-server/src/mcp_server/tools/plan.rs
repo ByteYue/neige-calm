@@ -662,7 +662,6 @@ async fn plan_list(
     let args = list::Args::parse(&args)?;
     let (_card, track) = resolve_track_for_identity(&ctx, &identity).await?;
     let actor = identity.to_actor_id();
-    let task_budget_default = ctx.task_budget_default;
     let summary = args.summary;
     let tx_track = track.clone();
     let entries = crate::db::write_in_tx_typed(ctx.repo.as_ref(), move |tx| {
@@ -689,7 +688,6 @@ async fn plan_list(
                         &track.id,
                         &allocation.key,
                         &actor,
-                        task_budget_default,
                     )
                     .await?;
                     let mut entry = if args.summary {
@@ -746,12 +744,10 @@ async fn plan_list(
                     }
                     // Given for every current attempt, `pending`/`failed` included (D8).
                     let mut measured_base = None;
-                    let mut carry = None;
                     if let Some(task) = &task {
                         let binding = crate::git_candidate::view::candidate_view_tx(tx, task, worktree_facts.as_ref()).await?;
                         measured_base = binding.measured_base().map(str::to_string);
                         entry["candidate"] = serde_json::to_value(binding)?;
-                        carry = crate::task_replace::view::carry_view_tx(tx, task).await?;
                     }
                     // MCP-only: `guidance` exists only here; the REST wire type is unchanged.
                     if let (Some(refused), Some(task)) = (&refusal, &task) {
@@ -759,7 +755,7 @@ async fn plan_list(
                             recovery_guidance::guidance_tx(tx, task, refused, worktree_facts)
                                 .await?;
                     }
-                    tasks_json.push((entry, measured_base, carry));
+                    tasks_json.push((entry, measured_base));
                     after_key = Some(allocation.key);
                 }
                 if args.key.is_some() || !full_page {
@@ -773,11 +769,7 @@ async fn plan_list(
     .map_err(|error| map_plan_error("plan_list", error))?;
     // After the commit: `candidate.upstream` runs git, which must never hold the write
     // transaction, and runs it on a blocking thread, not a runtime worker.
-    let bases: Vec<Option<String>> = entries.iter().map(|(_, base, _)| base.clone()).collect();
-    let carries = crate::task_replace::view::carry_json_blocking(
-        entries.iter().map(|(_, _, carry)| carry.clone()).collect(),
-    )
-    .await;
+    let bases: Vec<Option<String>> = entries.iter().map(|(_, base)| base.clone()).collect();
     let staleness = crate::git_candidate::staleness::upstream_staleness_blocking(
         track.id.to_string(),
         track.workspace.path.clone(),
@@ -787,13 +779,9 @@ async fn plan_list(
     let tasks_json: Vec<Value> = entries
         .into_iter()
         .zip(staleness)
-        .zip(carries)
-        .map(|(((mut entry, _, _), upstream), carry)| {
+        .map(|((mut entry, _), upstream)| {
             if let Some(upstream) = upstream {
                 entry["candidate"]["upstream"] = json!(upstream);
-            }
-            if let Some(carry) = carry {
-                entry["candidate"]["carry"] = carry;
             }
             if summary {
                 list::summary(&entry)

@@ -301,7 +301,7 @@ fn dispatcher_filter_matches_push_kinds() {
         to: crate::model::TrackLifecycle::Planning,
         agent_message: None,
     })));
-    assert!(filter.matches(&env(Event::TrackUpdated(
+    assert!(!filter.matches(&env(Event::TrackUpdated(
         crate::event::TrackUpdatedPayload::new(
             crate::model::Track {
                 id: track.clone(),
@@ -3210,42 +3210,6 @@ async fn settled_event_maps_to_observation_with_turn_text() {
     );
     assert!(!text.to_ascii_lowercase().contains("retry"), "{text}");
 
-    // Once the worktree is removed the sentence drops the retained clause.
-    let removed = crate::event::EventScope::Card {
-        card: CardId::from("worker"),
-        track: track.clone(),
-        area: AreaId::from("c"),
-    };
-    crate::db::write_in_tx_typed(&repo, move |tx| {
-        Box::pin(async move {
-            crate::db::sqlite::append_decision_event_in_tx(
-                tx,
-                &ActorId::KernelDispatcher,
-                &removed,
-                None,
-                &Event::WorktreeRemoved {
-                    track_id: TrackId::from("w"),
-                    card_id: CardId::from("worker"),
-                    path: "/gone".into(),
-                },
-            )
-            .await?;
-            Ok(())
-        })
-    })
-    .await
-    .unwrap();
-    let text = resolve_harness_observation(&repo, &track, &failed)
-        .await
-        .unwrap()
-        .unwrap()
-        .to_turn_text();
-    assert!(!text.contains("Files retained at"), "{text}");
-    assert!(
-        text.contains("index.lock exists.\nRead the worker output at runs/"),
-        "{text}"
-    );
-
     // No tasks row → no observation (the same outcome as the other row-backed settlements).
     let orphan = git_delivery_settled_event("no-such-attempt", DeliveryWakeReason::Failed);
     assert!(
@@ -3735,14 +3699,13 @@ async fn deferred_settlement_is_silent_live_and_on_replay() {
     // loops. The scheduler's operation runtime is dropped, so its poke drives no gate.
     let write = WriteContext::new(role_cache, track_area_cache);
     let semaphore = Arc::new(Semaphore::new(1));
-    let scheduler = Scheduler::new_with_task_budget_default(
+    let scheduler = Scheduler::new(
         repo.clone(),
         events.clone(),
         write.clone(),
         std::sync::Weak::new(),
         Arc::clone(&semaphore),
         std::env::temp_dir().join("neige-dispatcher-test-gate-logs"),
-        crate::scheduler::DEFAULT_TRACK_TASK_BUDGET,
         crate::scheduler::WorkerIdleWake::new(
             crate::shared_codex_appserver::SharedCodexAppServer::new_stub(repo.clone()),
             crate::scheduler::WORKER_IDLE_TURN_GRACE,
@@ -4074,13 +4037,9 @@ mod report_edit_block_refs {
 
         let (doc_rev_after, blocks_after) = resolve(&fx, &event).await;
 
-        let read = crate::track_report_read::load_report_read_snapshot(
-            &fx.repo,
-            "report",
-            crate::scheduler::DEFAULT_TRACK_TASK_BUDGET,
-        )
-        .await
-        .unwrap();
+        let read = crate::track_report_read::load_report_read_snapshot(&fx.repo, "report")
+            .await
+            .unwrap();
         assert_eq!(doc_rev_after, Some(read.doc_rev));
         assert!(read.doc_rev >= 1, "the persist bumped docRev");
         let expected: Vec<ReportBlockRef> = read
