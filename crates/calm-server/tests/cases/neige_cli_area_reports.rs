@@ -325,3 +325,74 @@ async fn a_worker_is_refused_area_reports_through_neige() {
     }
     assert_eq!(ok(&boot, &["cat", "report.md"]).await, "own\n");
 }
+
+const BLOCKS_BODY: &str =
+    "Contract intro.\n\n# Goal\n\nalpha\n\n# Findings\n\nbeta\n\n# Next\n\ngamma\n";
+
+/// The report's block ids in document order, from the snapshot `calm.area.outline` also reads.
+async fn block_ids(boot: &CardBoot, report_card: &str) -> Vec<String> {
+    calm_server::track_report_read::load_report_doc_snapshot(boot.repo.as_ref(), report_card)
+        .await
+        .unwrap()
+        .blocks
+        .into_iter()
+        .map(|block| block.id)
+        .collect()
+}
+
+/// #1874 through the real `neige` path: `cat <report> --blocks` prints the chosen blocks with their
+/// marker lines (the same bytes under `--json`), an unknown id lists the report's blocks, and a path
+/// that names no report refuses the option.
+#[tokio::test]
+async fn planner_reads_chosen_report_blocks_through_neige() {
+    let boot = boot_with_role(CardRole::Planner).await;
+    let area = area_of(&boot).await;
+    let own_card = add_report(&boot, &boot.track_id, "# Own\n\nmine\n").await;
+    let login = add_track(&boot, &area, "登录 排查").await;
+    let login_card = add_report(&boot, &login, BLOCKS_BODY).await;
+    let ids = block_ids(&boot, &login_card).await;
+    assert_eq!(ids.len(), 4, "{ids:?}");
+
+    let path = "area/reports/登录 排查.md";
+    let chosen = format!("{},{}", ids[3], ids[1]);
+    let want = format!(
+        "<!-- neige:{} -->\n# Goal\n\nalpha\n\n<!-- neige:{} -->\n# Next\n\ngamma\n",
+        ids[1], ids[3]
+    );
+    assert_eq!(ok(&boot, &["cat", path, "--blocks", &chosen]).await, want);
+    assert_eq!(
+        ok(&boot, &["--json", "cat", "--blocks", &chosen, path]).await,
+        want
+    );
+    let own = block_ids(&boot, &own_card).await;
+    assert_eq!(
+        ok(&boot, &["cat", "report.md", "--blocks", &own[0]]).await,
+        format!("<!-- neige:{} -->\n# Own\n\nmine\n", own[0])
+    );
+
+    let (stdout, stderr, exit) = neige(&boot, &["cat", path, "--blocks", "b_nope"]).await;
+    assert_eq!((exit, stdout.as_str()), (4, ""));
+    assert_eq!(
+        stderr,
+        format!(
+            "neige: calm.track.cat: unknown block id `b_nope`; this report's blocks are:\n  \
+             {}  Contract intro.\n  {}  Goal\n  {}  Findings\n  {}  Next (code -32602)\n",
+            ids[0], ids[1], ids[2], ids[3]
+        )
+    );
+    let (_, stderr, exit) = neige(&boot, &["--json", "cat", path, "--blocks", "b_nope"]).await;
+    let error: Value = serde_json::from_str(&stderr).expect("one JSON error line");
+    assert_eq!(exit, 4);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("\n  {}  Goal\n", ids[1]))),
+        "{error}"
+    );
+
+    for path in ["runs/index.json", "area/reports/"] {
+        let (stdout, stderr, exit) = neige(&boot, &["cat", path, "--blocks", &ids[1]]).await;
+        assert_eq!((exit, stdout.as_str()), (4, ""), "{path}");
+        assert!(stderr.contains("is not a report"), "{path}: {stderr}");
+    }
+}

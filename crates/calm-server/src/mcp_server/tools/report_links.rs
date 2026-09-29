@@ -186,7 +186,7 @@ fn outline_response(
     Value::Object(response)
 }
 
-fn block_heading(block: &calm_types::track_report::ReportBlock) -> String {
+pub(crate) fn block_heading(block: &calm_types::track_report::ReportBlock) -> String {
     if block.kind != calm_types::report_blocks::KIND_PROSE {
         if block.kind == calm_types::report_blocks::KIND_TASK {
             let field = if block.payload.get("kind").and_then(Value::as_str) == Some("terminal") {

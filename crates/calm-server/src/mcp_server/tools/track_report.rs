@@ -15,7 +15,9 @@ use crate::mcp_server::tools::lifecycle_args::{
 use crate::mcp_server::tools::track_report_hydrate::{hydrated_block_index, parse_resolve_arg};
 use crate::model::{Card, CardRole, Track, TrackLifecycle};
 use crate::track_report::{ReportDocOp, TrackReportPayload};
-use crate::track_report_read::load_report_read_snapshot;
+use crate::track_report_read::{
+    load_report_read_snapshot, marked_blocks_text, selected_blocks_text,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -169,44 +171,13 @@ pub(crate) async fn report_read(
         ReadSelect::Index => None,
         ReadSelect::Blocks(ids) => {
             // Markers are unconditional here: a partial text is only addressable through them. An unknown id is the caller's mistake.
-            for id in ids {
-                if !snapshot.blocks.iter().any(|block| &block.id == id) {
-                    return Err(RpcError::invalid_params(format!(
-                        "calm.report.read: select.blocks: unknown block id `{id}`"
-                    )));
-                }
-            }
-            let mut text = String::new();
-            for block in snapshot
-                .blocks
-                .iter()
-                .filter(|block| ids.contains(&block.id))
-            {
-                calm_types::report_blocks::append_block_text(
-                    &mut text,
-                    &format!(
-                        "{}{}",
-                        calm_types::report_blocks::marker_line(&block.id),
-                        calm_types::report_blocks::flat_text(block)
-                    ),
-                );
-            }
-            Some(text)
+            Some(selected_blocks_text(&snapshot.blocks, ids).map_err(|id| {
+                RpcError::invalid_params(format!(
+                    "calm.report.read: select.blocks: unknown block id `{id}`"
+                ))
+            })?)
         }
-        ReadSelect::Full if with_markers => {
-            let mut text = String::new();
-            for block in &snapshot.blocks {
-                calm_types::report_blocks::append_block_text(
-                    &mut text,
-                    &format!(
-                        "{}{}",
-                        calm_types::report_blocks::marker_line(&block.id),
-                        calm_types::report_blocks::flat_text(block)
-                    ),
-                );
-            }
-            Some(text)
-        }
+        ReadSelect::Full if with_markers => Some(marked_blocks_text(&snapshot.blocks)),
         ReadSelect::Full => Some(snapshot.body.clone()),
     };
     // `resolved` is rows and overlays only; this read never calls a plugin and never writes.

@@ -35,7 +35,7 @@
   },
   {
     "name": "calm.area.outline",
-    "description_sha256": "25b710d61ead27f9a66a5171e6c788e1134272ac6abe444364396cbe04225cbc",
+    "description_sha256": "6d47d2fdb71bcf4b33c91e08634e9903e437c7c85a97d6762b4a93330b2f3c83",
     "input_schema": {
       "additionalProperties": false,
       "properties": {},
@@ -2157,9 +2157,17 @@
   },
   {
     "name": "calm.track.cat",
-    "description_sha256": "095afc4efe18aa69813ab37ccb9a371db94d953afa0f578abb1f828238c6e4ea",
+    "description_sha256": "6502268f274e9218c3ddbea310eb40a7a4ebd1a059d0073a656a23057e9ee2e4",
     "input_schema": {
       "properties": {
+        "blocks": {
+          "description": "Report paths only: print just these blocks, as calm.report.read select.blocks does.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
         "path": {
           "type": "string"
         }

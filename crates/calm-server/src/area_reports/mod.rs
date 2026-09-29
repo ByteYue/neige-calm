@@ -2,8 +2,8 @@
 //! served by `neige ls`, `neige find` and `neige cat`. This module lists, filters, resolves and reads
 //! for all three. The area is always the caller's own; a path resolves only against that area's
 //! listing, so no name, ID suffix, duplicate title, rename or traversal reaches another area. A read
-//! returns a report's body, tags and the report card's `updated_at` — never another track's card
-//! payload, runs or workspace. The name codec lives in [`name`].
+//! returns a report's body or its blocks (#1874), tags and the report card's `updated_at` — never
+//! another track's card payload, runs or workspace. The name codec lives in [`name`].
 
 pub mod glob;
 pub mod name;
@@ -17,6 +17,8 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::track_fs_view::{TrackFsContent, TrackFsError, report_markdown};
+use crate::track_report::ReportBlock;
+use crate::track_report_read::report_doc_snapshot;
 
 /// The directory every report path starts with.
 pub const REPORTS_DIR: &str = "area/reports";
@@ -167,6 +169,43 @@ pub async fn read(
     area_id: &str,
     file: &str,
 ) -> Result<TrackFsContent, TrackFsError> {
+    let report = resolve_and_read(pool, area_id, file).await?;
+    report_markdown(&report.card_id, report.payload)
+}
+
+/// The block projection of the report `file` names in `area_id` — the blocks `calm.area.outline`
+/// indexes and `calm.report.read` selects — resolved and re-checked exactly as [`read`].
+pub async fn read_blocks(
+    pool: &SqlitePool,
+    area_id: &str,
+    file: &str,
+) -> Result<Vec<ReportBlock>, TrackFsError> {
+    let report = resolve_and_read(pool, area_id, file).await?;
+    report_doc_snapshot(
+        &report.card_id,
+        report.updated_at,
+        report.payload,
+        report.body_crdt.as_deref(),
+    )
+    .map(|snapshot| snapshot.blocks)
+    .map_err(|e| TrackFsError::Internal(e.to_string()))
+}
+
+/// One resolved report card, read in one statement.
+struct ReadReport {
+    card_id: String,
+    payload: serde_json::Value,
+    body_crdt: Option<Vec<u8>>,
+    updated_at: i64,
+}
+
+/// Resolves `file` against the area's listing, then reads that report's row in one statement that
+/// re-checks the track and the area.
+async fn resolve_and_read(
+    pool: &SqlitePool,
+    area_id: &str,
+    file: &str,
+) -> Result<ReadReport, TrackFsError> {
     let path = format!("{REPORTS_DIR}/{file}");
     let parsed = name::parse(file).map_err(TrackFsError::PathNotAvailable)?;
     let not_found = || {
@@ -200,17 +239,22 @@ pub async fn read(
             )));
         }
     };
-    let payload = store::payload(pool, area_id, &report.row)
+    let stored = store::report(pool, area_id, &report.row)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
-    let payload = serde_json::from_str(&payload).map_err(|e| {
+    let card_id = report.row.card_id;
+    let payload = serde_json::from_str(&stored.payload).map_err(|e| {
         TrackFsError::Internal(format!(
-            "track_report: malformed payload on card {}: {e}",
-            report.row.card_id
+            "track_report: malformed payload on card {card_id}: {e}"
         ))
     })?;
-    report_markdown(&report.row.card_id, payload)
+    Ok(ReadReport {
+        card_id,
+        payload,
+        body_crdt: stored.body_crdt,
+        updated_at: stored.updated_at,
+    })
 }
 
 fn rfc3339_local(ms: i64) -> Result<String, TrackFsError> {

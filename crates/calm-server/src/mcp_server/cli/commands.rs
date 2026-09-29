@@ -48,6 +48,8 @@ pub(crate) enum OptValue {
     JsonOrText,
     /// Repeatable; collected into an array.
     TextList,
+    /// One comma-separated value, sent as the array of its pieces verbatim.
+    CommaList,
     /// Present means `true`; shapes only the kernel's text output and never reaches the tool.
     View,
 }
@@ -92,7 +94,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         tool: track_file::TOOL_TRACK_CAT,
         positionals: &[pos("path", Some("cat requires a path argument"))],
         too_many: Some("cat accepts exactly one path"),
-        options: &[],
+        options: &[opt("--blocks", "blocks", OptValue::CommaList, false)],
         confirm: None,
         render: Render::Content,
     },
@@ -321,6 +323,10 @@ pub(crate) fn parse(argv: &[String]) -> Result<Parsed, Usage> {
             OptValue::JsonOrText => {
                 serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()))
             }
+            OptValue::CommaList => raw
+                .split(',')
+                .map(|piece| Value::String(piece.to_string()))
+                .collect(),
             OptValue::TextList => {
                 let list = args
                     .entry(opt.key)
