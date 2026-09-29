@@ -64,14 +64,15 @@ fn check_section_read(
 
 /// Replace section `name` with `markdown` under `write_markdown` rules, matching old and new blocks
 /// inside the section only; an absent section the contract declares is created at its declared
-/// position. Returns the blocks now in the section, and whether the document anchor was checked.
+/// position. Returns the blocks now in the section, the ids it had before, and whether the document
+/// anchor was checked.
 pub(super) fn apply_replace_section(
     doc: &mut ReportDoc,
     name: &str,
     markdown: &str,
     read: &SectionRead,
     doc_anchor: DocAnchor,
-) -> Result<(Vec<ReportBlock>, bool), CalmError> {
+) -> Result<(Vec<ReportBlock>, Vec<String>, bool), CalmError> {
     let current = snapshot(doc)?;
     let (range, checked) = match locate_read(&current, name, read)? {
         Some(range) => (range, false),
@@ -111,18 +112,21 @@ pub(super) fn apply_replace_section(
         )));
     }
     validate_body_fences(&marked.cleaned)?;
+    let range_before = range.clone();
     let replaced = doc
         .replace_range(range, &marked.slices, &marked.hints)
         .map_err(block_op_internal)?;
-    Ok((replaced, checked))
+    let before = current[range_before].iter().map(|b| b.id.clone()).collect();
+    Ok((replaced, before, checked))
 }
 
-/// Delete every block of section `name`; the batch's live-task guard still refuses a live task.
+/// Delete every block of section `name` and return their ids; the batch's live-task guard still
+/// refuses a live task.
 pub(super) fn apply_delete_section(
     doc: &mut ReportDoc,
     name: &str,
     read: &SectionRead,
-) -> Result<(), CalmError> {
+) -> Result<Vec<String>, CalmError> {
     let current = snapshot(doc)?;
     let range = locate_read(&current, name, read)?.ok_or_else(|| {
         CalmError::BadRequest(section_error_message(
@@ -130,10 +134,10 @@ pub(super) fn apply_delete_section(
             &crate::report_sections::SectionError::Unknown(name.to_string()),
         ))
     })?;
-    for block in &current[range] {
+    for block in &current[range.clone()] {
         doc.delete_block(&block.id).map_err(block_op_internal)?;
     }
-    Ok(())
+    Ok(current[range].iter().map(|b| b.id.clone()).collect())
 }
 
 /// Where an absent section goes: before the first section the contract declares after it that is

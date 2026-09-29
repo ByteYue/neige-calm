@@ -470,6 +470,8 @@ pub enum Authored {
     Block(String, u32),
     Section(String, Vec<(String, u32)>),
     SectionDeleted(String),
+    /// A block the batch removed; its id may be minted again for a block the author never read.
+    Removed(String),
 }
 
 /// Which blocks an op wrote, before the post-op snapshot exists.
@@ -798,13 +800,14 @@ pub(crate) fn apply_report_op_traced(
                     }
                     BatchBlockOp::Delete { id, if_rev } => {
                         apply_delete(doc, id, *if_rev).map_err(step)?;
+                        authored.push(Authored::Removed(id.clone()));
                     }
                     BatchBlockOp::ReplaceSection {
                         section,
                         markdown,
                         read,
                     } => {
-                        let (replaced, checked) = sections::apply_replace_section(
+                        let (replaced, before, checked) = sections::apply_replace_section(
                             doc,
                             section,
                             markdown,
@@ -813,6 +816,12 @@ pub(crate) fn apply_report_op_traced(
                         )
                         .map_err(step)?;
                         doc_anchor_checked |= checked;
+                        authored.extend(
+                            before
+                                .into_iter()
+                                .filter(|id| !replaced.iter().any(|block| &block.id == id))
+                                .map(Authored::Removed),
+                        );
                         written_ids.extend(
                             replaced
                                 .iter()
@@ -828,7 +837,9 @@ pub(crate) fn apply_report_op_traced(
                         ));
                     }
                     BatchBlockOp::DeleteSection { section, read } => {
-                        sections::apply_delete_section(doc, section, read).map_err(step)?;
+                        let deleted =
+                            sections::apply_delete_section(doc, section, read).map_err(step)?;
+                        authored.extend(deleted.into_iter().map(Authored::Removed));
                         authored.push(Authored::SectionDeleted(section.clone()));
                     }
                 }

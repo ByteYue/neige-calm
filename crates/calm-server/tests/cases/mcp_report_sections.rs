@@ -642,3 +642,30 @@ async fn own_writes_keep_the_docrev_anchor_but_a_foreign_one_breaks_it() {
     assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
     assert_eq!(payload(&boot).await.summary, "s1");
 }
+
+#[tokio::test]
+async fn a_block_an_own_replace_dropped_is_not_read_any_more() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    read_sections(&boot, planner_identity(&boot), &["概要"]).await;
+    let (dropped, _) = section_blocks(&boot, "# 概要").await.remove(1);
+    commit(
+        &boot,
+        planner_identity(&boot),
+        replace("概要", "# 概要\n\nonly\n"),
+    )
+    .await
+    .expect("replace drops the H2 block");
+    let err = commit(
+        &boot,
+        planner_identity(&boot),
+        json!({ "ops": [{ "op": "upsert", "id": dropped, "kind": "prose", "markdown": "## x\n" }] }),
+    )
+    .await
+    .expect_err("a dropped id is no longer this session's read");
+    assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
+    assert!(
+        err.message.contains("has not been read by this session"),
+        "{err:?}"
+    );
+}

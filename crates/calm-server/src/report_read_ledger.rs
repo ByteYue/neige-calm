@@ -8,6 +8,8 @@
 //! is live, so those were superseded or exited).
 //! Known gap, fails closed: a block the session creates inside a section it read is not added to
 //! that section's recorded list, so the next write of the section needs a re-read.
+//! Known gap, out of scope: a foreign delete whose id is later reused at the same rev can match a
+//! stale anchor; the same ABA exists for explicit `if_rev` on main.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -164,6 +166,12 @@ impl ReadLedger {
                 Authored::SectionDeleted(title) => {
                     read.sections.remove(title);
                 }
+                Authored::Removed(id) => {
+                    read.blocks.remove(id);
+                    for list in read.sections.values_mut() {
+                        list.retain(|(seen, _)| seen != id);
+                    }
+                }
             }
         }
         if doc_rev.is_some() {
@@ -236,5 +244,31 @@ mod tests {
         assert!(ledger.last_read("assistant", "report").is_some());
         clock.store(TTL_MS + 1, Ordering::SeqCst);
         assert_eq!(ledger.last_read("new", "report"), None, "expired");
+    }
+
+    #[test]
+    fn blocks_an_own_write_removed_are_forgotten() {
+        let ledger = ReadLedger::new();
+        let blocks = reassign_ids(&[], &split_body("# A\na\n## A1\nx\n# B\nb\n"));
+        let all = ids(&blocks, &[0, 1, 2]);
+        ledger.record("s", "planner", "report", Some(1), &blocks, &all);
+        let (x, y) = (all[1].clone(), all[2].clone());
+        ledger.record_authored(
+            "s",
+            "report",
+            &[
+                Authored::Removed(x.clone()),
+                Authored::Section("A".into(), vec![(all[0].clone(), 2)]),
+                Authored::Removed(y.clone()),
+                Authored::SectionDeleted("B".into()),
+            ],
+            None,
+        );
+        let read = ledger.last_read("s", "report").expect("recorded");
+        for gone in [&x, &y] {
+            assert!(!read.blocks.contains_key(gone), "{gone}");
+            assert!(read.sections.values().flatten().all(|(id, _)| id != gone));
+        }
+        assert_eq!(read.sections["A"], vec![(all[0].clone(), 2)]);
     }
 }
