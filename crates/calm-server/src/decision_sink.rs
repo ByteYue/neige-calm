@@ -45,7 +45,7 @@ pub struct ReportOpCommit {
     pub card: Card,
     pub block: Option<BlockOpOutcome>,
     pub warnings: Vec<SourceLinkWarning>,
-    /// What a batch itself wrote and whether it checked its document anchor (#1877).
+    /// What a batch itself wrote and whether its document anchor held (#1877).
     pub authored: Vec<crate::track_report::Authored>,
     pub doc_anchor_checked: bool,
 }

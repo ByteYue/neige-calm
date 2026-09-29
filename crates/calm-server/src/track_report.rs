@@ -460,7 +460,7 @@ pub struct ReportOpTrace {
     pub written_prose_block_ids: Vec<String>,
     /// A batch's own writes, in op order, for the author's read ledger (#1877).
     pub authored: Vec<Authored>,
-    /// Whether the batch checked its document anchor, i.e. the author knew the whole document.
+    /// Whether the doc before the batch was the one its anchor names, i.e. the author knew all of it.
     pub doc_anchor_checked: bool,
 }
 
@@ -782,8 +782,12 @@ pub(crate) fn apply_report_op_traced(
                                 authored.push(Authored::Block(outcome.id.clone(), outcome.rev));
                                 outcome
                             }
-                            None => apply_upsert_new(doc, kind, content, *position, true)
-                                .map_err(step)?,
+                            None => {
+                                let outcome = apply_upsert_new(doc, kind, content, *position, true)
+                                    .map_err(step)?;
+                                authored.push(Authored::Block(outcome.id.clone(), outcome.rev));
+                                outcome
+                            }
                         };
                         if kind == KIND_PROSE {
                             written_ids.push(outcome.id);
@@ -882,28 +886,29 @@ fn apply_persisted_report_op(
 }
 
 /// A batch's document anchor: an explicit one always, the session's last read only when `needed`.
-/// `Ok(true)` when it was checked.
+/// `Ok(true)` when the doc is the one the anchor names (checked, or equal though not needed), so the
+/// author knew the whole document before this write.
 fn check_doc_anchor(doc: &ReportDoc, anchor: DocAnchor, needed: bool) -> Result<bool, CalmError> {
     match anchor {
         DocAnchor::Explicit(expected) => check_doc_rev(doc, expected).map(|()| true),
-        DocAnchor::LastRead(read) if needed => {
+        DocAnchor::LastRead(read) => {
             let current = doc
                 .doc_rev()
                 .map_err(|e| CalmError::Internal(format!("track_report: doc rev: {e}")))?;
-            if current != read {
+            if needed && current != read {
                 return Err(CalmError::Conflict(format!(
                     "document revision conflict: current doc_rev is {current}, this session last \
                      read docRev {read} — re-read the report and retry"
                 )));
             }
-            Ok(true)
+            Ok(current == read)
         }
         DocAnchor::Unread if needed => Err(CalmError::BadRequest(
             "this session has not read the report's docRev: a summary, a created or moved block \
              and a created section need it — read the report with calm.report.read and retry"
                 .into(),
         )),
-        DocAnchor::LastRead(_) | DocAnchor::Unread => Ok(false),
+        DocAnchor::Unread => Ok(false),
     }
 }
 

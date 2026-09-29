@@ -594,3 +594,51 @@ async fn an_own_commit_counts_as_read_but_another_writer_in_between_does_not() {
     .expect_err("another writer's change stays a conflict");
     assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
 }
+
+#[tokio::test]
+async fn a_block_this_session_created_is_editable_by_id_without_a_rev() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    read_full(&boot).await;
+    let out = commit(
+        &boot,
+        planner_identity(&boot),
+        json!({ "ops": [{ "op": "upsert", "kind": "prose", "markdown": "# 附录\n\nz\n" }] }),
+    )
+    .await
+    .expect("create");
+    let id = out["blocks"].as_array().unwrap().last().unwrap()["id"].clone();
+    commit(
+        &boot,
+        planner_identity(&boot),
+        json!({ "ops": [{ "op": "upsert", "id": id, "kind": "prose", "markdown": "# 附录\n\nz2\n" }] }),
+    )
+    .await
+    .expect("the created block counts as read");
+    assert!(payload(&boot).await.body.ends_with("# 附录\n\nz2\n"));
+}
+
+#[tokio::test]
+async fn own_writes_keep_the_docrev_anchor_but_a_foreign_one_breaks_it() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    read_full(&boot).await;
+    let (id, _) = section_blocks(&boot, "# 决策").await.remove(0);
+    let own_upsert = |markdown: &str| json!({ "ops": [{ "op": "upsert", "id": id, "kind": "prose", "markdown": markdown }] });
+    commit(&boot, planner_identity(&boot), own_upsert("# 决策\n\nd1\n"))
+        .await
+        .expect("own upsert");
+    commit(&boot, planner_identity(&boot), json!({ "summary": "s1" }))
+        .await
+        .expect("no foreign write since the read: the docRev anchor advanced with the own write");
+
+    assistant_edits(&boot, "# 概要", "# 概要\n\nforeign\n").await;
+    commit(&boot, planner_identity(&boot), own_upsert("# 决策\n\nd2\n"))
+        .await
+        .expect("an unrelated block write needs no doc anchor");
+    let err = commit(&boot, planner_identity(&boot), json!({ "summary": "s2" }))
+        .await
+        .expect_err("a foreign write happened since the read");
+    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
+    assert_eq!(payload(&boot).await.summary, "s1");
+}

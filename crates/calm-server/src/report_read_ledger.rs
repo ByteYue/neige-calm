@@ -6,6 +6,8 @@
 //! refused until the session reads again. Eviction is lazy: the TTL on every access, and a session's
 //! first read drops every other session's entries of the same card (at most one session of a card
 //! is live, so those were superseded or exited).
+//! Known gap, fails closed: a block the session creates inside a section it read is not added to
+//! that section's recorded list, so the next write of the section needs a re-read.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
