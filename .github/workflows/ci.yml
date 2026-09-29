@@ -500,6 +500,29 @@ jobs:
       # mold via ld takeover rather than RUSTFLAGS: RUSTFLAGS feeds the rust-cache key.
       - uses: rui314/setup-mold@v1
 
+      # EXPERIMENT (#1835): time every linker invocation without touching cargo's fingerprint inputs.
+      - name: "experiment: wrap ld with a timer"
+        run: |
+          set -euo pipefail
+          nproc; free -g; cc --version | head -1
+          ls -l /usr/bin/ld /usr/bin/x86_64-linux-gnu-ld; ld --version | head -1
+          sudo mkdir -p /usr/local/libexec; sudo cp "$(readlink -f /usr/bin/ld)" /usr/local/libexec/mold-real
+          mold_bin=/usr/local/libexec/mold-real
+          sudo tee /usr/local/bin/ld-timed >/dev/null <<SH
+          #!/bin/bash
+          out=?; prev=
+          for a in "\$@"; do if [ "\$prev" = -o ]; then out=\$a; fi; prev=\$a; done
+          s=\$(date +%s.%N)
+          $mold_bin "\$@"; rc=\$?
+          e=\$(date +%s.%N)
+          echo "\$s \$e \$rc \$out" >> /tmp/ld-times.log
+          exit \$rc
+          SH
+          sudo chmod +x /usr/local/bin/ld-timed
+          sudo ln -sf /usr/local/bin/ld-timed /usr/bin/x86_64-linux-gnu-ld
+          sudo ln -sf /usr/local/bin/ld-timed /usr/bin/ld
+          ld --version | head -1
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-test
@@ -513,8 +536,35 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p calm-worker-runtime --bin calm-worker-boundary
-          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst
+          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst $EXPERIMENT_CARGO_ARGS --timings
           ls -l nextest-archive.tar.zst
+        env:
+          EXPERIMENT_CARGO_ARGS: ""
+
+      - name: "experiment: collect link times, binary sizes, linker identity"
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p exp
+          cp /tmp/ld-times.log exp/ || true
+          awk '{d=$2-$1; t+=d; n++; printf "%.2f %s\n", d, $4}' /tmp/ld-times.log | sort -rn > exp/ld-durations.txt
+          echo "links: $(wc -l < exp/ld-durations.txt) total_s: $(awk '{t+=$1} END{print t}' exp/ld-durations.txt)"
+          head -40 exp/ld-durations.txt
+          find target/debug/deps -maxdepth 1 -type f -executable -printf '%s %p\n' | sort -rn > exp/bin-sizes.txt
+          echo "test/bin executables: $(wc -l < exp/bin-sizes.txt) total_bytes: $(awk '{t+=$1} END{print t}' exp/bin-sizes.txt)"
+          head -20 exp/bin-sizes.txt
+          b=$(head -1 exp/bin-sizes.txt | awk '{print $2}'); readelf -p .comment "$b" | tee exp/comment.txt
+          readelf -S -W "$b" | grep -E 'debug|text' | tee exp/sections.txt
+          cp target/cargo-timings/cargo-timing-*.html exp/ || true
+          ls -l exp
+
+      - name: "experiment: upload timings"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp-timings
+          path: exp/
+          retention-days: 7
 
       - name: upload nextest archive
         if: github.event_name == 'pull_request'
@@ -530,7 +580,8 @@ jobs:
   rust-shards:
     name: rust test shard ${{ matrix.shard }}/8
     needs: [changes, rust-build]
-    if: ${{ always() && github.event_name == 'pull_request' && needs.rust-build.result == 'success' }}
+    # EXPERIMENT (#1835): shards off on this branch.
+    if: false
     strategy:
       fail-fast: false
       matrix:
