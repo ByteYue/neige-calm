@@ -16,7 +16,8 @@ use calm_server::mcp_server::registry::AppContext;
 use calm_server::mcp_server::tools::area_reports::TOOL_REPORT_FIND;
 use calm_server::mcp_server::tools::report_tag::TOOL_REPORT_TAG;
 use calm_server::mcp_server::tools::track_file::{TOOL_TRACK_CAT, TOOL_TRACK_LS};
-use calm_server::mcp_server::tools::track_report::{TOOL_REPORT_READ, TOOL_REPORT_WRITE};
+use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
+use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_WRITE_MARKDOWN;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack, TrackPatch, now_ms};
 use calm_server::plugin_host::mcp::RpcError;
@@ -232,12 +233,12 @@ async fn write_body(boot: &Boot, side: &Side, body: &str) {
         .expect("docRev");
     call(
         boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner(side),
         json!({ "body": body, "message": "write", "if_doc_rev": rev }),
     )
     .await
-    .expect("calm.report.write");
+    .expect("calm.report.write_markdown");
 }
 
 async fn tag(boot: &Boot, side: &Side, add: &[&str]) {

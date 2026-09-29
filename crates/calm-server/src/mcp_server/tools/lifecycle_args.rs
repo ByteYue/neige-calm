@@ -38,7 +38,7 @@ pub(crate) fn parse_write_args(args: &Value, tool: &str) -> Result<WriteArgs, Rp
 /// The optional twin of [`parse_write_args`] for the block channel
 /// (`calm.report.blocks.upsert`, `calm.report.write_markdown`): `message`
 /// may be omitted, but when present it must be a non-empty string;
-/// `lifecycle` parses exactly as on `calm.report.write`.
+/// `lifecycle` parses exactly as on `calm.report.commit`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OptionalWriteArgs {
     pub message: Option<String>,

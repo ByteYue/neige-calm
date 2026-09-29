@@ -1,10 +1,9 @@
 //! Receipt `warnings`: the `neige://source/` links in touched prose that this track cannot
-//! resolve, on each of the five agent write doors. The write is never blocked.
+//! resolve, on each of the three agent write doors. The write is never blocked.
 
 #![cfg(unix)]
 
 use calm_server::mcp_server::tools::source::TOOL_SOURCE_CAPTURE;
-use calm_server::mcp_server::tools::track_report::{TOOL_REPORT_EDIT, TOOL_REPORT_WRITE};
 use calm_server::mcp_server::tools::track_report_blocks::{
     TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
 };
@@ -249,9 +248,10 @@ async fn malformed_ids_and_anchors_are_warned_about() {
     );
 }
 
-/// `calm.report.write` and `calm.report.edit` are the two remaining planner doors into `commit_report_op`.
+/// A whole-document write that leaves a dangling link, then local commits that repair it and cite a
+/// missing anchor: each receipt names exactly the links the write leaves unresolved.
 #[tokio::test]
-async fn report_write_and_edit_carry_warnings_too() {
+async fn warnings_follow_a_dangling_link_through_its_repair_and_a_new_citation() {
     let boot = boot().await;
     let source_id = capture_manual(&boot).await;
     let resolved =
@@ -259,7 +259,7 @@ async fn report_write_and_edit_carry_warnings_too() {
     let rev = doc_rev(&boot).await;
     let receipt = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!("# One\n\n[ok]({resolved}) and [dead](neige://source/src_deadbeef)\n"),
@@ -268,44 +268,59 @@ async fn report_write_and_edit_carry_warnings_too() {
         }),
     )
     .await
-    .expect("calm.report.write");
+    .expect("calm.report.write_markdown");
     let warnings = receipt["warnings"].as_array().expect("warnings on write");
     assert_eq!(warnings.len(), 1, "{receipt}");
     assert_eq!(warnings[0]["destination"], "neige://source/src_deadbeef");
     assert_eq!(warnings[0]["kind"], "unresolved_source_link");
 
     // Repair the dangling link in place: no warnings left.
-    let rev = doc_rev(&boot).await;
-    let receipt = call_tool(
+    let receipt = commit_replacing_only_block(
         &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "neige://source/src_deadbeef",
-            "new_string": resolved,
-            "message": "repair",
-            "if_doc_rev": rev,
-        }),
+        &format!("# One\n\n[ok]({resolved}) and [dead]({resolved})\n"),
+        "repair",
     )
-    .await
-    .expect("calm.report.edit");
+    .await;
     assert_eq!(receipt["warnings"], json!([]), "{receipt}");
     // …and slip a new dangling anchor in through the same door.
-    let rev = doc_rev(&boot).await;
-    let receipt = call_tool(
+    let receipt = commit_replacing_only_block(
         &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
+        &format!(
+            "# One\n\n[gone](neige://source/src_00000000#q1) [ok]({resolved}) and [dead]({resolved})\n"
+        ),
+        "cite",
+    )
+    .await;
+    let warnings = receipt["warnings"].as_array().expect("warnings on commit");
+    assert_eq!(warnings.len(), 1, "{receipt}");
+    assert_eq!(warnings[0]["destination"], "neige://source/src_00000000#q1");
+}
+
+/// Replace the report's only block through `calm.report.commit`; returns the receipt.
+async fn commit_replacing_only_block(boot: &Boot, markdown: &str, message: &str) -> Value {
+    let index = call_tool(
+        boot,
+        TOOL_REPORT_READ,
+        planner_identity(boot),
+        json!({"select": "index"}),
+    )
+    .await
+    .expect("index");
+    let blocks = index["blocks"].as_array().expect("blocks");
+    assert_eq!(blocks.len(), 1, "{index}");
+    call_tool(
+        boot,
+        TOOL_REPORT_COMMIT,
+        planner_identity(boot),
         json!({
-            "old_string": "[ok](",
-            "new_string": "[gone](neige://source/src_00000000#q1) [ok](",
-            "message": "cite",
-            "if_doc_rev": rev,
+            "if_doc_rev": index["docRev"],
+            "message": message,
+            "ops": [{
+                "op": "upsert", "id": blocks[0]["id"], "if_rev": blocks[0]["rev"],
+                "kind": "prose", "markdown": markdown
+            }],
         }),
     )
     .await
-    .expect("calm.report.edit");
-    let warnings = receipt["warnings"].as_array().expect("warnings on edit");
-    assert_eq!(warnings.len(), 1, "{receipt}");
-    assert_eq!(warnings[0]["destination"], "neige://source/src_00000000#q1");
+    .expect("calm.report.commit")
 }

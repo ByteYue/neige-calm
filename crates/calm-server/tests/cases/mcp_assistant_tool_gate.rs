@@ -25,8 +25,6 @@ const ASSISTANT_ALLOWED_TOOLS: &[&str] = &[
 /// Denied tools whose handler a **Planner** token gets past; also the control list below.
 const ASSISTANT_DENIED_TOOLS_PLANNER_REACHABLE: &[&str] = &[
     // Report write channel — carries lifecycle, hence planner-only.
-    "calm.report.write",
-    "calm.report.edit",
     "calm.report.commit",
     // Cross-track / cross-area report discovery reads.
     "calm.area.outline",

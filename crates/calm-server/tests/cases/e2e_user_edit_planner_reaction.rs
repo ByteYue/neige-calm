@@ -16,7 +16,8 @@ use calm_server::error::CalmError;
 use calm_server::event::{BroadcastEnvelope, EventBus, SubscribeFilter, SubscribeScope};
 use calm_server::ids::{AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::track_report::{TOOL_REPORT_READ, TOOL_REPORT_WRITE};
+use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
+use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_WRITE_MARKDOWN;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack};
 use calm_server::plugin_host::mcp::RpcError;
@@ -375,7 +376,7 @@ async fn user_edit_via_rest_reaches_track_subscriber_and_planner_reads_back_user
     let initial_body = "# Goal\n\nv0 initial content from planner\n";
     call_mcp(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": initial_body,
@@ -497,7 +498,7 @@ async fn user_edit_via_rest_reaches_track_subscriber_and_planner_reads_back_user
     assert_eq!(payload.summary, "user edited the report");
 }
 
-/// A planner `report.write` surfaces on the track stream as `"planner"` (lowercase), the
+/// A planner `report.write_markdown` surfaces on the track stream as `"planner"` (lowercase), the
 /// spelling the prompt's ignore-own-echoes instruction and the push gate depend on.
 #[tokio::test]
 async fn planner_self_write_echoes_as_author_planner_on_the_track_stream() {
@@ -509,7 +510,7 @@ async fn planner_self_write_echoes_as_author_planner_on_the_track_stream() {
     // A priming write, drained so the next drain only sees what follows.
     call_mcp(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Goal\n\npriming body\n",
@@ -530,7 +531,7 @@ async fn planner_self_write_echoes_as_author_planner_on_the_track_stream() {
     // A second planner-authored write must surface as `author == "planner"`, NOT `"user"`.
     call_mcp(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Goal\n\nsecond planner write\n",

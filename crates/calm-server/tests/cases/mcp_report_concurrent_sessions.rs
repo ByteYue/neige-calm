@@ -9,7 +9,6 @@ use crate::mcp_track_report::{
     Boot, assistant_b_identity, assistant_identity, boot, call_tool, planner_identity,
 };
 use calm_server::mcp_server::registry::ToolCallIdentity;
-use calm_server::mcp_server::tools::track_report::TOOL_REPORT_WRITE;
 use calm_server::mcp_server::tools::track_report_blocks::{
     RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_MOVE, TOOL_REPORT_BLOCKS_UPSERT,
     TOOL_REPORT_WRITE_MARKDOWN,
@@ -81,7 +80,7 @@ fn assert_untouched(after_a: &Persisted, after_b: &Persisted, mouth: &str) {
 async fn seed(boot: &Boot) {
     call_tool(
         boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
         json!({
             "body": "# A\n\nalpha\n\n# B\n\nbeta\n",

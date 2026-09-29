@@ -181,7 +181,7 @@ f.flush()
 open(sys.argv[1], "w").write(f.readline())
 PY
     CALL='{"type":"assistant","uuid":"0b6d1d4e-6f5a-4c2e-9d8e-2a51f3c7b003","message":{"content":'
-    CALL+='[{"type":"tool_use","id":"toolu_mcp","name":"mcp__calm__calm_report_write","input":{"text":"x"}}]}}'
+    CALL+='[{"type":"tool_use","id":"toolu_mcp","name":"mcp__calm__calm_report_commit","input":{"text":"x"}}]}}'
     RESULT='{"type":"user","uuid":"0b6d1d4e-6f5a-4c2e-9d8e-2a51f3c7b004","message":{"role":"user","content":'
     RESULT+='[{"tool_use_id":"toolu_mcp","type":"tool_result","content":[{"type":"text","text":"ok"}]}]},'
     RESULT+='"tool_use_result":[{"type":"text","text":"ok"}]}'

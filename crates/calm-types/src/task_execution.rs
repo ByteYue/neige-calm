@@ -635,7 +635,7 @@ mod plugin_grant_tests {
         assert_eq!(serde_json::to_value(selection).unwrap(), legacy);
         for names in [
             vec!["*"],
-            vec!["calm.report.write"],
+            vec!["calm.report.commit"],
             vec!["plugin.foo_*"],
             vec!["plugin.foo_read", "plugin.foo_read"],
             vec!["plugin.foo_read\n"],
