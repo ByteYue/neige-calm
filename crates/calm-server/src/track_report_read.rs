@@ -79,6 +79,30 @@ async fn load_report_doc_snapshot_with_track(
     Ok((card.track_id, doc))
 }
 
+/// The own `report.md` view (the payload body, byte for byte what `area/reports/` prints) and the
+/// document snapshot of the same row read, so the read ledger records exactly what was printed.
+pub async fn load_report_markdown_with_snapshot(
+    repo: &dyn crate::db::RepoRead,
+    report_card_id: &str,
+) -> Result<(crate::track_fs_view::TrackFsContent, ReportDocSnapshot), CalmError> {
+    let (card, bytes) = repo
+        .card_get_with_body_crdt(report_card_id)
+        .await?
+        .ok_or_else(|| {
+            CalmError::Internal(format!(
+                "track_report: report card {report_card_id} vanished mid-read"
+            ))
+        })?;
+    let markdown = crate::track_fs_view::report_markdown(report_card_id, card.payload.clone())?;
+    let doc = report_doc_snapshot(
+        report_card_id,
+        card.updated_at,
+        card.payload,
+        bytes.as_deref(),
+    )?;
+    Ok((markdown, doc))
+}
+
 /// The document snapshot of one report card row (`payload` and `body_crdt` read together), shared by
 /// [`load_report_doc_snapshot`] and the `area/reports/` block read so their block ids cannot drift.
 pub(crate) fn report_doc_snapshot(

@@ -11,7 +11,9 @@ mod align;
 #[cfg(test)]
 mod projection_tests;
 
-pub use align::{mint_id, reassign_ids, reassign_ids_with_hints};
+pub use align::{
+    mint_id, reassign_ids, reassign_ids_with_hints, reassign_ids_with_hints_reserving,
+};
 pub use chart_series::{RANGE_DAYS, chart_series_range_days, is_valid_ymd, parse_ymd};
 pub use fence::{NonProseFence, canonical_json, neige_open_kind, parse_fence, render_fence};
 pub use kinds::{

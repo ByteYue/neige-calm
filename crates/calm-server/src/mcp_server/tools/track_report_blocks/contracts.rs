@@ -528,9 +528,9 @@ pub(super) fn commit_descriptor() -> ToolDescriptor {
             .to_string(),
         input_schema: json!({
             "type": "object",
-            "required": ["if_doc_rev", "message"],
+            "required": ["message"],
             "properties": {
-                "if_doc_rev": { "type": "integer", "minimum": 0, "description": "The document-wide docRev returned by calm.report.read; checked once for the whole commit." },
+                "if_doc_rev": { "type": "integer", "minimum": 0, "description": "Optional: the docRev to check. Omitted: this session's last read, checked only for summary/create/move." },
                 "message": message_schema(),
                 "summary": { "type": "string", "description": "New sidebar summary (~80 chars). Omit to keep the existing one." },
                 "lifecycle": lifecycle_schema(),
@@ -542,11 +542,12 @@ pub(super) fn commit_descriptor() -> ToolDescriptor {
                         "type": "object",
                         "required": ["op"],
                         "properties": {
-                            "op": { "type": "string", "enum": ["upsert", "move", "delete"] },
+                            "op": { "type": "string", "enum": ["replace", "upsert", "move", "delete"] },
+                            "section": { "type": "string", "description": "replace / delete: the section's H1 text; replace's `markdown` is the whole section, heading first." },
                             "id": { "type": "string", "description": "upsert (replace) / move / delete: the existing block id. Omit on upsert to create." },
-                            "if_rev": { "type": "integer", "minimum": 0, "description": "Required on upsert-with-id and delete: that block's rev you last read." },
+                            "if_rev": { "type": "integer", "minimum": 0, "description": "Optional on upsert-with-id and delete: the block's rev. Omitted: the rev this session last read." },
                             "kind": { "type": "string", "enum": block_kind_enum(), "description": "upsert: block kind." },
-                            "markdown": { "type": "string", "description": "upsert, kind=prose: the content." },
+                            "markdown": { "type": "string", "description": "upsert, kind=prose: the content. replace: the whole section." },
                             "payload": { "type": "object", "description": "upsert, data kinds: the schema-validated payload (see calm.report.blocks.kinds)." },
                             "position": { "type": "integer", "minimum": 0, "description": "upsert-create only: insertion index (default append)." },
                             "to_index": { "type": "integer", "minimum": 0, "description": "move: final 0-based index." }

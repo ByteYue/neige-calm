@@ -2131,11 +2131,6 @@ async fn commit_rejects_empty_commits_and_malformed_ops_before_touching_the_doc(
             "message must be non-empty",
         ),
         (
-            "missing if_doc_rev",
-            json!({ "message": "m", "summary": "x" }),
-            "`if_doc_rev` is required",
-        ),
-        (
             "op carries if_doc_rev",
             commit_args(
                 1,
@@ -2149,25 +2144,12 @@ async fn commit_rejects_empty_commits_and_malformed_ops_before_touching_the_doc(
             "ops[0]: unknown op `rename`",
         ),
         (
-            "replace without if_rev",
-            commit_args(
-                1,
-                json!([{ "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n" }]),
-            ),
-            "ops[0]: `if_rev` is required when `id` is given",
-        ),
-        (
             "create with if_rev",
             commit_args(
                 1,
                 json!([{ "op": "upsert", "if_rev": 1, "kind": "prose", "markdown": "# A\n" }]),
             ),
             "ops[0]: `if_rev` without `id` is meaningless",
-        ),
-        (
-            "delete without if_rev",
-            commit_args(1, json!([{ "op": "delete", "id": a_id }])),
-            "ops[0]: `if_rev` is required for delete",
         ),
         (
             "move without to_index",

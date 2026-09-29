@@ -11,13 +11,16 @@ use crate::mcp_server::registry::{
 use crate::mcp_server::tools::lifecycle_args::{parse_optional_write_args, parse_write_args};
 use crate::mcp_server::tools::track_report::{resolve_report_for_caller, updated_report_doc_rev};
 use crate::model::{CardRole, TrackLifecycle};
-use crate::track_report::{BatchBlockOp, MAX_BATCH_OPS, ReportDocOp};
+use crate::report_read_ledger::LastRead;
+use crate::track_report::{BatchBlockOp, DocAnchor, MAX_BATCH_OPS, ReportDocOp};
 use calm_types::report_blocks;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+mod anchors;
 mod contracts;
 
+use anchors::{block_anchor, parse_section_op};
 use contracts::{
     commit_descriptor, delete_descriptor, kinds_descriptor, kinds_table, move_descriptor,
     upsert_descriptor, write_markdown_descriptor,
@@ -286,6 +289,7 @@ async fn write_markdown(
 
 /// The one-call update: every op is parsed with its single-op tool's rules, then the whole list lands as one
 /// [`ReportDocOp::Batch`] inside one persist transaction (one doc-rev check, one docRev bump, one event pair).
+/// An omitted `if_doc_rev` / `if_rev` / section anchor is what this session last read (#1877).
 async fn commit(
     ctx: Arc<AppContext>,
     identity: ToolCallIdentity,
@@ -295,11 +299,7 @@ async fn commit(
     let tool = TOOL_REPORT_COMMIT;
     let obj = require_object(&args, tool)?;
     let write_args = parse_write_args(&args, tool)?;
-    let if_doc_rev = optional_u64(obj, "if_doc_rev", tool)?.ok_or_else(|| {
-        RpcError::invalid_params(format!(
-            "{tool}: `if_doc_rev` is required; read `docRev` from `calm.report.read`"
-        ))
-    })?;
+    let if_doc_rev = optional_u64(obj, "if_doc_rev", tool)?;
     let summary = optional_string(obj, "summary", tool)?;
     let raw_ops = match obj.get("ops") {
         None | Some(Value::Null) => &[][..],
@@ -321,16 +321,23 @@ async fn commit(
             "{tool}: nothing to commit — pass at least one of `ops`, `summary`, `lifecycle`"
         )));
     }
-    let ops = raw_ops
-        .iter()
-        .enumerate()
-        .map(|(index, raw)| parse_batch_op(raw, index, tool))
-        .collect::<Result<Vec<_>, _>>()?;
-    reject_duplicate_block_ids(&ops, tool)?;
-
     // The response reports the lifecycle transition this commit APPLIED, not the one it requested (a same-state request is a no-op).
     // Known gap: a transition another actor lands between this snapshot and the persist transaction is indistinguishable from ours.
     let (track, _, report_card, current) = resolve_report_for_caller(&ctx, &identity).await?;
+    let last_read = ctx
+        .read_ledger
+        .last_read(&identity.session_id, report_card.id.as_str());
+    let ops = raw_ops
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| parse_batch_op(raw, index, tool, last_read.as_ref()))
+        .collect::<Result<Vec<_>, _>>()?;
+    reject_duplicate_block_ids(&ops, tool)?;
+    let doc_anchor = match (if_doc_rev, &last_read) {
+        (Some(if_doc_rev), _) => DocAnchor::Explicit(if_doc_rev),
+        (None, Some(read)) => DocAnchor::LastRead(read.doc_rev),
+        (None, None) => DocAnchor::Unread,
+    };
     let track_id = track.id.clone();
     let lifecycle_before = track.lifecycle;
     let ReportOpCommit { card, warnings, .. } = CardDecisionSink::from_app_context(&ctx)
@@ -340,7 +347,7 @@ async fn commit(
             report_card,
             current,
             ReportDocOp::Batch {
-                if_doc_rev,
+                doc_anchor,
                 summary,
                 ops,
             },
@@ -397,8 +404,14 @@ async fn commit(
     }))
 }
 
-/// One `ops[i]` of `calm.report.commit`, in the single-op tool's argument shape minus `if_doc_rev`.
-fn parse_batch_op(raw: &Value, index: usize, tool: &str) -> Result<BatchBlockOp, RpcError> {
+/// One `ops[i]` of `calm.report.commit`, in the single-op tool's argument shape minus `if_doc_rev`, or
+/// a section op. An omitted `if_rev` is the block's rev in `last_read`.
+fn parse_batch_op(
+    raw: &Value,
+    index: usize,
+    tool: &str,
+    last_read: Option<&LastRead>,
+) -> Result<BatchBlockOp, RpcError> {
     let at = format!("{tool}: ops[{index}]");
     let obj = raw
         .as_object()
@@ -410,22 +423,20 @@ fn parse_batch_op(raw: &Value, index: usize, tool: &str) -> Result<BatchBlockOp,
     }
     let op = obj.get("op").and_then(Value::as_str).ok_or_else(|| {
         RpcError::invalid_params(format!(
-            "{at}: missing `op` (one of \"upsert\", \"move\", \"delete\")"
+            "{at}: missing `op` (one of \"replace\", \"upsert\", \"move\", \"delete\")"
         ))
     })?;
+    if let Some(section) = optional_string(obj, "section", &at)? {
+        return parse_section_op(obj, op, section, &at, last_read);
+    }
     match op {
         "upsert" => {
             let id = optional_string(obj, "id", &at)?;
             let (kind, content) = resolve_upsert_content(obj, &at)?;
-            let if_rev = optional_u32(obj, "if_rev", &at)?;
+            let mut if_rev = optional_u32(obj, "if_rev", &at)?;
             let position = optional_index(obj, "position", &at)?;
-            if id.is_some() {
-                if if_rev.is_none() {
-                    return Err(RpcError::invalid_params(format!(
-                        "{at}: `if_rev` is required when `id` is given (read the current rev \
-                         from calm.report.read's blocks index)"
-                    )));
-                }
+            if let Some(id) = &id {
+                if_rev = Some(block_anchor(if_rev, last_read, id, &at)?);
                 if position.is_some() {
                     return Err(RpcError::invalid_params(format!(
                         "{at}: `position` is only valid when creating a new block; use a \
@@ -455,16 +466,15 @@ fn parse_batch_op(raw: &Value, index: usize, tool: &str) -> Result<BatchBlockOp,
         }
         "delete" => {
             let id = required_string(obj, "id", &at)?;
-            let if_rev = optional_u32(obj, "if_rev", &at)?.ok_or_else(|| {
-                RpcError::invalid_params(format!(
-                    "{at}: `if_rev` is required for delete (read the current rev from \
-                     calm.report.read's blocks index)"
-                ))
-            })?;
+            let if_rev = optional_u32(obj, "if_rev", &at)?;
+            let if_rev = block_anchor(if_rev, last_read, &id, &at)?;
             Ok(BatchBlockOp::Delete { id, if_rev })
         }
+        "replace" => Err(RpcError::invalid_params(format!(
+            "{at}: `replace` needs `section` (the H1 heading text) and `markdown`"
+        ))),
         other => Err(RpcError::invalid_params(format!(
-            "{at}: unknown op `{other}` (one of \"upsert\", \"move\", \"delete\")"
+            "{at}: unknown op `{other}` (one of \"replace\", \"upsert\", \"move\", \"delete\")"
         ))),
     }
 }
@@ -589,19 +599,29 @@ fn reject_stray_write_args(
 }
 
 /// A content-changing upsert bumps that block's rev, so a second op on the same block would need an `if_rev` the caller cannot know yet.
+/// Likewise a section: its replace or delete changes its blocks' revs.
 fn reject_duplicate_block_ids(ops: &[BatchBlockOp], tool: &str) -> Result<(), RpcError> {
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(bool, &str)> = std::collections::HashSet::new();
     for (index, op) in ops.iter().enumerate() {
-        let id = match op {
-            BatchBlockOp::Upsert { id, .. } => id.as_deref(),
-            BatchBlockOp::Move { id, .. } | BatchBlockOp::Delete { id, .. } => Some(id.as_str()),
+        let target = match op {
+            BatchBlockOp::Upsert { id, .. } => id.as_deref().map(|id| (false, id)),
+            BatchBlockOp::Move { id, .. } | BatchBlockOp::Delete { id, .. } => {
+                Some((false, id.as_str()))
+            }
+            BatchBlockOp::ReplaceSection { section, .. }
+            | BatchBlockOp::DeleteSection { section, .. } => Some((true, section.as_str())),
         };
-        if let Some(id) = id
-            && !seen.insert(id)
+        if let Some(target @ (is_section, name)) = target
+            && !seen.insert(target)
         {
+            let (what, each) = if is_section {
+                ("section", "section")
+            } else {
+                ("block", "block id")
+            };
             return Err(RpcError::invalid_params(format!(
-                "{tool}: ops[{index}]: block `{id}` already addressed by an earlier op — each \
-                 block id may appear at most once per commit"
+                "{tool}: ops[{index}]: {what} `{name}` already addressed by an earlier op — each \
+                 {each} may appear at most once per commit"
             )));
         }
     }

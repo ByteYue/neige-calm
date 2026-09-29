@@ -678,11 +678,11 @@
   },
   {
     "name": "calm.report.commit",
-    "description_sha256": "4202b5e3d05a75b51f925283a1054c3fe3bba0333a9cc91b1e0d8ddee1823c12",
+    "description_sha256": "61ba0ff33873db6bc7df41004cec349396f720f00ffc381081bc8ccd306b4b93",
     "input_schema": {
       "properties": {
         "if_doc_rev": {
-          "description": "The document-wide docRev returned by calm.report.read; checked once for the whole commit.",
+          "description": "Optional: the docRev to check. Omitted: this session's last read, checked only for summary/create/move.",
           "minimum": 0,
           "type": "integer"
         },
@@ -715,7 +715,7 @@
                 "type": "string"
               },
               "if_rev": {
-                "description": "Required on upsert-with-id and delete: that block's rev you last read.",
+                "description": "Optional on upsert-with-id and delete: the block's rev. Omitted: the rev this session last read.",
                 "minimum": 0,
                 "type": "integer"
               },
@@ -733,11 +733,12 @@
                 "type": "string"
               },
               "markdown": {
-                "description": "upsert, kind=prose: the content.",
+                "description": "upsert, kind=prose: the content. replace: the whole section.",
                 "type": "string"
               },
               "op": {
                 "enum": [
+                  "replace",
                   "upsert",
                   "move",
                   "delete"
@@ -752,6 +753,10 @@
                 "description": "upsert-create only: insertion index (default append).",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "section": {
+                "description": "replace / delete: the section's H1 text; replace's `markdown` is the whole section, heading first.",
+                "type": "string"
               },
               "to_index": {
                 "description": "move: final 0-based index.",
@@ -773,7 +778,6 @@
         }
       },
       "required": [
-        "if_doc_rev",
         "message"
       ],
       "type": "object"
@@ -830,7 +834,7 @@
   },
   {
     "name": "calm.report.read",
-    "description_sha256": "564ff6a4ec2b32f9b5d40c80fcca9dee593f9f04c0b1ff712d78cc8bd667a1cd",
+    "description_sha256": "571e2a173adfba5ef21e62a6608b1dd1501a413a5bef6ed4a9e05df22155e2ef",
     "input_schema": {
       "properties": {
         "resolve": {
@@ -845,7 +849,7 @@
           "type": "object"
         },
         "select": {
-          "description": "What to return: \"full\" (default; `text` + index), \"index\" (`docRev`, `summary`, `blocks`, `taskDiagnostics` — no `text`), or `{ \"blocks\": [\"b_x\", …] }` (index + `text` holding only those blocks in document order, each preceded by its `<!-- neige:b_x -->` marker line; an unknown id is an error).",
+          "description": "What to return: \"full\" (default; `text` + index), \"index\" (`docRev`, `summary`, `blocks`, `taskDiagnostics` — no `text`), or `{ \"blocks\": [\"b_x\", …] }` (index + `text` holding only those blocks in document order, each preceded by its `<!-- neige:b_x -->` marker line; an unknown id is an error), or `{ \"sections\": [\"H1 text\", …] }` (the same for every block of those H1 sections; an unknown section is an error).",
           "oneOf": [
             {
               "enum": [
@@ -869,11 +873,27 @@
                 "blocks"
               ],
               "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "sections": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "sections"
+              ],
+              "type": "object"
             }
           ]
         },
         "with_markers": {
-          "description": "Inject a `<!-- neige:b_xxxx -->` marker line before each block in `text` (default false; always on for `select.blocks`).",
+          "description": "Inject a `<!-- neige:b_xxxx -->` marker line before each block in `text` (default false; always on for `select.blocks` / `select.sections`).",
           "type": "boolean"
         }
       },
@@ -2046,7 +2066,7 @@
   },
   {
     "name": "calm.track.cat",
-    "description_sha256": "6502268f274e9218c3ddbea310eb40a7a4ebd1a059d0073a656a23057e9ee2e4",
+    "description_sha256": "21d7c2220e01efea89a2bd0071bacc3b9b9ee9b9d4763d8ed51757db139a2aba",
     "input_schema": {
       "properties": {
         "blocks": {
@@ -2059,6 +2079,14 @@
         },
         "path": {
           "type": "string"
+        },
+        "sections": {
+          "description": "Report paths only: print just these H1 sections, as select.sections does.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
         }
       },
       "required": [

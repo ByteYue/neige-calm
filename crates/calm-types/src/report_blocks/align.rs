@@ -22,6 +22,17 @@ pub fn reassign_ids_with_hints(
     new_slices: &[BlockSlice],
     hints: &[Option<String>],
 ) -> Vec<ReportBlock> {
+    reassign_ids_with_hints_reserving(old_blocks, new_slices, hints, &HashSet::new())
+}
+
+/// [`reassign_ids_with_hints`] over one part of a larger document (#1877 section replace): a minted
+/// id also misses every id in `reserved`, the blocks outside that part.
+pub fn reassign_ids_with_hints_reserving(
+    old_blocks: &[ReportBlock],
+    new_slices: &[BlockSlice],
+    hints: &[Option<String>],
+    reserved: &HashSet<String>,
+) -> Vec<ReportBlock> {
     let fences: Vec<Option<NonProseFence>> = new_slices
         .iter()
         .map(|slice| parse_fence(&slice.raw))
@@ -110,6 +121,7 @@ pub fn reassign_ids_with_hints(
     }
 
     let mut used: HashSet<String> = old_blocks.iter().map(|block| block.id.clone()).collect();
+    used.extend(reserved.iter().cloned());
     new_slices
         .iter()
         .enumerate()
@@ -320,6 +332,15 @@ pub fn mint_id(raw: &str, index: usize, used: &mut HashSet<String>) -> String {
 mod tests {
     use super::super::{split_body, strip_markers_and_split};
     use super::*;
+
+    #[test]
+    fn a_minted_id_misses_every_reserved_id() {
+        let slices = split_body("# New\n");
+        let unreserved = reassign_ids(&[], &slices);
+        let reserved: HashSet<String> = [unreserved[0].id.clone()].into();
+        let minted = reassign_ids_with_hints_reserving(&[], &slices, &[], &reserved);
+        assert_ne!(minted[0].id, unreserved[0].id);
+    }
 
     #[test]
     fn edited_block_inherits_id_after_an_insertion() {

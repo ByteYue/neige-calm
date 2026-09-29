@@ -94,7 +94,10 @@ pub(crate) const COMMANDS: &[Command] = &[
         tool: track_file::TOOL_TRACK_CAT,
         positionals: &[pos("path", Some("cat requires a path argument"))],
         too_many: Some("cat accepts exactly one path"),
-        options: &[opt("--blocks", "blocks", OptValue::CommaList, false)],
+        options: &[
+            opt("--blocks", "blocks", OptValue::CommaList, false),
+            opt("--sections", "sections", OptValue::CommaList, false),
+        ],
         confirm: None,
         render: Render::Content,
     },

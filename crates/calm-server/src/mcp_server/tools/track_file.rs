@@ -7,12 +7,15 @@ use crate::mcp_server::registry::{
     AppContext, ToolCallIdentity, ToolDescriptor, ToolHandler, ToolHandlerFuture, ToolRegistry,
     read_only_annotations, require_role_any,
 };
-use crate::mcp_server::tools::report_links::unknown_block;
+use crate::mcp_server::tools::report_links::{unknown_block, unknown_section};
 use crate::mcp_server::tools::track_report::load_report_for_track;
 use crate::model::{Card, CardRole, Track};
+use crate::report_sections::section_block_ids;
 use crate::track_fs_view::{TrackFsContent, TrackFsError, TrackFsView, normalize_path};
 use crate::track_report::ReportBlock;
-use crate::track_report_read::{load_report_doc_snapshot, selected_blocks_text};
+use crate::track_report_read::{
+    load_report_doc_snapshot, load_report_markdown_with_snapshot, selected_blocks_text,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -73,6 +76,12 @@ fn cat_descriptor() -> ToolDescriptor {
                     "items": { "type": "string" },
                     "minItems": 1,
                     "description": "Report paths only: print just these blocks, as calm.report.read select.blocks does."
+                },
+                "sections": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "description": "Report paths only: print just these H1 sections, as select.sections does."
                 }
             }
         }),
@@ -108,21 +117,16 @@ async fn track_cat(
 ) -> Result<Value, RpcError> {
     require_role_any(&identity, &[CardRole::Planner, CardRole::Worker])?;
     let path = parse_path_arg(&args, true)?;
-    let blocks = parse_blocks_arg(&args)?;
+    let selection = parse_selection_arg(&args)?;
     if let Some(area_path) = area_reports::classify(&path) {
-        return super::area_reports::cat(&ctx, &identity, &path, area_path, blocks.as_deref())
+        return super::area_reports::cat(&ctx, &identity, &path, area_path, selection.as_ref())
             .await;
     }
-    if let Some(ids) = blocks {
-        if path != OWN_REPORT {
-            return Err(not_a_report(&path));
-        }
-        let (_, track) = resolve_track_for_identity(&ctx, &identity).await?;
-        let (report_card, _) = load_report_for_track(&ctx, &track).await?;
-        let snapshot = load_report_doc_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
-            .await
-            .map_err(|e| RpcError::internal(format!("track_file: {e}")))?;
-        return report_blocks_content(&snapshot.blocks, &ids);
+    if path == OWN_REPORT {
+        return own_report(&ctx, &identity, selection.as_ref()).await;
+    }
+    if let Some(selection) = selection {
+        return Err(not_a_report(&path, &selection));
     }
     let (_, track) = resolve_track_for_identity(&ctx, &identity).await?;
     // `plan/<key>/gate.log` is enabled only here (MCP carries a card identity); the gate-logs dir is the configured one, never recomputed from env.
@@ -157,31 +161,128 @@ fn parse_path_arg(args: &Value, required: bool) -> Result<String, RpcError> {
 /// The caller's own report in the track view.
 const OWN_REPORT: &str = "report.md";
 
-/// `blocks` (`neige cat --blocks b_x,b_y`, #1874): absent reads the whole file.
-fn parse_blocks_arg(args: &Value) -> Result<Option<Vec<String>>, RpcError> {
-    match args.get("blocks") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Array(ids)) if !ids.is_empty() => ids
-            .iter()
-            .map(|id| id.as_str().map(str::to_string))
-            .collect::<Option<Vec<_>>>()
-            .map(Some)
-            .ok_or_else(blocks_shape_error),
-        Some(_) => Err(blocks_shape_error()),
+/// A partial report read, the same on every report path and in `calm.report.read`'s `select`:
+/// chosen blocks (#1874) or chosen H1 sections (#1877).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selection {
+    Blocks(Vec<String>),
+    Sections(Vec<String>),
+}
+
+impl Selection {
+    /// `{ blocks: [..] }` / `{ sections: [..] }` as one key of `map`; `None` when neither is present.
+    pub(crate) fn parse(
+        map: &serde_json::Map<String, Value>,
+        tool: &str,
+    ) -> Result<Option<Self>, RpcError> {
+        let list = |key: &str, what: &str| -> Result<Option<Vec<String>>, RpcError> {
+            match map.get(key) {
+                None | Some(Value::Null) => Some(None),
+                Some(Value::Array(items)) if !items.is_empty() => items
+                    .iter()
+                    .map(|item| item.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+                    .map(Some),
+                Some(_) => None,
+            }
+            .ok_or_else(|| {
+                RpcError::invalid_params(format!(
+                    "{tool}: `{key}` must be a non-empty array of {what}"
+                ))
+            })
+        };
+        match (
+            list("blocks", "block ids")?,
+            list("sections", "section headings")?,
+        ) {
+            (Some(_), Some(_)) => Err(RpcError::invalid_params(format!(
+                "{tool}: pass `blocks` or `sections`, not both"
+            ))),
+            (Some(ids), None) => Ok(Some(Self::Blocks(ids))),
+            (None, Some(names)) => Ok(Some(Self::Sections(names))),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The block ids this selection renders; an unknown or ambiguous section is refused with the
+    /// report's sections, an unknown block id later by the renderer.
+    pub(crate) fn block_ids(&self, blocks: &[ReportBlock]) -> Result<Vec<String>, RpcError> {
+        match self {
+            Self::Blocks(ids) => Ok(ids.clone()),
+            Self::Sections(names) => {
+                section_block_ids(blocks, names).map_err(|error| unknown_section(blocks, &error))
+            }
+        }
     }
 }
 
-fn blocks_shape_error() -> RpcError {
-    RpcError::invalid_params("calm.track.cat: `blocks` must be a non-empty array of block ids")
+/// `blocks` / `sections` (`neige cat --blocks b_x,b_y`, `--sections A,B`): absent reads the whole file.
+fn parse_selection_arg(args: &Value) -> Result<Option<Selection>, RpcError> {
+    match args.as_object() {
+        Some(map) => Selection::parse(map, TOOL_TRACK_CAT),
+        None => Ok(None),
+    }
 }
 
-/// The one refusal of `blocks` on a path that names no report.
-pub(crate) fn not_a_report(path: &str) -> RpcError {
+/// The one refusal of a selection on a path that names no report.
+pub(crate) fn not_a_report(path: &str, selection: &Selection) -> RpcError {
+    let (flag, unit) = match selection {
+        Selection::Blocks(_) => ("--blocks", "blocks"),
+        Selection::Sections(_) => ("--sections", "sections"),
+    };
     RpcError::invalid_params(format!(
-        "`{path}` is not a report; --blocks reads blocks of `{OWN_REPORT}` or `{}/<name>.md` \
+        "`{path}` is not a report; {flag} reads {unit} of `{OWN_REPORT}` or `{}/<name>.md` \
          only",
         area_reports::REPORTS_DIR
     ))
+}
+
+/// The caller's own `report.md`, whole or narrowed; every text it returns is recorded as this
+/// session's read of the report (#1877), from the same row snapshot it printed.
+async fn own_report(
+    ctx: &Arc<AppContext>,
+    identity: &ToolCallIdentity,
+    selection: Option<&Selection>,
+) -> Result<Value, RpcError> {
+    let (_, track) = resolve_track_for_identity(ctx, identity).await?;
+    let (report_card, _) = load_report_for_track(ctx, &track).await?;
+    let internal = |e| RpcError::internal(format!("track_file: {e}"));
+    let (content, snapshot, rendered) = match selection {
+        Some(selection) => {
+            let snapshot = load_report_doc_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
+                .await
+                .map_err(internal)?;
+            let ids = selection.block_ids(&snapshot.blocks)?;
+            (
+                report_blocks_content(&snapshot.blocks, &ids)?,
+                snapshot,
+                ids,
+            )
+        }
+        None => {
+            let (markdown, snapshot) =
+                load_report_markdown_with_snapshot(ctx.repo.as_ref(), report_card.id.as_str())
+                    .await
+                    .map_err(internal)?;
+            let all = snapshot
+                .blocks
+                .iter()
+                .map(|block| block.id.clone())
+                .collect();
+            let content = serde_json::to_value(markdown)
+                .map_err(|e| RpcError::internal(format!("track_file: json serialization: {e}")))?;
+            (content, snapshot, all)
+        }
+    };
+    ctx.read_ledger.record(
+        &identity.session_id,
+        &identity.card_id,
+        report_card.id.as_str(),
+        snapshot.doc_rev,
+        &snapshot.blocks,
+        &rendered,
+    );
+    Ok(content)
 }
 
 /// A report narrowed to `ids`: the exact `text` of `calm.report.read { select: { blocks: ids } }`.

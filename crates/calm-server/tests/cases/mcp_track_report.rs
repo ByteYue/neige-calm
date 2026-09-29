@@ -83,7 +83,7 @@ fn planner_session(id: &str, track_id: TrackId, card_id: CardId) -> WorkerSessio
     }
 }
 
-async fn seed_track_root_session(
+pub(crate) async fn seed_track_root_session(
     repo: &dyn RepoEventWrite,
     track_id: &TrackId,
     card_id: &CardId,
@@ -319,6 +319,7 @@ pub(crate) async fn boot_at(db_url: &str) -> Boot {
             repo.sqlite_pool(),
         )),
         plugin_results: Arc::new(calm_server::plugin_results::PluginResults::new()),
+        read_ledger: Arc::new(calm_server::report_read_ledger::ReadLedger::new()),
         preview: Arc::new(calm_server::preview::PreviewRegistry::disabled()),
         sqlite_pool: repo.sqlite_pool(),
     });

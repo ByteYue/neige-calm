@@ -383,14 +383,34 @@ pub enum ReportDocOp {
     },
     /// `calm.report.blocks.delete`: `if_rev` is mandatory.
     DeleteBlock { id: String, if_rev: u32 },
-    /// `calm.report.commit`: an ordered list of block ops + optional summary under ONE `if_doc_rev`.
+    /// `calm.report.commit`: an ordered list of block ops + optional summary under ONE document anchor.
     /// A failure anywhere aborts the whole persist transaction; the doc rev advances exactly once.
     /// A `Delete` inside a batch carries no live-task exemption (only the single `DeleteBlock` may retire one).
     Batch {
-        if_doc_rev: u64,
+        doc_anchor: DocAnchor,
         summary: Option<String>,
         ops: Vec<BatchBlockOp>,
     },
+}
+
+/// The document-wide anchor of a [`ReportDocOp::Batch`] (#1877).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocAnchor {
+    /// The caller's `if_doc_rev`: always checked.
+    Explicit(u64),
+    /// The `docRev` this session last read: checked only when the batch needs a document anchor
+    /// (a `summary`, a created or moved block, a created section), so a section or block edit is not
+    /// refused over an unrelated edit elsewhere.
+    LastRead(u64),
+    /// No `if_doc_rev` and no read by this session: a batch that needs the anchor is refused.
+    Unread,
+}
+
+/// What this session last read of one section: its ordered `(id, rev)` list, or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SectionRead {
+    Seen(Vec<(String, u32)>),
+    Unseen,
 }
 
 /// One step of a [`ReportDocOp::Batch`], minus the document-wide anchor the batch carries once.
@@ -412,6 +432,16 @@ pub enum BatchBlockOp {
     Delete {
         id: String,
         if_rev: u32,
+    },
+    /// `write_markdown` bounded to one H1 section; creates a declared section that is absent.
+    ReplaceSection {
+        section: String,
+        markdown: String,
+        read: SectionRead,
+    },
+    DeleteSection {
+        section: String,
+        read: SectionRead,
     },
 }
 
@@ -689,11 +719,18 @@ pub(crate) fn apply_report_op_traced(
         }
         ReportDocOp::DeleteBlock { id, if_rev } => apply_delete(doc, id, *if_rev).map(|()| None),
         ReportDocOp::Batch {
-            if_doc_rev,
+            doc_anchor,
             summary,
             ops,
         } => {
-            check_doc_rev(doc, *if_doc_rev)?;
+            let needs_doc_anchor = summary.is_some()
+                || ops.iter().any(|op| {
+                    matches!(
+                        op,
+                        BatchBlockOp::Upsert { id: None, .. } | BatchBlockOp::Move { .. }
+                    )
+                });
+            check_doc_anchor(doc, *doc_anchor, needs_doc_anchor)?;
             if ops.len() > MAX_BATCH_OPS {
                 return Err(CalmError::BadRequest(format!(
                     "batch carries {} ops; at most {MAX_BATCH_OPS} per commit",
@@ -740,6 +777,24 @@ pub(crate) fn apply_report_op_traced(
                     }
                     BatchBlockOp::Delete { id, if_rev } => {
                         apply_delete(doc, id, *if_rev).map_err(step)?;
+                    }
+                    BatchBlockOp::ReplaceSection {
+                        section,
+                        markdown,
+                        read,
+                    } => {
+                        let replaced = sections::apply_replace_section(
+                            doc,
+                            section,
+                            markdown,
+                            read,
+                            *doc_anchor,
+                        )
+                        .map_err(step)?;
+                        written_ids.extend(replaced);
+                    }
+                    BatchBlockOp::DeleteSection { section, read } => {
+                        sections::apply_delete_section(doc, section, read).map_err(step)?;
                     }
                 }
             }
@@ -791,6 +846,32 @@ fn apply_persisted_report_op(
         CalmError::Internal(format!("track_report: increment document revision: {e}"))
     })?;
     Ok((trace, doc_rev))
+}
+
+/// A batch's document anchor: an explicit one always, the session's last read only when `needed`.
+fn check_doc_anchor(doc: &ReportDoc, anchor: DocAnchor, needed: bool) -> Result<(), CalmError> {
+    match anchor {
+        DocAnchor::Explicit(expected) => check_doc_rev(doc, expected),
+        DocAnchor::LastRead(read) if needed => {
+            let current = doc
+                .doc_rev()
+                .map_err(|e| CalmError::Internal(format!("track_report: doc rev: {e}")))?;
+            if current != read {
+                return Err(CalmError::Conflict(format!(
+                    "document revision conflict: current doc_rev is {current}, this session last \
+                     read docRev {read} — re-read the report and retry"
+                )));
+            }
+            Ok(())
+        }
+        DocAnchor::Unread if needed => Err(CalmError::BadRequest(
+            "this session has not read the report: a summary, a created or moved block and a \
+             created section need the docRev of a read — read the report (calm.report.read or \
+             `neige cat report.md`) and retry"
+                .into(),
+        )),
+        DocAnchor::LastRead(_) | DocAnchor::Unread => Ok(()),
+    }
 }
 
 fn check_doc_rev(doc: &ReportDoc, expected: u64) -> Result<(), CalmError> {
@@ -854,6 +935,7 @@ impl ReportEditTarget {
 
 pub(crate) mod dispatch;
 mod repair;
+mod sections;
 mod user_start;
 /// The writer and the complete set of ways to reach it. The mutating function is a private `fn`
 /// in there, so "which code can write a track report" is a question `rustc` answers.
@@ -1302,7 +1384,7 @@ mod tests {
         apply_report_op(
             &mut doc,
             &ReportDocOp::Batch {
-                if_doc_rev: 0,
+                doc_anchor: DocAnchor::Explicit(0),
                 summary: None,
                 ops: vec![BatchBlockOp::Upsert {
                     id: None,
@@ -1323,7 +1405,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Batch {
-                if_doc_rev: 0,
+                doc_anchor: DocAnchor::Explicit(0),
                 summary: None,
                 ops: vec![BatchBlockOp::Upsert {
                     id: None,
@@ -1388,7 +1470,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Batch {
-                if_doc_rev: 0,
+                doc_anchor: DocAnchor::Explicit(0),
                 summary: None,
                 ops: vec![BatchBlockOp::Upsert {
                     id: Some(id),

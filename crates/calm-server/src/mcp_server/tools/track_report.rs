@@ -8,6 +8,7 @@ use crate::mcp_server::registry::{
 };
 use crate::mcp_server::result::ToolResult;
 use crate::mcp_server::tools::report_links::unknown_block;
+use crate::mcp_server::tools::track_file::Selection;
 use crate::mcp_server::tools::track_report_hydrate::{hydrated_block_index, parse_resolve_arg};
 use crate::model::{Card, CardRole, Track};
 use crate::track_report::TrackReportPayload;
@@ -90,7 +91,8 @@ fn read_descriptor() -> ToolDescriptor {
                         "(`docRev`, `summary`, `blocks`, `taskDiagnostics` — no `text`), or ",
                         "`{ \"blocks\": [\"b_x\", …] }` (index + `text` holding only those blocks ",
                         "in document order, each preceded by its `<!-- neige:b_x -->` marker line; ",
-                        "an unknown id is an error)."
+                        "an unknown id is an error), or `{ \"sections\": [\"H1 text\", …] }` (the same ",
+                        "for every block of those H1 sections; an unknown section is an error)."
                     ),
                     "oneOf": [
                         { "type": "string", "enum": ["full", "index"] },
@@ -101,6 +103,14 @@ fn read_descriptor() -> ToolDescriptor {
                                 "blocks": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
                             },
                             "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "required": ["sections"],
+                            "properties": {
+                                "sections": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                            },
+                            "additionalProperties": false
                         }
                     ]
                 },
@@ -108,7 +118,7 @@ fn read_descriptor() -> ToolDescriptor {
                     "type": "boolean",
                     "description": concat!(
                         "Inject a `<!-- neige:b_xxxx -->` marker line before each block in ",
-                        "`text` (default false; always on for `select.blocks`)."
+                        "`text` (default false; always on for `select.blocks` / `select.sections`)."
                     )
                 },
                 "resolve": {
@@ -151,18 +161,36 @@ pub(crate) async fn report_read(
         .await
         .map_err(|e| RpcError::internal(format!("track_report: {e}")))?;
     // The index is always present; it is what a `docRev` / `if_rev` retry needs.
+    let all = || {
+        snapshot
+            .blocks
+            .iter()
+            .map(|block| block.id.clone())
+            .collect()
+    };
     let text = match &select {
         ReadSelect::Index => None,
-        ReadSelect::Blocks(ids) => {
+        ReadSelect::Part(selection) => {
             // Markers are unconditional here: a partial text is only addressable through them. An unknown id is the caller's mistake.
-            Some(
-                selected_blocks_text(&snapshot.blocks, ids)
-                    .map_err(|id| unknown_block(&snapshot.blocks, id))?,
-            )
+            let ids = selection.block_ids(&snapshot.blocks)?;
+            let text = selected_blocks_text(&snapshot.blocks, &ids)
+                .map_err(|id| unknown_block(&snapshot.blocks, id))?;
+            Some((text, ids))
         }
-        ReadSelect::Full if with_markers => Some(marked_blocks_text(&snapshot.blocks)),
-        ReadSelect::Full => Some(snapshot.body.clone()),
+        ReadSelect::Full if with_markers => Some((marked_blocks_text(&snapshot.blocks), all())),
+        ReadSelect::Full => Some((snapshot.body.clone(), all())),
     };
+    // Only a read that returned text is this session's read of the report (#1877): exactly the blocks it rendered.
+    if let Some((_, rendered)) = &text {
+        ctx.read_ledger.record(
+            &identity.session_id,
+            &identity.card_id,
+            report_card.id.as_str(),
+            snapshot.doc_rev,
+            &snapshot.blocks,
+            rendered,
+        );
+    }
     // `resolved` is rows and overlays only; this read never calls a plugin and never writes.
     let index: Vec<Value> =
         hydrated_block_index(&ctx, track.id.as_str(), &snapshot.blocks, &resolve_modes).await;
@@ -173,7 +201,7 @@ pub(crate) async fn report_read(
         "updated_at": snapshot.updated_at,
         "blocks": index,
     });
-    if let Some(text) = text {
+    if let Some((text, _)) = text {
         response["text"] = Value::String(text);
     }
     // `taskDiagnostics` is the dispatched-task runtime projection `calm.plan.list` withholds from the assistant; only the Planner gets it.
@@ -189,31 +217,24 @@ enum ReadSelect {
     Full,
     /// The index and the document metadata; no `text`.
     Index,
-    /// The index plus a `text` of exactly these blocks, in document order.
-    Blocks(Vec<String>),
+    /// The index plus a `text` of exactly the selected blocks or sections, in document order.
+    Part(Selection),
 }
 
 fn parse_select_arg(args: &Value, tool: &str) -> Result<ReadSelect, RpcError> {
-    const SHAPE: &str = "must be \"full\", \"index\" or { \"blocks\": [block id, …] } if provided";
+    const SHAPE: &str = "must be \"full\", \"index\", { \"blocks\": [block id, …] } or \
+                         { \"sections\": [H1 text, …] } if provided";
     match args.get("select") {
         None | Some(Value::Null) => Ok(ReadSelect::Full),
         Some(Value::String(mode)) if mode == "full" => Ok(ReadSelect::Full),
         Some(Value::String(mode)) if mode == "index" => Ok(ReadSelect::Index),
-        Some(Value::Object(map)) if map.len() == 1 && map.contains_key("blocks") => {
-            let ids = map["blocks"]
-                .as_array()
-                .filter(|ids| !ids.is_empty())
-                .and_then(|ids| {
-                    ids.iter()
-                        .map(|id| id.as_str().map(str::to_string))
-                        .collect::<Option<Vec<_>>>()
-                })
-                .ok_or_else(|| {
-                    RpcError::invalid_params(format!(
-                        "{tool}: `select.blocks` must be a non-empty array of block ids"
-                    ))
-                })?;
-            Ok(ReadSelect::Blocks(ids))
+        Some(Value::Object(map)) if map.len() == 1 => {
+            match Selection::parse(map, &format!("{tool}: `select`"))? {
+                Some(selection) => Ok(ReadSelect::Part(selection)),
+                None => Err(RpcError::invalid_params(format!(
+                    "{tool}: `select` {SHAPE}"
+                ))),
+            }
         }
         Some(_) => Err(RpcError::invalid_params(format!(
             "{tool}: `select` {SHAPE}"
@@ -306,7 +327,11 @@ mod tests {
         );
         assert_eq!(
             parse(json!({"select": {"blocks": ["b_2", "b_1"]}})).unwrap(),
-            ReadSelect::Blocks(vec!["b_2".into(), "b_1".into()])
+            ReadSelect::Part(Selection::Blocks(vec!["b_2".into(), "b_1".into()]))
+        );
+        assert_eq!(
+            parse(json!({"select": {"sections": ["B", "A"]}})).unwrap(),
+            ReadSelect::Part(Selection::Sections(vec!["B".into(), "A".into()]))
         );
         for bad in [
             json!({"select": "all"}),
@@ -316,6 +341,8 @@ mod tests {
             json!({"select": {"blocks": "b_1"}}),
             json!({"select": {"blocks": [1]}}),
             json!({"select": {"blocks": ["b_1"], "with_markers": true}}),
+            json!({"select": {"blocks": ["b_1"], "sections": ["A"]}}),
+            json!({"select": {"sections": []}}),
         ] {
             let err = parse(bad.clone()).expect_err("must be refused");
             assert_eq!(err.code, RpcError::INVALID_PARAMS, "{bad}");

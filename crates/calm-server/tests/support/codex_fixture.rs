@@ -483,6 +483,7 @@ pub async fn boot_forge_e2e_fixture(
             None,
         )),
         plugin_results: Arc::new(calm_server::plugin_results::PluginResults::new()),
+        read_ledger: Arc::new(calm_server::report_read_ledger::ReadLedger::new()),
         preview: Arc::new(calm_server::preview::PreviewRegistry::disabled()),
         sqlite_pool: sqlx_repo.sqlite_pool(),
     });

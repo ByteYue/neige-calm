@@ -206,6 +206,15 @@ pub(crate) fn unknown_block(
     ))
 }
 
+/// The refusal of a section selection that names no single H1 section: the report's sections (or the
+/// candidates of a duplicated heading), the section twin of [`unknown_block`].
+pub(crate) fn unknown_section(
+    blocks: &[calm_types::track_report::ReportBlock],
+    error: &crate::report_sections::SectionError,
+) -> RpcError {
+    RpcError::invalid_params(crate::report_sections::section_error_message(blocks, error))
+}
+
 fn block_heading(block: &calm_types::track_report::ReportBlock) -> String {
     if block.kind != calm_types::report_blocks::KIND_PROSE {
         if block.kind == calm_types::report_blocks::KIND_TASK {
