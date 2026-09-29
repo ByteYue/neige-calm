@@ -7,7 +7,8 @@
 //! first read drops every other session's entries of the same card (at most one session of a card
 //! is live, so those were superseded or exited).
 //! Known gap, fails closed: a block the session creates inside a section it read is not added to
-//! that section's recorded list, so the next write of the section needs a re-read.
+//! that section's recorded list, so the next write of the section needs a re-read; likewise an own
+//! `move` into, out of or within a recorded section does not refresh that section's list.
 //! Known gap, out of scope: a foreign delete whose id is later reused at the same rev can match a
 //! stale anchor; the same ABA exists for explicit `if_rev` on main.
 

@@ -371,11 +371,15 @@ async fn commit(
         .await
         .map_err(|e| map_commit_err(tool, e))?;
     let doc_rev = updated_report_doc_rev(&card, tool)?;
+    // An explicit anchor proves the caller knew that docRev, not that it read the document there:
+    // it advances this session's read only when it is the docRev the session last read.
+    let knew_the_doc = doc_anchor_checked
+        && (if_doc_rev.is_none() || if_doc_rev == last_read.as_ref().and_then(|r| r.doc_rev));
     ctx.read_ledger.record_authored(
         &identity.session_id,
         report_card_id.as_str(),
         &authored,
-        doc_anchor_checked.then_some(doc_rev),
+        knew_the_doc.then_some(doc_rev),
     );
     // Read off the persisted payload so it is exactly what the next `calm.report.read` would return.
     let blocks = card

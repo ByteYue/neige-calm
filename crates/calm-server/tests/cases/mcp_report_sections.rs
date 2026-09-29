@@ -732,3 +732,31 @@ async fn an_id_an_own_section_delete_removed_and_minted_again_is_not_read() {
     let ops = json!({ "ops": [{ "op": "delete", "section": "附录" }] });
     assert_a_reminted_id_is_not_read(&boot, &id, rev, ops).await;
 }
+
+#[tokio::test]
+async fn an_explicit_doc_anchor_past_the_read_does_not_advance_the_read() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    read_full(&boot).await;
+    let body = payload(&boot).await.body;
+    let doc_rev = payload(&boot).await.doc_rev;
+    call_tool(
+        &boot,
+        TOOL_REPORT_WRITE_MARKDOWN,
+        assistant_identity(&boot),
+        json!({ "body": body, "summary": "用户的", "if_doc_rev": doc_rev }),
+    )
+    .await
+    .expect("another writer sets the summary");
+    let current = payload(&boot).await.doc_rev;
+    let mut edit = replace("决策", "# 决策\n\nd1\n");
+    edit["if_doc_rev"] = json!(current);
+    commit(&boot, planner_identity(&boot), edit)
+        .await
+        .expect("an explicit current docRev is checked as given");
+    let err = commit(&boot, planner_identity(&boot), json!({ "summary": "mine" }))
+        .await
+        .expect_err("the session never read the other writer's summary");
+    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
+    assert_eq!(payload(&boot).await.summary, "用户的");
+}
