@@ -49,7 +49,7 @@
 |---|---|---|---|
 | F2.1 | `calm.report.blocks.upsert` 与 `calm.report.commit` 的每个 `upsert` op 共用 `resolve_upsert_content`：prose 走 `check_prose_markdown`，数据 kind 走 `render_data_block` | 是 | [实测] `mcp_server/tools/track_report_blocks.rs:581`、`:603` |
 | F2.2 | op 层复核：`apply_upsert_existing` / `apply_upsert_new` 在 `validate_caller_content` 时再跑 `track_report_guard::validate_block_content`（prose → `check_prose_markdown`；fence → `check_fence_payload` → `validate_payload`）。**所以 F2.1 被绕过时这里仍拒绝**（§11 C12） | 是 | [实测] `track_report.rs:520`、`:539`；`track_report_guard.rs:215-222`、`:128` |
-| F2.3 | `ReportDocOp::Replace`（`calm.report.write` / `.edit` shim）与 `ReportDocOp::WriteMarkdown`（`calm.report.write_markdown`）两臂各调一次 `validate_body_fences`（`invalid_neige_fences` + 每个 fence `validate_payload`） | 是 | [实测] `track_report.rs:643`、`:660`；`track_report_guard.rs:138` |
+| F2.3 | `ReportDocOp::Replace`（REST 用户整篇替换 `POST /api/tracks/{id}/report`）与 `ReportDocOp::WriteMarkdown`（`calm.report.write_markdown`）两臂各调一次 `validate_body_fences`（`invalid_neige_fences` + 每个 fence `validate_payload`） | 是 | [实测] `track_report.rs:643`、`:660`；`track_report_guard.rs:138` |
 | F2.4 | 人用 HTTP：`POST /api/tracks/{id}/report/blocks` 等，`block_content` 同样 `check_prose_markdown` / `render_data_block` | 是 | [实测] `routes/track_report_blocks.rs:132`、`:142` |
 | F2.5 | 建 track 时的模板 body：`validate_body_fences` | 是 | [实测] `routes/tracks.rs:1006`（`:940-941` 是注释） |
 | F2.6 | fork：prose 块内 fence `validate_body_fences`（`:2795`）+ 每个非 prose 块 `validate_payload`（`:2848`），`prepare_fork_report` 保留 block id、换 track_id | 是 | [实测] `routes/tracks.rs:2717`、`:2795`、`:2848` |

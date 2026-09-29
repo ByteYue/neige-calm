@@ -96,10 +96,22 @@ async fn blocks_text_equals_calm_report_read_select_on_every_report_path() {
     let edited = BODY.replace("# Goal", "# Extra\n\nx\n\n# Goal");
     for side in [own, other] {
         write_body(&boot, side, BODY).await;
+    }
+    let first = outline_ids(&boot, own, own).await;
+    for side in [own, other] {
         write_body(&boot, side, &edited).await;
     }
 
     let ids = outline_ids(&boot, own, own).await;
+    let kept: Vec<_> = ids
+        .iter()
+        .filter(|id| id.as_str() != ids[1].as_str())
+        .cloned()
+        .collect();
+    assert_eq!(
+        kept, first,
+        "the second write keeps every surviving block's id"
+    );
     let chosen = [ids[4].as_str(), ids[2].as_str()];
     let want = select_text(&boot, own, &chosen).await;
     assert!(

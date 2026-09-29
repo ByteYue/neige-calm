@@ -66,7 +66,7 @@ pub(crate) async fn rest_user_replace(
         EditAuthor::User,
         target,
         PersistPurpose::Edit(ReportDocOp::Replace {
-            summary: Some(next.summary),
+            summary: next.summary,
             body: next.body,
             if_doc_rev,
         }),
@@ -317,7 +317,7 @@ pub async fn persist_report(
             current_payload,
         },
         PersistPurpose::Edit(ReportDocOp::Replace {
-            summary: Some(next.summary),
+            summary: next.summary,
             body: next.body,
             if_doc_rev,
         }),

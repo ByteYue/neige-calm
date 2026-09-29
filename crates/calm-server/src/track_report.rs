@@ -352,11 +352,9 @@ pub use calm_types::track_report::{ReportBlock, TrackReportPayload};
 /// transactional truth (the JSON `blocks` cache can be arbitrarily stale).
 #[derive(Debug, Clone)]
 pub enum ReportDocOp {
-    /// Wholesale `(summary, body)` replace. `summary: None` keeps the doc's CURRENT summary,
-    /// resolved inside the persist transaction (an outside-tx snapshot would let a concurrent
-    /// summary write be silently reverted).
+    /// The user's wholesale `(summary, body)` replace (REST); the summary is always given.
     Replace {
-        summary: Option<String>,
+        summary: String,
         body: String,
         if_doc_rev: u64,
     },
@@ -600,13 +598,12 @@ pub(crate) fn apply_report_op_traced(
             if_doc_rev,
         } => {
             check_doc_rev(doc, *if_doc_rev)?;
-            let summary = tx_summary(doc, summary)?;
             // Line 1 is rewritten to the canonical header before anything reads the body, so every check
             // and the doc write see the same bytes the funnel will.
             let body = normalize_header(body).map_err(header_bad_request)?;
             validate_body_fences(&body)?;
             guard_non_prose_stomp(doc, &body)?;
-            doc.update(&summary, &body).map_err(internal)?;
+            doc.update(summary, &body).map_err(internal)?;
             written = Written::AllProse;
             Ok(None)
         }
@@ -1023,22 +1020,11 @@ mod tests {
         );
         assert_eq!(body, "# A\n\nalpha edited\n");
 
-        // Replace with None behaves identically; Some overrides.
+        // The user's Replace always names its summary.
         apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
-                body: "# B\n\nbeta\n".into(),
-                if_doc_rev: 0,
-            },
-            EditAuthor::Planner,
-        )
-        .unwrap();
-        assert_eq!(doc.project().unwrap().0, "racing summary");
-        apply_report_op(
-            &mut doc,
-            &ReportDocOp::Replace {
-                summary: Some("explicit".into()),
+                summary: "explicit".into(),
                 body: "# C\n\ngamma\n".into(),
                 if_doc_rev: 0,
             },
@@ -1066,7 +1052,7 @@ mod tests {
         assert_advances(
             ReportDoc::from_payload(&payload),
             ReportDocOp::Replace {
-                summary: Some(payload.summary.clone()),
+                summary: payload.summary.clone(),
                 body: payload.body.clone(),
                 if_doc_rev: 0,
             },
@@ -1150,7 +1136,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: Some("s".into()),
+                summary: "s".into(),
                 body: String::new(),
                 if_doc_rev: 0,
             },
@@ -1197,7 +1183,7 @@ mod tests {
         apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: format!("{NON_CANONICAL_HEADER}{rest}"),
                 if_doc_rev: 0,
             },
@@ -1220,7 +1206,7 @@ mod tests {
         let err = apply_persisted_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: format!(
                     "{HEADER_OPEN}{{\"version\":1,\"sections\":[{{\"h1\":\"-->\"}}]}} -->\n\n# A\n"
                 ),
