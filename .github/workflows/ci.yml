@@ -541,11 +541,20 @@ jobs:
         run: |
           set -euo pipefail
           touch /tmp/build-start
+          EXPERIMENT_CARGO_ARGS=()
+          if [ -n "$EXPERIMENT_WS_PROFILE_KV" ]; then
+            for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+              for prof in dev test; do
+                EXPERIMENT_CARGO_ARGS+=(--config "profile.$prof.package.$pkg.$EXPERIMENT_WS_PROFILE_KV")
+              done
+            done
+          fi
+          echo "extra args: ${EXPERIMENT_CARGO_ARGS[*]:-}"
           cargo build --locked -p calm-worker-runtime --bin calm-worker-boundary
-          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst $EXPERIMENT_CARGO_ARGS --timings
+          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst ${EXPERIMENT_CARGO_ARGS[@]+"${EXPERIMENT_CARGO_ARGS[@]}"} --timings
           ls -l nextest-archive.tar.zst
         env:
-          EXPERIMENT_CARGO_ARGS: ""
+          EXPERIMENT_WS_PROFILE_KV: "codegen-units=256"
 
       - name: "experiment: collect link times, binary sizes, linker identity"
         if: always()
