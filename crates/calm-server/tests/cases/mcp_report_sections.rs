@@ -669,3 +669,66 @@ async fn a_block_an_own_replace_dropped_is_not_read_any_more() {
         "{err:?}"
     );
 }
+
+/// Another writer appends `markdown` as a new block; its id is minted from content and position.
+async fn assistant_appends(boot: &Boot, markdown: &str) -> (String, u64) {
+    let doc_rev = payload(boot).await.doc_rev;
+    let out = call_tool(
+        boot,
+        TOOL_REPORT_BLOCKS_UPSERT,
+        assistant_identity(boot),
+        json!({ "kind": "prose", "markdown": markdown, "if_doc_rev": doc_rev }),
+    )
+    .await
+    .expect("the other writer appends");
+    (
+        out["id"].as_str().unwrap().to_string(),
+        out["rev"].as_u64().unwrap(),
+    )
+}
+
+/// Delete `id`'s block through `ops`, let another writer re-create the same content at the same
+/// position (the same id at rev 1 again), then edit that id with no `if_rev`.
+async fn assert_a_reminted_id_is_not_read(boot: &Boot, id: &str, rev: u64, ops: Value) {
+    commit(boot, planner_identity(boot), ops)
+        .await
+        .expect("own delete");
+    let reminted = assistant_appends(boot, "# 附录\n\nz\n").await;
+    assert_eq!(
+        reminted,
+        (id.to_string(), rev),
+        "premise: the id is minted again"
+    );
+    let err = commit(
+        boot,
+        planner_identity(boot),
+        json!({ "ops": [{ "op": "upsert", "id": id, "kind": "prose", "markdown": "# 附录\n\nmine\n" }] }),
+    )
+    .await
+    .expect_err("the re-minted block was never read by this session");
+    assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
+    assert!(
+        err.message.contains("has not been read by this session"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_id_deleted_by_an_own_op_and_minted_again_is_not_read() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    let (id, rev) = assistant_appends(&boot, "# 附录\n\nz\n").await;
+    read_full(&boot).await;
+    let ops = json!({ "ops": [{ "op": "delete", "id": id }] });
+    assert_a_reminted_id_is_not_read(&boot, &id, rev, ops).await;
+}
+
+#[tokio::test]
+async fn an_id_an_own_section_delete_removed_and_minted_again_is_not_read() {
+    let boot = boot().await;
+    seed(&boot, SECTIONS).await;
+    let (id, rev) = assistant_appends(&boot, "# 附录\n\nz\n").await;
+    read_full(&boot).await;
+    let ops = json!({ "ops": [{ "op": "delete", "section": "附录" }] });
+    assert_a_reminted_id_is_not_read(&boot, &id, rev, ops).await;
+}
