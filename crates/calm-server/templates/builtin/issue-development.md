@@ -99,7 +99,7 @@ When the review limit is reached
 If n == cap and the round is non-approving, do not merge.
 
 - Either GIVE-UP by recording the terminal rationale in the report with
-  calm.report.write and lifecycle failed for reviewing->failed; OR ASK-HUMAN by first
+  calm.report.commit and lifecycle failed for reviewing->failed; OR ASK-HUMAN by first
   moving reviewing->working with the normal lifecycle arg, then call calm.ratify.request
   with `reason:"cap_exhausted"` for working->blocked.
 - On ratify.resolved grant the track is already back in working; resume

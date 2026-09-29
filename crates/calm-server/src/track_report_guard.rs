@@ -108,7 +108,7 @@ mod tests {
             let err = apply_report_op(
                 &mut doc,
                 &ReportDocOp::Replace {
-                    summary: None,
+                    summary: "s".into(),
                     body: body.clone(),
                     if_doc_rev: 0,
                 },
@@ -134,7 +134,7 @@ mod tests {
         apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: format!("# A\n\nalpha rewritten\n{fence_text}# B\n\nnew section\n"),
                 if_doc_rev: 0,
             },
@@ -154,7 +154,7 @@ mod tests {
         let bad_json = "# A\n```neige-block app\nnot json\n```\n";
         for op in [
             ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: bad_json.into(),
                 if_doc_rev: 0,
             },
@@ -190,7 +190,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: unknown.into(),
                 if_doc_rev: 0,
             },
@@ -580,7 +580,7 @@ mod tests {
         apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body,
                 if_doc_rev: 0,
             },
@@ -613,7 +613,7 @@ mod tests {
         let err = apply_report_op(
             &mut doc,
             &ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body,
                 if_doc_rev: 0,
             },

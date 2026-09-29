@@ -8,7 +8,6 @@ use crate::mcp_track_report::{
     Boot, assistant_identity, boot, call_tool, collect_n, planner_identity, worker_identity,
 };
 use calm_server::event::Event;
-use calm_server::mcp_server::tools::track_report::{TOOL_REPORT_EDIT, TOOL_REPORT_WRITE};
 use calm_server::mcp_server::tools::track_report_blocks::{
     RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_BLOCKS_MOVE,
     TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
@@ -84,11 +83,11 @@ async fn overwrite_report_payload_cache(boot: &Boot, payload: Value) {
     .expect("simulate a stale payload cache from a pre-gate binary");
 }
 
-/// Seed a two-block body through the legacy write tool.
+/// Seed a two-block body through the whole-document write.
 async fn seed_two_blocks(boot: &Boot) -> Vec<(String, u64)> {
     call_tool(
         boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
         json!({
             "body": "# A\n\nalpha\n\n# B\n\nbeta\n",
@@ -149,7 +148,7 @@ async fn block_revision_cannot_be_used_as_a_whole_document_anchor() {
 
     let err = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# accidental overwrite\n",
@@ -1119,7 +1118,7 @@ async fn write_markdown_markers_make_duplicate_blocks_addressable() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# A\nsame\n# A\nsame\n",
@@ -1443,46 +1442,7 @@ async fn chart_param_change_yields_a_distinct_body_for_observation_hashing() {
 }
 
 #[tokio::test]
-async fn write_and_edit_stomping_a_data_block_fail_32602_and_write_nothing() {
-    let boot = boot().await;
-    let payload: Value = serde_json::from_str(CHART_PAYLOAD_V1).unwrap();
-    let (id, _) = upsert_chart(&boot, payload).await;
-    let before = current_payload(&boot).await;
-    let mut rx = boot.ctx.events.subscribe();
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE,
-        planner_identity(&boot),
-        json!({ "body": "# 概要\n\nprose only now\n", "message": "stomp", "if_doc_rev": before.doc_rev }),
-    )
-    .await
-    .expect_err("write dropping the fence must fail");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains(&id), "msg = {err:?}");
-    assert!(err.message.contains("blocks.upsert"), "guidance: {err:?}");
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({ "old_string": "\"ma20\"", "new_string": "\"ma60\"", "message": "stomp", "if_doc_rev": before.doc_rev }),
-    )
-    .await
-    .expect_err("edit inside the fence must fail");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains(&id), "msg = {err:?}");
-
-    assert_eq!(current_payload(&boot).await, before);
-    let no_event = tokio::time::timeout(Duration::from_millis(150), rx.recv()).await;
-    assert!(
-        no_event.is_err(),
-        "guarded write emitted event: {no_event:?}"
-    );
-}
-
-#[tokio::test]
-async fn write_preserving_the_fence_verbatim_passes_and_holds_id_rev() {
+async fn write_markdown_preserving_the_fence_verbatim_passes_and_holds_id_rev() {
     let boot = boot().await;
     let payload: Value = serde_json::from_str(CHART_PAYLOAD_V1).unwrap();
     let (id, rev) = upsert_chart(&boot, payload.clone()).await;
@@ -1490,7 +1450,7 @@ async fn write_preserving_the_fence_verbatim_passes_and_holds_id_rev() {
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!("# 概要\n\nrewritten prose\n{fence}# 新节\n\ntail\n"),

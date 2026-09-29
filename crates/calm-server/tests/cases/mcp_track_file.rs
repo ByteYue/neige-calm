@@ -15,7 +15,8 @@ use calm_server::mcp_server::tools::track_file::{TOOL_TRACK_CAT, TOOL_TRACK_LS};
 use calm_server::mcp_server::tools::track_history::{
     TOOL_TRACK_CAT_AT, TOOL_TRACK_DIFF, TOOL_TRACK_LOG,
 };
-use calm_server::mcp_server::tools::track_report::{TOOL_REPORT_READ, TOOL_REPORT_WRITE};
+use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
+use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_WRITE_MARKDOWN;
 use calm_server::mcp_server::tools::track_state::TOOL_TASK_VERDICT;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, CardRuntimeView, NewArea, NewCard, NewTrack, now_ms};
@@ -2189,7 +2190,7 @@ async fn hidden_track_history_tools_are_callable_and_patch_report() {
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Report\n\n- visible change\n",

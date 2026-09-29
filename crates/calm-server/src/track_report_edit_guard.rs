@@ -574,7 +574,7 @@ mod tests {
         let (mut doc, task, _) = doc_with_task("user");
         let operations = [
             ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: changed_fence.clone(),
                 if_doc_rev: 0,
             },
@@ -607,7 +607,7 @@ mod tests {
     fn replace_cannot_create_tombstone_attributed_to_another_author() {
         assert_cannot_create_tombstone_as_another_author(
             ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: forged_user_tombstone_fence(),
                 if_doc_rev: 0,
             },
@@ -646,7 +646,7 @@ mod tests {
     fn replace_cannot_create_planner_tombstone_as_user() {
         assert_cannot_create_tombstone_as_another_author(
             ReportDocOp::Replace {
-                summary: None,
+                summary: "s".into(),
                 body: forged_planner_tombstone_fence(),
                 if_doc_rev: 0,
             },
@@ -781,7 +781,7 @@ mod tests {
                     if_doc_rev: 0,
                 },
                 ReportDocOp::Replace {
-                    summary: None,
+                    summary: "s".into(),
                     body: "# replacement\n".into(),
                     if_doc_rev: 0,
                 },

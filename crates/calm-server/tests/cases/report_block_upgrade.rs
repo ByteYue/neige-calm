@@ -65,20 +65,38 @@ async fn edit_preupgrade_report(missing_cache: bool, boundary_match: bool) {
         "read cannot repair storage as a side effect"
     );
     assert_eq!(after_read.0.payload, before.0.payload);
-    let (old, new) = if boundary_match {
-        ("local prose\n# Second", "updated prose\n# Second")
+    // The boundary variant edits the block that ends right before `# Second`; the other the one before the task fence.
+    let (old, new, boundary) = if boundary_match {
+        (
+            "# First\nlocal prose",
+            "# First\nupdated prose",
+            "updated prose\n# Second",
+        )
     } else {
-        ("original decision", "revised decision")
+        (
+            "# Second\noriginal decision",
+            "# Second\nrevised decision",
+            "revised decision\n```neige-block task",
+        )
+    };
+    let target = blocks
+        .iter()
+        .find(|b| b.payload["markdown"] == old)
+        .expect("the edited prose block")
+        .clone();
+    let upsert = |markdown: &str| {
+        json!([{"op": "upsert", "id": target.id, "if_rev": target.rev, "kind": "prose",
+            "markdown": markdown}])
     };
     let edited = call_tool(
         &boot,
-        TOOL_REPORT_EDIT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"old_string": old, "new_string": new, "if_doc_rev": snapshot["docRev"],
-            "message": "edit pre-upgrade report"}),
+        json!({"if_doc_rev": snapshot["docRev"], "message": "edit pre-upgrade report",
+            "ops": upsert(new)}),
     )
     .await
-    .expect("edit must use the projected read body");
+    .expect("edit must land on the CRDT truth, not the obsolete body cache");
     let after = current_payload(&boot).await;
     assert_eq!(
         after
@@ -90,25 +108,25 @@ async fn edit_preupgrade_report(missing_cache: bool, boundary_match: bool) {
         Some(&task_before),
         "task identity, kind, payload and revision must remain intact"
     );
-    assert!(after.body.contains(new));
+    assert!(after.body.contains(boundary), "{}", after.body);
     assert_eq!(edited["docRev"].as_u64(), Some(after.doc_rev));
     let stale = call_tool(
         &boot,
-        TOOL_REPORT_EDIT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"old_string": old, "new_string": "stale", "if_doc_rev": snapshot["docRev"],
-            "message": "stale snapshot"}),
+        json!({"if_doc_rev": snapshot["docRev"], "message": "stale snapshot",
+            "ops": upsert("stale")}),
     )
     .await
-    .expect_err("stale revision must refuse even if old text is absent");
+    .expect_err("stale revision must refuse");
     assert_eq!(stale.code, RPC_REV_CONFLICT);
     assert_eq!(current_payload(&boot).await, after);
     call_tool(
         &boot,
-        TOOL_REPORT_EDIT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"old_string": new, "new_string": new, "if_doc_rev": edited["docRev"],
-            "message": "reuse returned revision"}),
+        json!({"if_doc_rev": edited["docRev"], "message": "reuse returned revision",
+            "summary": "reused"}),
     )
     .await
     .unwrap();

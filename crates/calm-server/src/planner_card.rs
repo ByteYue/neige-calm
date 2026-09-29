@@ -618,7 +618,7 @@ mod tests {
         }
     }
 
-    /// `calm.report.read` is callable but hidden: its handler admits the Assistant while its descriptor is visible to Planner only, so the prompt is the Assistant's only contract for the read. `calm.report.write` is named to forbid it.
+    /// `calm.report.read` is callable but hidden: its handler admits the Assistant while its descriptor is visible to Planner only, so the prompt is the Assistant's only contract for the read. `calm.report.commit` is named to forbid it.
     /// `neige` CLI mentions are not `calm.*` tokens and are pinned only by the goldens.
     #[test]
     fn assistant_prompts_name_only_tools_the_assistant_role_can_see() {
@@ -637,7 +637,7 @@ mod tests {
                 &render_system_prompt(template, "track-registry"),
                 calm_types::model::CardRole::Assistant,
                 &["calm.report.read"],
-                &["calm.report.write"],
+                &["calm.report.commit"],
                 false,
                 3,
             );

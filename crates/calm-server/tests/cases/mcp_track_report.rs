@@ -15,8 +15,9 @@ use calm_server::error::CalmError;
 use calm_server::event::{EditAuthor, Event, EventBus, EventScope};
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::track_report::{
-    TOOL_REPORT_EDIT, TOOL_REPORT_READ, TOOL_REPORT_WRITE,
+use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
+use calm_server::mcp_server::tools::track_report_blocks::{
+    TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
 };
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack, TrackLifecycle, TrackPatch};
@@ -458,6 +459,31 @@ async fn recv_env(
         .expect("bus open")
 }
 
+/// `calm.report.commit` arguments replacing the report's only block with `markdown` — the planner's local edit.
+async fn commit_replacing_only_block(boot: &Boot, markdown: &str, message: &str) -> Value {
+    let index = call_tool(
+        boot,
+        TOOL_REPORT_READ,
+        planner_identity(boot),
+        json!({"select": "index"}),
+    )
+    .await
+    .expect("planner reads the index");
+    let blocks = index["blocks"].as_array().expect("blocks");
+    assert_eq!(blocks.len(), 1, "the fixture report has one block: {index}");
+    json!({
+        "if_doc_rev": index["docRev"],
+        "message": message,
+        "ops": [{
+            "op": "upsert",
+            "id": blocks[0]["id"],
+            "if_rev": blocks[0]["rev"],
+            "kind": "prose",
+            "markdown": markdown
+        }]
+    })
+}
+
 #[tokio::test]
 async fn read_returns_initial_seeded_body() {
     let boot = boot().await;
@@ -492,7 +518,7 @@ async fn whole_document_write_requires_if_doc_rev_and_rejects_stale_planner_writ
     let boot = boot().await;
     let missing = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({"body": "# A\n", "message": "missing revision"}),
     )
@@ -502,7 +528,7 @@ async fn whole_document_write_requires_if_doc_rev_and_rejects_stale_planner_writ
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({"body": "# First\n", "message": "first writer", "if_doc_rev": 0}),
     )
@@ -510,7 +536,7 @@ async fn whole_document_write_requires_if_doc_rev_and_rejects_stale_planner_writ
     .unwrap();
     let conflict = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({"body": "# Stale\n", "message": "second writer", "if_doc_rev": 0}),
     )
@@ -527,7 +553,7 @@ async fn whole_document_write_requires_if_doc_rev_and_rejects_stale_planner_writ
 }
 
 #[tokio::test]
-async fn write_replaces_body_and_emits_card_updated() {
+async fn write_markdown_replaces_body_and_emits_card_updated() {
     let boot = boot().await;
     let events = boot.ctx.events.clone();
     let report_id = boot.report_card_id.clone();
@@ -537,7 +563,7 @@ async fn write_replaces_body_and_emits_card_updated() {
 
     let out = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Goal\n\nrefactored everything\n",
@@ -636,14 +662,14 @@ async fn write_replaces_body_and_emits_card_updated() {
 }
 
 #[tokio::test]
-async fn write_requires_non_empty_message() {
+async fn commit_requires_non_empty_message() {
     let boot = boot().await;
 
     let err = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "body": "missing message\n" }),
+        json!({ "summary": "missing message", "if_doc_rev": current_doc_rev(&boot).await }),
     )
     .await
     .expect_err("missing message must be rejected");
@@ -655,9 +681,9 @@ async fn write_requires_non_empty_message() {
 
     let err = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "body": "empty message\n", "message": "   ", "if_doc_rev": current_doc_rev(&boot).await }),
+        json!({ "summary": "empty message", "message": "\n\t ", "if_doc_rev": current_doc_rev(&boot).await }),
     )
     .await
     .expect_err("empty message must be rejected");
@@ -669,13 +695,13 @@ async fn write_requires_non_empty_message() {
 }
 
 #[tokio::test]
-async fn write_without_lifecycle_keeps_track_state_and_records_agent_message() {
+async fn write_markdown_without_lifecycle_keeps_track_state_and_records_agent_message() {
     let boot = boot().await;
     let mut rx = boot.ctx.events.subscribe();
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "no lifecycle body\n",
@@ -707,7 +733,7 @@ async fn write_without_lifecycle_keeps_track_state_and_records_agent_message() {
 }
 
 #[tokio::test]
-async fn write_from_draft_auto_promotes_with_lifecycle_changed_event() {
+async fn write_markdown_from_draft_auto_promotes_with_lifecycle_changed_event() {
     let boot = boot().await;
     boot.repo
         .track_update(
@@ -723,7 +749,7 @@ async fn write_from_draft_auto_promotes_with_lifecycle_changed_event() {
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "auto-promote body\n",
@@ -793,13 +819,13 @@ async fn write_from_draft_auto_promotes_with_lifecycle_changed_event() {
 }
 
 #[tokio::test]
-async fn write_lifecycle_legal_emits_track_updated_and_report_events() {
+async fn write_markdown_lifecycle_legal_emits_track_updated_and_report_events() {
     let boot = boot().await;
     let mut rx = boot.ctx.events.subscribe();
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "dispatching body\n",
@@ -880,7 +906,7 @@ fn assert_planning_to_done_refusal(message: &str) {
 }
 
 #[tokio::test]
-async fn write_lifecycle_illegal_rolls_back_report_and_events() {
+async fn write_markdown_lifecycle_illegal_rolls_back_report_and_events() {
     let boot = boot().await;
     let before_track = boot
         .repo
@@ -898,7 +924,7 @@ async fn write_lifecycle_illegal_rolls_back_report_and_events() {
 
     let err = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "should rollback\n",
@@ -934,11 +960,11 @@ async fn write_lifecycle_illegal_rolls_back_report_and_events() {
 }
 
 #[tokio::test]
-async fn edit_emits_track_report_edited_alongside_card_updated() {
+async fn commit_emits_track_report_edited_alongside_card_updated() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
@@ -956,19 +982,10 @@ async fn edit_emits_track_report_edited_alongside_card_updated() {
     let sub = tokio::spawn(async move { collect_n(&events, 2).await });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "XYZ",
-            "new_string": "ABC",
-            "message": "edit report",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect("edit succeeds");
+    let args = commit_replacing_only_block(&boot, "before ABC after\n", "edit report").await;
+    call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), args)
+        .await
+        .expect("commit succeeds");
 
     let envs = sub.await.expect("collector ok");
     assert_eq!(
@@ -1008,11 +1025,11 @@ async fn edit_emits_track_report_edited_alongside_card_updated() {
 }
 
 #[tokio::test]
-async fn write_with_unchanged_content_still_emits_track_report_edited() {
+async fn write_markdown_with_unchanged_content_still_emits_track_report_edited() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "stable body\n",
@@ -1045,7 +1062,7 @@ async fn write_with_unchanged_content_still_emits_track_report_edited() {
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "stable body\n",
@@ -1108,7 +1125,7 @@ async fn track_report_edited_persisted_with_track_and_card_scope_columns() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "scoped body\n",
@@ -1183,11 +1200,11 @@ async fn historical_task_context_advanced_payload_survives_events_since() {
 }
 
 #[tokio::test]
-async fn write_preserves_summary_when_omitted() {
+async fn write_markdown_preserves_summary_when_omitted() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "a",
@@ -1200,7 +1217,7 @@ async fn write_preserves_summary_when_omitted() {
     .unwrap();
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({ "body": "b", "message": "preserve summary", "if_doc_rev": current_doc_rev(&boot).await }),
     )
@@ -1219,25 +1236,11 @@ async fn write_preserves_summary_when_omitted() {
 }
 
 #[tokio::test]
-async fn write_refuses_worker() {
+async fn write_markdown_rejects_missing_body() {
     let boot = boot().await;
     let err = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
-        worker_identity(&boot),
-        json!({ "body": "evil", "message": "worker write", "if_doc_rev": current_doc_rev(&boot).await }),
-    )
-    .await
-    .expect_err("worker must be denied");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-}
-
-#[tokio::test]
-async fn write_rejects_missing_body() {
-    let boot = boot().await;
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({ "summary": "no body", "message": "missing body", "if_doc_rev": current_doc_rev(&boot).await }),
     )
@@ -1248,89 +1251,11 @@ async fn write_rejects_missing_body() {
 }
 
 #[tokio::test]
-async fn edit_unique_substring_replacement_happy_path() {
+async fn commit_without_lifecycle_keeps_track_state_and_records_agent_message() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
-        planner_identity(&boot),
-        json!({
-            "body": "# Goal\n\nuntouched marker XYZ here\n",
-            "message": "seed edit body",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .unwrap();
-    let out = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "XYZ",
-            "new_string": "ABC",
-            "message": "replace marker",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect("happy edit");
-    assert!(out.get("updated_at").and_then(Value::as_i64).is_some());
-
-    let card = boot
-        .repo
-        .card_get(boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    let payload: TrackReportPayload = serde_json::from_value(card.payload).unwrap();
-    assert_eq!(payload.body, "# Goal\n\nuntouched marker ABC here\n");
-}
-
-#[tokio::test]
-async fn edit_requires_non_empty_message() {
-    let boot = boot().await;
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({ "old_string": "Goal", "new_string": "Plan" }),
-    )
-    .await
-    .expect_err("missing message must be rejected");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(
-        err.message.contains("message must be non-empty"),
-        "msg = {err:?}"
-    );
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "Goal",
-            "new_string": "Plan",
-            "message": "\n\t ",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect_err("empty message must be rejected");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(
-        err.message.contains("message must be non-empty"),
-        "msg = {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn edit_without_lifecycle_keeps_track_state_and_records_agent_message() {
-    let boot = boot().await;
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
@@ -1342,19 +1267,11 @@ async fn edit_without_lifecycle_keeps_track_state_and_records_agent_message() {
     .expect("seed body");
     let mut rx = boot.ctx.events.subscribe();
 
-    call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "XYZ",
-            "new_string": "ABC",
-            "message": "edit without lifecycle",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect("edit succeeds");
+    let args =
+        commit_replacing_only_block(&boot, "before ABC after\n", "edit without lifecycle").await;
+    call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), args)
+        .await
+        .expect("commit succeeds");
 
     assert!(matches!(
         recv_env(&mut rx).await.event,
@@ -1383,11 +1300,11 @@ async fn edit_without_lifecycle_keeps_track_state_and_records_agent_message() {
 }
 
 #[tokio::test]
-async fn edit_lifecycle_legal_emits_track_updated_and_report_events() {
+async fn commit_lifecycle_legal_emits_track_updated_and_report_events() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
@@ -1399,20 +1316,12 @@ async fn edit_lifecycle_legal_emits_track_updated_and_report_events() {
     .expect("seed body");
     let mut rx = boot.ctx.events.subscribe();
 
-    call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "XYZ",
-            "new_string": "ABC",
-            "message": "edit moves dispatching",
-            "if_doc_rev": current_doc_rev(&boot).await,
-            "lifecycle": "dispatching"
-        }),
-    )
-    .await
-    .expect("edit with lifecycle succeeds");
+    let mut args =
+        commit_replacing_only_block(&boot, "before ABC after\n", "edit moves dispatching").await;
+    args["lifecycle"] = json!("dispatching");
+    call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), args)
+        .await
+        .expect("commit with lifecycle succeeds");
 
     match recv_env(&mut rx).await.event {
         Event::TrackLifecycleChanged {
@@ -1465,11 +1374,11 @@ async fn edit_lifecycle_legal_emits_track_updated_and_report_events() {
 }
 
 #[tokio::test]
-async fn edit_lifecycle_illegal_rolls_back_report_and_events() {
+async fn commit_lifecycle_illegal_rolls_back_report_and_events() {
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "before XYZ after\n",
@@ -1493,20 +1402,12 @@ async fn edit_lifecycle_illegal_rolls_back_report_and_events() {
         .unwrap();
     let mut rx = boot.ctx.events.subscribe();
 
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "XYZ",
-            "new_string": "ABC",
-            "message": "illegal edit lifecycle",
-            "if_doc_rev": current_doc_rev(&boot).await,
-            "lifecycle": "done"
-        }),
-    )
-    .await
-    .expect_err("planning -> done is illegal");
+    let mut args =
+        commit_replacing_only_block(&boot, "before ABC after\n", "illegal edit lifecycle").await;
+    args["lifecycle"] = json!("done");
+    let err = call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), args)
+        .await
+        .expect_err("planning -> done is illegal");
     assert_eq!(err.code, -32403);
     assert_planning_to_done_refusal(&err.message);
 
@@ -1532,13 +1433,13 @@ async fn edit_lifecycle_illegal_rolls_back_report_and_events() {
 }
 
 #[tokio::test]
-async fn edit_lifecycle_planning_to_reviewing_then_done_concludes_self_executed_track() {
+async fn commit_lifecycle_planning_to_reviewing_then_done_concludes_self_executed_track() {
     use calm_server::mcp_server::tools::track_state::TOOL_TRACK_STATE;
 
     let boot = boot().await;
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "deliverable draft\n",
@@ -1556,20 +1457,16 @@ async fn edit_lifecycle_planning_to_reviewing_then_done_concludes_self_executed_
         .unwrap();
     assert_eq!(before.lifecycle, TrackLifecycle::Planning);
 
-    call_tool(
+    let mut args = commit_replacing_only_block(
         &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "draft",
-            "new_string": "final",
-            "message": "deliverable produced in-turn; ready to judge",
-            "if_doc_rev": current_doc_rev(&boot).await,
-            "lifecycle": "reviewing"
-        }),
+        "deliverable final\n",
+        "deliverable produced in-turn; ready to judge",
     )
-    .await
-    .expect("planning -> reviewing is a planner edge (self-executed conclusion)");
+    .await;
+    args["lifecycle"] = json!("reviewing");
+    call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), args)
+        .await
+        .expect("planning -> reviewing is a planner edge (self-executed conclusion)");
     let track = boot
         .repo
         .track_get(boot.track_id.as_str())
@@ -1587,20 +1484,16 @@ async fn edit_lifecycle_planning_to_reviewing_then_done_concludes_self_executed_
         "legal targets live in the refusal: {state}"
     );
 
-    call_tool(
+    let mut args = commit_replacing_only_block(
         &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "final",
-            "new_string": "final (accepted)",
-            "message": "judged the deliverable; concluding",
-            "if_doc_rev": current_doc_rev(&boot).await,
-            "lifecycle": "done"
-        }),
+        "deliverable final (accepted)\n",
+        "judged the deliverable; concluding",
     )
-    .await
-    .expect("reviewing -> done concludes");
+    .await;
+    args["lifecycle"] = json!("done");
+    call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), args)
+        .await
+        .expect("reviewing -> done concludes");
     let track = boot
         .repo
         .track_get(boot.track_id.as_str())
@@ -1608,224 +1501,6 @@ async fn edit_lifecycle_planning_to_reviewing_then_done_concludes_self_executed_
         .unwrap()
         .unwrap();
     assert_eq!(track.lifecycle, TrackLifecycle::Done);
-}
-
-#[tokio::test]
-async fn edit_rejects_old_string_not_found() {
-    let boot = boot().await;
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "nowhere-in-body",
-            "new_string": "x",
-            "message": "missing old string",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect_err("missing old_string must error");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains("not found"), "msg = {err:?}");
-}
-
-#[tokio::test]
-async fn edit_rejects_duplicate_without_replace_all() {
-    let boot = boot().await;
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE,
-        planner_identity(&boot),
-        json!({
-            "body": "TODO foo\nTODO bar\n",
-            "message": "seed duplicates",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .unwrap();
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "TODO",
-            "new_string": "DONE",
-            "message": "duplicate replace",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect_err("duplicate without replace_all must error");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains("not unique"), "msg = {err:?}");
-    assert!(err.message.contains("replace_all"), "msg = {err:?}");
-}
-
-#[tokio::test]
-async fn edit_replace_all_on_duplicates() {
-    let boot = boot().await;
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE,
-        planner_identity(&boot),
-        json!({
-            "body": "TODO foo\nTODO bar\nTODO baz\n",
-            "message": "seed replace all",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .unwrap();
-    call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "TODO",
-            "new_string": "DONE",
-            "replace_all": true,
-            "message": "replace all",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect("replace_all=true succeeds");
-
-    let card = boot
-        .repo
-        .card_get(boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    let payload: TrackReportPayload = serde_json::from_value(card.payload).unwrap();
-    assert_eq!(payload.body, "DONE foo\nDONE bar\nDONE baz\n");
-}
-
-#[tokio::test]
-async fn edit_with_identical_old_and_new_still_emits_both_events() {
-    let boot = boot().await;
-    // The substring "stable" must exist in the seeded body: the not-found check runs even when `old == new`.
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE,
-        planner_identity(&boot),
-        json!({
-            "body": "stable\n",
-            "summary": "stable-summary",
-            "message": "seed equal edit",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .unwrap();
-    let before = boot
-        .repo
-        .card_get(boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    let before_ts = before.updated_at;
-    let report_id = boot.report_card_id.clone();
-    let track_id = boot.track_id.clone();
-
-    let events = boot.ctx.events.clone();
-    let sub = tokio::spawn(async move { collect_n(&events, 2).await });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    let out = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        planner_identity(&boot),
-        json!({
-            "old_string": "stable",
-            "new_string": "stable",
-            "message": "equal edit",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect("equal-strings edit succeeds (content-equal write)");
-    let new_ts = out
-        .get("updated_at")
-        .and_then(Value::as_i64)
-        .expect("updated_at i64");
-    assert!(
-        new_ts >= before_ts,
-        "content-equal edit bumps (or keeps) updated_at; before={before_ts} after={new_ts}",
-    );
-
-    let envs = sub.await.expect("collector ok");
-    assert_eq!(
-        envs.len(),
-        2,
-        "equal-strings edit emits both events (symmetry with report.write); got {envs:?}",
-    );
-    assert!(
-        matches!(envs[0].event, Event::CardUpdated(_)),
-        "CardUpdated first (preserves pre-PR2 broadcast order)",
-    );
-    match &envs[1].event {
-        Event::TrackReportEdited {
-            track_id: w,
-            card_id: c,
-            author,
-            author_plugin_id: _,
-            edit_id,
-            summary_before,
-            summary_after,
-            body_before,
-            body_after,
-            agent_message,
-        } => {
-            assert_eq!(w, &track_id, "track_id matches");
-            assert_eq!(c, &report_id, "card_id matches");
-            assert_eq!(*author, EditAuthor::Planner);
-            assert_eq!(agent_message.as_deref(), Some("equal edit"));
-            assert_eq!(edit_id.len(), 36, "edit_id is a UUID v4 string");
-            assert_eq!(
-                body_before, body_after,
-                "equal-strings edit: body_before == body_after",
-            );
-            assert_eq!(
-                summary_before, summary_after,
-                "equal-strings edit: summary_before == summary_after",
-            );
-            assert_eq!(body_before, "stable\n");
-            assert_eq!(summary_before, "stable-summary");
-        }
-        other => panic!("expected TrackReportEdited, got {other:?}"),
-    }
-
-    let after = boot
-        .repo
-        .card_get(boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    let payload: TrackReportPayload = serde_json::from_value(after.payload).unwrap();
-    assert_eq!(payload.body, "stable\n");
-    assert_eq!(payload.summary, "stable-summary");
-}
-
-#[tokio::test]
-async fn edit_refuses_worker() {
-    let boot = boot().await;
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_EDIT,
-        worker_identity(&boot),
-        json!({
-            "old_string": "Goal",
-            "new_string": "Pwn",
-            "message": "worker edit",
-            "if_doc_rev": current_doc_rev(&boot).await
-        }),
-    )
-    .await
-    .expect_err("worker must be denied");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -1903,7 +1578,7 @@ async fn planner_from_different_track_cannot_reach_this_track_report() {
     };
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner2_identity,
         json!({
             "body": "track 2 only\n",
@@ -1959,7 +1634,7 @@ async fn seed_large_body(boot: &Boot) -> String {
     );
     call_tool(
         boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
         json!({
             "body": body,
@@ -2020,7 +1695,6 @@ async fn full_read_delivers_the_document_once_behind_a_one_line_summary() {
 /// The receipt's summary clip is a byte budget on a char boundary; a CJK summary clipped by chars would blow the size bound.
 #[tokio::test]
 async fn full_read_summary_line_stays_short_for_a_long_cjk_summary() {
-    use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_COMMIT;
     let boot = boot().await;
     let body = seed_large_body(&boot).await;
     let summary = "报".repeat(200);
@@ -2195,7 +1869,7 @@ async fn select_blocks_returns_only_those_blocks_in_document_order_with_markers(
 #[tokio::test]
 async fn rev_conflicts_carry_the_current_revisions_in_error_data() {
     use calm_server::mcp_server::tools::track_report_blocks::{
-        RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT,
+        RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_UPSERT,
     };
     let boot = boot().await;
     seed_large_body(&boot).await;
@@ -2208,12 +1882,8 @@ async fn rev_conflicts_carry_the_current_revisions_in_error_data() {
             json!({"if_doc_rev": current - 1, "message": "stale commit", "summary": "stale"}),
         ),
         (
-            TOOL_REPORT_WRITE,
+            TOOL_REPORT_WRITE_MARKDOWN,
             json!({"body": "# stale\n", "message": "stale write", "if_doc_rev": current - 1}),
-        ),
-        (
-            TOOL_REPORT_EDIT,
-            json!({"old_string": "# One", "new_string": "# Uno", "message": "stale edit", "if_doc_rev": current - 1}),
         ),
     ] {
         let err = call_tool(&boot, tool, planner_identity(&boot), args)

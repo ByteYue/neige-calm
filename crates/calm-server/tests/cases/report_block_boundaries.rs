@@ -35,13 +35,22 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
         before.blocks.as_ref().unwrap().len(),
         "all markers remain standalone"
     );
+    let second = before
+        .blocks
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|b| b.payload["markdown"] == "# Second\noriginal decision")
+        .expect("the second prose block")
+        .clone();
     let edited = call_tool(
         &boot,
-        TOOL_REPORT_EDIT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"old_string": "original decision", "new_string": "revised decision",
-            "if_doc_rev": snapshot["docRev"], "message": "local prose update",
-            "lifecycle": "dispatching"}),
+        json!({"if_doc_rev": snapshot["docRev"], "message": "local prose update",
+            "lifecycle": "dispatching",
+            "ops": [{"op": "upsert", "id": second.id, "if_rev": second.rev, "kind": "prose",
+                "markdown": "# Second\nrevised decision"}]}),
     )
     .await
     .expect("local prose edit must preserve the adjacent task fence");
@@ -61,15 +70,23 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
     assert!(after.body.contains("revised decision\n```neige-block task"));
     assert_eq!(edited["docRev"].as_u64(), Some(after.doc_rev));
     assert!(after.doc_rev > before.doc_rev);
+    let second_rev = edited["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == second.id.as_str())
+        .expect("the receipt indexes the edited block")["rev"]
+        .clone();
     call_tool(
         &boot,
-        TOOL_REPORT_EDIT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"old_string": "revised decision", "new_string": "final decision",
-            "if_doc_rev": edited["docRev"], "message": "continue with returned revision"}),
+        json!({"if_doc_rev": edited["docRev"], "message": "continue with returned revision",
+            "ops": [{"op": "upsert", "id": second.id, "if_rev": second_rev, "kind": "prose",
+                "markdown": "# Second\nfinal decision"}]}),
     )
     .await
-    .expect("returned revision is usable for the next edit");
+    .expect("returned revisions are usable for the next edit");
     let preserved = current_payload(&boot).await;
     assert_eq!(
         preserved
@@ -80,12 +97,24 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
             .find(|b| b.id == task_id),
         Some(&task_before)
     );
+    // A prose op cannot carry a task change in: an embedded fence is refused and nothing lands.
+    let final_second = preserved
+        .blocks
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|b| b.id == second.id)
+        .unwrap()
+        .clone();
+    let smuggled = calm_types::report_blocks::flat_text(&task_before)
+        .replace("build it", "silently changed task");
     let err = call_tool(
         &boot,
-        TOOL_REPORT_EDIT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"old_string": "build it", "new_string": "silently changed task",
-            "if_doc_rev": preserved.doc_rev, "message": "must refuse task mutation"}),
+        json!({"if_doc_rev": preserved.doc_rev, "message": "must refuse task mutation",
+            "ops": [{"op": "upsert", "id": second.id, "if_rev": final_second.rev, "kind": "prose",
+                "markdown": format!("# Second\nfinal decision\n{smuggled}")}]}),
     )
     .await
     .expect_err("prose edit must still refuse a task payload change");

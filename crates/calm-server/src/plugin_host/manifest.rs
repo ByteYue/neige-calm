@@ -1848,7 +1848,7 @@ mod tests {
         let descriptor = crate::mcp_server::build_default_registry()
             .descriptors()
             .into_iter()
-            .find(|descriptor| descriptor.name == "calm.report.write")
+            .find(|descriptor| descriptor.name == "calm.report.commit")
             .expect("retained GIVE-UP tool descriptor");
         assert!(
             descriptor.input_schema["properties"]

@@ -358,6 +358,77 @@ async fn rest_whole_document_write_requires_if_doc_rev() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// The user's wholesale replace is the one entry left to the `ReportDocOp::Replace` arm: a body that drops a
+/// non-prose block's fence, or edits inside it, is refused whole and nothing lands.
+#[tokio::test]
+async fn rest_whole_document_write_stomping_a_data_block_is_refused_and_writes_nothing() {
+    let boot = boot().await;
+    let track_id = boot.track_id.clone();
+    let repo = boot.repo.clone();
+    let events = boot.state.events.clone();
+    let app = app(boot.state, boot.auth_state);
+    let cookie = login(&app).await;
+    let payload = json!({ "src": "/apps/x", "height": 480 });
+    let created = json_request(
+        &app,
+        "POST",
+        format!("/api/tracks/{track_id}/report/blocks"),
+        &cookie,
+        json!({"kind": "app", "payload": payload, "ifDocRev": 0}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Value =
+        serde_json::from_slice(&created.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let id = created["id"].as_str().expect("block id").to_string();
+    let report = || async {
+        let card = repo
+            .cards_by_track(track_id.as_str())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|card| card.kind == "track-report")
+            .unwrap();
+        serde_json::from_value::<TrackReportPayload>(card.payload).unwrap()
+    };
+    let before = report().await;
+    let fence = calm_types::report_blocks::render_fence("app", &payload);
+
+    let mut sub = events.subscribe();
+    for body in [
+        "# 概要\n\nprose only now\n".to_string(),
+        fence.replace("480", "481"),
+    ] {
+        let response = json_request(
+            &app,
+            "POST",
+            format!("/api/tracks/{track_id}/report"),
+            &cookie,
+            json!({"summary": "stomp", "body": body, "ifDocRev": before.doc_rev}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body:?}");
+        let text = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(text.contains(&id), "{body:?} → {text}");
+        assert!(text.contains("blocks.upsert"), "guidance: {text}");
+    }
+    assert_eq!(report().await, before);
+    let no_event = tokio::time::timeout(Duration::from_millis(150), sub.recv()).await;
+    assert!(
+        no_event.is_err(),
+        "guarded write emitted event: {no_event:?}"
+    );
+}
+
 #[tokio::test]
 async fn backlinks_returns_source_track_and_unknown_track_is_not_found() {
     let boot = boot().await;

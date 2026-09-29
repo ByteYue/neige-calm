@@ -12,8 +12,9 @@ use calm_server::db::prelude::*;
 use calm_server::db::sqlite::SqlxRepo;
 use calm_server::event::EventBus;
 use calm_server::ids::TrackId;
-use calm_server::mcp_server::tools::track_report::TOOL_REPORT_WRITE;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
+use calm_server::mcp_server::tools::track_report_blocks::{
+    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_WRITE_MARKDOWN,
+};
 use calm_server::model::{NewArea, NewCard, NewTrack, TrackLifecycle, TrackPatch};
 use calm_server::plugin_host::{PluginHost, PluginRegistry};
 use calm_server::routes;
@@ -123,7 +124,7 @@ async fn mcp_planner_document_write_is_planner_attributed_and_promotes_a_draft()
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Planner wrote this\n",
@@ -212,7 +213,7 @@ async fn mcp_report_write_consults_the_recorder_gate_before_it_commits() {
 
     let error = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# Denied\n",
@@ -317,7 +318,7 @@ async fn mcp_report_write_is_refused_when_the_recorder_gate_is_the_only_objectio
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         identity,
         json!({
             "body": "# Denied\n",
@@ -409,7 +410,7 @@ async fn mcp_report_write_with_a_lifecycle_is_gated_on_the_track_lifecycle_leg_f
 
     let error = call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         identity,
         json!({
             "body": "# Denied\n",
@@ -466,7 +467,7 @@ async fn mcp_report_write_probe_reads_the_written_track_not_the_callers_claimed_
 
     call_tool(
         &boot,
-        TOOL_REPORT_WRITE,
+        TOOL_REPORT_WRITE_MARKDOWN,
         identity,
         json!({
             "body": "# Denied\n",

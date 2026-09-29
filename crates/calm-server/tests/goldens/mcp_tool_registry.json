@@ -788,64 +788,6 @@
     ]
   },
   {
-    "name": "calm.report.edit",
-    "description_sha256": "f89a9bef02245a1912ab032ac5c91d4365a267a1eedfe533a5f9118a76070559",
-    "input_schema": {
-      "properties": {
-        "if_doc_rev": {
-          "description": "The document-wide docRev returned by calm.report.read; not a block rev.",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "lifecycle": {
-          "description": "Optional track lifecycle transition. Use planning after understanding the goal, dispatching when requesting workers, working when work is underway, blocked when user input is needed, reviewing when validating worker results, done after acceptance, or failed when completion is impossible. Omit to leave lifecycle unchanged.",
-          "enum": [
-            "draft",
-            "planning",
-            "dispatching",
-            "working",
-            "blocked",
-            "reviewing",
-            "done",
-            "canceled",
-            "failed"
-          ],
-          "type": "string"
-        },
-        "message": {
-          "description": "Required human-readable rationale for this write. The kernel persists it on the emitted event as agent_message and on TrackUpdated.agent_message when a lifecycle transition is requested.",
-          "minLength": 1,
-          "type": "string"
-        },
-        "new_string": {
-          "type": "string"
-        },
-        "old_string": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "replace_all": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "old_string",
-        "new_string",
-        "message",
-        "if_doc_rev"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "destructiveHint": false,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "visible_to_roles": [
-      "planner"
-    ]
-  },
-  {
     "name": "calm.report.find",
     "description_sha256": "719b7b9150fbb836d94edc905b4425a5540a67e1a038335a943909de33aaa6f0",
     "input_schema": {
@@ -979,61 +921,8 @@
     "visible_to_roles": []
   },
   {
-    "name": "calm.report.write",
-    "description_sha256": "834be3c5e02f2f57fe47755ab9b2c5c8e07815bd9ecb876dbe64db205f394d46",
-    "input_schema": {
-      "properties": {
-        "body": {
-          "type": "string"
-        },
-        "if_doc_rev": {
-          "description": "The document-wide docRev returned by calm.report.read; not a block rev.",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "lifecycle": {
-          "description": "Optional track lifecycle transition. Use planning after understanding the goal, dispatching when requesting workers, working when work is underway, blocked when user input is needed, reviewing when validating worker results, done after acceptance, or failed when completion is impossible. Omit to leave lifecycle unchanged.",
-          "enum": [
-            "draft",
-            "planning",
-            "dispatching",
-            "working",
-            "blocked",
-            "reviewing",
-            "done",
-            "canceled",
-            "failed"
-          ],
-          "type": "string"
-        },
-        "message": {
-          "description": "Required human-readable rationale for this write. The kernel persists it on the emitted event as agent_message and on TrackUpdated.agent_message when a lifecycle transition is requested.",
-          "minLength": 1,
-          "type": "string"
-        },
-        "summary": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "body",
-        "message",
-        "if_doc_rev"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "destructiveHint": false,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "visible_to_roles": [
-      "planner"
-    ]
-  },
-  {
     "name": "calm.report.write_markdown",
-    "description_sha256": "424848785d7ac4667c93effcb7e5279ef6300a1f8815d797a002826d9a99b178",
+    "description_sha256": "5bc044cb01b128506806110c54814c15561a64c37161d98a7d2c2f08c166c0f0",
     "input_schema": {
       "properties": {
         "body": {

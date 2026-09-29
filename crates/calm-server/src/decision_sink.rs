@@ -437,37 +437,7 @@ impl CardDecisionSink {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn commit_report_write(
-        &self,
-        identity: &ToolCallIdentity,
-        track: Track,
-        report_card: Card,
-        current_payload: TrackReportPayload,
-        next: TrackReportPayload,
-        agent_message: String,
-        lifecycle: Option<TrackLifecycle>,
-    ) -> Result<Card, CalmError> {
-        let if_doc_rev = current_payload.doc_rev;
-        let ReportOpCommit { card: updated, .. } = self
-            .commit_report_op(
-                identity,
-                track,
-                report_card,
-                current_payload,
-                ReportDocOp::Replace {
-                    summary: Some(next.summary),
-                    body: next.body,
-                    if_doc_rev,
-                },
-                Some(agent_message),
-                lifecycle,
-            )
-            .await?;
-        Ok(updated)
-    }
-
-    /// The generalized agent-MCP report write: same recorder shadow gate and persist boundary as [`Self::commit_report_write`], with an arbitrary [`ReportDocOp`] executed inside the transaction.
+    /// The agent-MCP report write: the recorder shadow gate and the persist boundary, with an arbitrary [`ReportDocOp`] executed inside the transaction.
     /// The single funnel every block-channel write passes through, so attribution and auto-promote are decided here, once, from `identity.role`: hard-coding `Planner` would attribute an assistant's edits to the planner and walk a Draft track out of Draft on its behalf.
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_report_op(
@@ -1022,13 +992,17 @@ mod tests {
             .expect("report row");
 
         let err = sink
-            .commit_report_write(
+            .commit_report_op(
                 &identity,
                 track.clone(),
                 report_card,
                 TrackReportPayload::initial(),
-                next,
-                "non-root edit".into(),
+                ReportDocOp::WriteMarkdown {
+                    summary: Some(next.summary),
+                    body: next.body,
+                    if_doc_rev: 0,
+                },
+                Some("non-root edit".into()),
                 None,
             )
             .await
@@ -1154,17 +1128,22 @@ mod tests {
         let next = TrackReportPayload::new("root summary", "# Goal\n\nroot body\n");
 
         let updated = sink
-            .commit_report_write(
+            .commit_report_op(
                 &identity,
                 track.clone(),
                 report_card,
                 TrackReportPayload::initial(),
-                next,
-                "root edit".into(),
+                ReportDocOp::WriteMarkdown {
+                    summary: Some(next.summary),
+                    body: next.body,
+                    if_doc_rev: 0,
+                },
+                Some("root edit".into()),
                 Some(TrackLifecycle::Dispatching),
             )
             .await
-            .expect("root report write succeeds");
+            .expect("root report write succeeds")
+            .card;
 
         let payload: TrackReportPayload =
             serde_json::from_value(updated.payload).expect("updated report payload");

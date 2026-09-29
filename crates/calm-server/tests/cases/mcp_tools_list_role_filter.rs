@@ -23,10 +23,8 @@ fn expected_planner_toolset() -> Vec<&'static str> {
         "calm.report.blocks.move",
         "calm.report.blocks.upsert",
         "calm.report.commit",
-        "calm.report.edit",
         "calm.report.links.backlinks",
         "calm.report.read",
-        "calm.report.write",
         "calm.report.write_markdown",
         "calm.review.round",
         "calm.source.capture",
@@ -105,6 +103,30 @@ async fn tools_list_for_planner_role_does_not_leak_aliases() {
         assert!(
             !names.iter().any(|name| name == hidden_name),
             "hidden tool leaked in tools/list: {hidden_name}; names={names:?}",
+        );
+    }
+}
+
+/// #1874: the Planner writes the report through `commit` and `write_markdown` only; the two
+/// compatibility writers are neither listed nor callable under their old names.
+#[tokio::test]
+async fn retired_report_write_and_edit_are_neither_listed_nor_registered() {
+    let names = tools_list_names_for_role(CardRole::Planner).await;
+    let registry = calm_server::mcp_server::build_default_registry();
+    for retired in ["calm.report.write", "calm.report.edit"] {
+        assert!(
+            !names.iter().any(|name| name == retired),
+            "retired report writer in the Planner's tools/list: {retired}; names={names:?}",
+        );
+        assert!(
+            registry.lookup(retired).is_none(),
+            "retired report writer must not remain as a hidden tool or alias: {retired}",
+        );
+    }
+    for kept in ["calm.report.commit", "calm.report.write_markdown"] {
+        assert!(
+            names.iter().any(|name| name == kept),
+            "the Planner keeps {kept}; names={names:?}",
         );
     }
 }
@@ -196,8 +218,8 @@ async fn tools_list_for_shared_daemon_without_thread_returns_role_union() {
         "daemon-trust role union must hide retired plan.upsert, got: {names:?}"
     );
     assert!(
-        names.contains(&"calm.report.write".to_string()),
-        "daemon-trust tools/list without threadId must include report.write, got: {names:?}"
+        names.contains(&"calm.report.commit".to_string()),
+        "daemon-trust tools/list without threadId must include report.commit, got: {names:?}"
     );
     let _ = (&boot.server, &boot.repo);
 }
