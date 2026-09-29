@@ -488,7 +488,6 @@ dependencies = [
  "calm-exec",
  "calm-proc-supervisor",
  "calm-provider",
- "calm-server",
  "calm-session",
  "calm-tailnet-control",
  "calm-task-artifacts",

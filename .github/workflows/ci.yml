@@ -526,7 +526,7 @@ jobs:
           chmod +x "$bin/rust-lld"
           cat "$bin/rust-lld"
         env:
-          EXPERIMENT_LINKER: mold
+          EXPERIMENT_LINKER: lld
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -551,7 +551,7 @@ jobs:
           fi
           echo "extra args: ${EXPERIMENT_CARGO_ARGS[*]:-}"
           cargo build --locked -p calm-worker-runtime --bin calm-worker-boundary
-          cargo nextest archive --workspace --locked --features calm-server/codex-e2e --profile ci --archive-file nextest-archive.tar.zst ${EXPERIMENT_CARGO_ARGS[@]+"${EXPERIMENT_CARGO_ARGS[@]}"} --timings
+          cargo nextest archive --workspace --locked --features calm-server/codex-e2e,calm-server/fixtures --profile ci --archive-file nextest-archive.tar.zst ${EXPERIMENT_CARGO_ARGS[@]+"${EXPERIMENT_CARGO_ARGS[@]}"} --timings
           ls -l nextest-archive.tar.zst
         env:
           EXPERIMENT_WS_PROFILE_KV: ""
