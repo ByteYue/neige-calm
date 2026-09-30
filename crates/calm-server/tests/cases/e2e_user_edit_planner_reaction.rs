@@ -17,7 +17,6 @@ use calm_server::event::{BroadcastEnvelope, EventBus, SubscribeFilter, Subscribe
 use calm_server::ids::{AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
 use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_WRITE_MARKDOWN;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack};
 use calm_server::plugin_host::mcp::RpcError;
@@ -375,15 +374,14 @@ async fn user_edit_via_rest_reaches_track_subscriber_and_planner_reads_back_user
 
     // step 1: planner seeds an initial body.
     let initial_body = "# Goal\n\nv0 initial content from planner\n";
-    call_mcp(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
+    crate::support::report_writes::read_then_write_markdown(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(&boot),
         json!({
             "body": initial_body,
             "summary": "initial summary from planner",
             "message": "seed initial report",
-            "if_doc_rev": 0,
         }),
     )
     .await
@@ -509,15 +507,14 @@ async fn planner_self_write_echoes_as_author_planner_on_the_track_stream() {
     let filter = track_report_filter(&boot);
 
     // A priming write, drained so the next drain only sees what follows.
-    call_mcp(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
+    crate::support::report_writes::read_then_write_markdown(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(&boot),
         json!({
             "body": "# Goal\n\npriming body\n",
             "summary": "priming",
             "message": "prime report stream",
-            "if_doc_rev": 0,
         }),
     )
     .await
@@ -530,15 +527,14 @@ async fn planner_self_write_echoes_as_author_planner_on_the_track_stream() {
     );
 
     // A second planner-authored write must surface as `author == "planner"`, NOT `"user"`.
-    call_mcp(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
+    crate::support::report_writes::read_then_write_markdown(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(&boot),
         json!({
             "body": "# Goal\n\nsecond planner write\n",
             "summary": "self echo",
             "message": "second planner report write",
-            "if_doc_rev": 1,
         }),
     )
     .await

@@ -1,5 +1,5 @@
 //! Public recovery reads retain logical identity and current blockers.
-use crate::mcp_track_report::{boot, call_tool, planner_identity};
+use crate::mcp_track_report::{boot, call_tool, planner_identity, upsert_block};
 use crate::task_recovery::{
     current, declaration, declare, finish, ordinary_codex_declaration, recovery_args,
     time_out_claimed_worker_holding_lease,
@@ -52,7 +52,7 @@ async fn task_recovery_history_is_empty_before_initial_allocation() {
     let boot = boot().await;
     let mut payload = declaration("waiting", &[]);
     payload["ready"] = json!(false);
-    let (block, revision) = declare(&boot, payload).await;
+    let (block, _) = declare(&boot, payload).await;
     let pool = boot.repo.sqlite_pool().unwrap();
     assert!(
         calm_server::db::sqlite::task_attempt_current_pool(
@@ -78,11 +78,10 @@ async fn task_recovery_history_is_empty_before_initial_allocation() {
         axum::http::StatusCode::NOT_FOUND,
     )
     .await;
-    call_tool(
+    upsert_block(
         &boot,
-        calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"id":block,"kind":"task","payload":declaration("waiting", &[]),"if_rev":revision}),
+        json!({"id":block,"kind":"task","payload":declaration("waiting", &[])}),
     )
     .await
     .unwrap();
@@ -96,7 +95,7 @@ async fn task_recovery_history_is_empty_before_initial_allocation() {
 #[tokio::test]
 async fn task_recovery_list_keeps_absent_projection_with_ready_blocker() {
     let boot = boot().await;
-    let (block, revision) = declare(&boot, declaration("b", &[])).await;
+    let (block, _) = declare(&boot, declaration("b", &[])).await;
     let b = current(&boot, "b").await;
     finish(&boot, &b, false).await;
     let receipt = call_tool(
@@ -109,11 +108,10 @@ async fn task_recovery_list_keeps_absent_projection_with_ready_blocker() {
     .unwrap();
     let mut withdrawn = declaration("b", &[]);
     withdrawn["ready"] = json!(false);
-    call_tool(
+    upsert_block(
         &boot,
-        "calm.report.blocks.upsert",
         planner_identity(&boot),
-        json!({"id":block,"kind":"task","payload":withdrawn,"if_rev":revision}),
+        json!({"id":block,"kind":"task","payload":withdrawn}),
     )
     .await
     .unwrap();

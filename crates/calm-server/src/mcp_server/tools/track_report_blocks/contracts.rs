@@ -1,7 +1,4 @@
-use super::{
-    TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_BLOCKS_MOVE,
-    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
-};
+use super::{TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN};
 use crate::mcp_server::registry::{
     ToolDescriptor, read_only_annotations, role_gated_write_annotations,
 };
@@ -40,13 +37,12 @@ pub(super) fn kinds_table() -> Value {
                         "markdown": { "type": "string", "description": "The block's Markdown source." }
                     }
                 },
-                "usage": "Free-form Markdown prose. Create or replace via \
-                     `calm.report.blocks.upsert` passing the content in the \
-                     top-level `markdown` argument. Blocks are split at \
+                "usage": "Free-form Markdown prose. Create or replace via a \
+                     `calm.report.commit` `upsert` op passing the content in \
+                     the op's `markdown`. Blocks are split at \
                      H1/H2 headings, so a prose block conventionally starts \
                      with one. Prose markdown may NOT embed ```neige-block \
-                     fences — data goes in its own block. Creating requires \
-                     `if_doc_rev`; read `docRev` from `calm.report.read`."
+                     fences — data goes in its own block."
             },
             {
                 "kind": "chart.candles",
@@ -82,7 +78,7 @@ pub(super) fn kinds_table() -> Value {
                      for data no plugin resolves. For any asset a plugin can \
                      resolve market data for, use `chart.series` instead and \
                      let the kernel fetch the points. Minimal example \
-                     — calm.report.blocks.upsert { \"kind\": \"chart.candles\", \
+                     — a commit op { \"op\": \"upsert\", \"kind\": \"chart.candles\", \
                      \"payload\": { \"symbol\": \"0700.HK\", \"candles\": \
                      [[1719800000000, 371.2, 380.0, 370.0, 378.4, 12000000], \
                      [1719886400000, 378.4, 382.0, 375.0, 379.8, 9800000]] } }. \
@@ -157,7 +153,7 @@ pub(super) fn kinds_table() -> Value {
                 "usage": "Price chart whose data is NOT inlined: the block names a \
                      plugin tool (`source`) and the assets (`series`), and the \
                      kernel resolves the points itself when the report is read. \
-                     Minimal example — calm.report.blocks.upsert { \"kind\": \
+                     Minimal example — a commit op { \"op\": \"upsert\", \"kind\": \
                      \"chart.series\", \"payload\": { \"source\": \
                      \"neige://plugin/dev-neige-market/market.series\", \
                      \"series\": [\"US:NVDA\", \"HK:9988\"], \"range\": \"1Y\" } }. \
@@ -224,7 +220,7 @@ pub(super) fn kinds_table() -> Value {
                     }
                 },
                 "usage": "Structured comparison table. Minimal example — \
-                     calm.report.blocks.upsert { \"kind\": \"table\", \"payload\": \
+                     a commit op { \"op\": \"upsert\", \"kind\": \"table\", \"payload\": \
                      { \"columns\": [{ \"key\": \"name\", \"label\": \"公司\" }, \
                      { \"key\": \"pe\", \"label\": \"PE\", \"align\": \"right\" }], \
                      \"rows\": [{ \"name\": \"腾讯\", \"pe\": 18.2 }] } }. Row \
@@ -252,7 +248,7 @@ pub(super) fn kinds_table() -> Value {
                     }
                 },
                 "usage": "Embed a same-origin mini-app in the report. Minimal \
-                     example — calm.report.blocks.upsert { \"kind\": \"app\", \
+                     example — a commit op { \"op\": \"upsert\", \"kind\": \"app\", \
                      \"payload\": { \"src\": \"/apps/screener\", \"title\": \
                      \"选股器\", \"height\": 600 } }. `src` must be a \
                      same-origin absolute path (`/…`); full URLs and \
@@ -387,7 +383,7 @@ fn preview_kind() -> Value {
         },
         "usage": "Embed a live dev server you registered with \
              `calm.preview.register` (its `block_hint` is this block's \
-             payload). Minimal example — calm.report.blocks.upsert { \
+             payload). Minimal example — a commit op { \"op\": \"upsert\", \
              \"kind\": \"preview\", \"payload\": { \"key\": \"fe\", \
              \"title\": \"前端\", \"path\": \"/next/\" } }. The block names \
              the registration by `key`, not a port: it shows an \
@@ -395,70 +391,6 @@ fn preview_kind() -> Value {
              is registered under that key and answering, and is \
              viewable over LAN http only."
     })
-}
-
-pub(super) fn upsert_descriptor() -> ToolDescriptor {
-    ToolDescriptor {
-        name: TOOL_REPORT_BLOCKS_UPSERT.into(),
-        description: include_str!("../../../../prompts/tools/calm.report.blocks.upsert.md")
-            .trim_end()
-            .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["kind"],
-            "properties": {
-                "id": { "type": "string", "description": "Existing block id to replace. Omit to create a new block." },
-                "kind": { "type": "string", "enum": block_kind_enum(), "description": "Block kind." },
-                "markdown": { "type": "string", "description": "Prose content (kind=prose only)." },
-                "payload": { "type": "object", "description": "Kind-specific payload: required for data kinds; for prose, `{ markdown }` is accepted as an alternative to the top-level `markdown`." },
-                "if_rev": { "type": "integer", "minimum": 0, "description": "Required when `id` is given: the block rev you last read." },
-                "if_doc_rev": { "type": "integer", "minimum": 0, "description": "Required when creating: read docRev from calm.report.read." },
-                "position": { "type": "integer", "minimum": 0, "description": "Insertion index for a NEW block (default: append)." },
-                "message": optional_message_schema()
-            }
-        }),
-        annotations: Some(role_gated_write_annotations()),
-        visible_to_roles: &[CardRole::Planner, CardRole::Assistant],
-    }
-}
-
-pub(super) fn move_descriptor() -> ToolDescriptor {
-    ToolDescriptor {
-        name: TOOL_REPORT_BLOCKS_MOVE.into(),
-        description: include_str!("../../../../prompts/tools/calm.report.blocks.move.md")
-            .trim_end()
-            .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["id", "to_index", "if_doc_rev"],
-            "properties": {
-                "id": { "type": "string" },
-                "to_index": { "type": "integer", "minimum": 0 },
-                "if_doc_rev": { "type": "integer", "minimum": 0, "description": "Required document revision; read docRev from calm.report.read." }
-            }
-        }),
-        annotations: Some(role_gated_write_annotations()),
-        visible_to_roles: &[CardRole::Planner, CardRole::Assistant],
-    }
-}
-
-pub(super) fn delete_descriptor() -> ToolDescriptor {
-    ToolDescriptor {
-        name: TOOL_REPORT_BLOCKS_DELETE.into(),
-        description: include_str!("../../../../prompts/tools/calm.report.blocks.delete.md")
-            .trim_end()
-            .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["id", "if_rev"],
-            "properties": {
-                "id": { "type": "string" },
-                "if_rev": { "type": "integer", "minimum": 0, "description": "The revision of this specific report block; not the document-wide docRev." }
-            }
-        }),
-        annotations: Some(role_gated_write_annotations()),
-        visible_to_roles: &[CardRole::Planner, CardRole::Assistant],
-    }
 }
 
 pub(super) fn write_markdown_descriptor() -> ToolDescriptor {
@@ -469,10 +401,10 @@ pub(super) fn write_markdown_descriptor() -> ToolDescriptor {
             .to_string(),
         input_schema: json!({
             "type": "object",
-            "required": ["body", "if_doc_rev"],
+            "required": ["body"],
+            "additionalProperties": false,
             "properties": {
                 "body": { "type": "string", "description": "Full report Markdown, optionally with `<!-- neige:b_xxxx -->` marker lines." },
-                "if_doc_rev": { "type": "integer", "minimum": 0, "description": "The document-wide docRev returned by calm.report.read; not a block rev." },
                 "summary": { "type": "string" },
                 "message": optional_message_schema()
             }
@@ -482,7 +414,7 @@ pub(super) fn write_markdown_descriptor() -> ToolDescriptor {
     }
 }
 
-/// Read off [`kinds_table`] so the upsert tool and the commit op cannot drift from the self-description.
+/// Read off [`kinds_table`] so the commit op cannot drift from the self-description.
 fn block_kind_enum() -> Value {
     let table = kinds_table();
     let kinds = table["kinds"]
@@ -512,8 +444,8 @@ pub(super) fn commit_descriptor() -> ToolDescriptor {
         input_schema: json!({
             "type": "object",
             "required": ["message"],
+            "additionalProperties": false,
             "properties": {
-                "if_doc_rev": { "type": "integer", "minimum": 0, "description": "Optional: the docRev to check. Omitted: this session's last read, checked only for summary/create/move." },
                 "message": message_schema(),
                 "summary": { "type": "string", "description": "New sidebar summary (~80 chars). Omit to keep the existing one." },
                 "ops": {
@@ -523,11 +455,11 @@ pub(super) fn commit_descriptor() -> ToolDescriptor {
                     "items": {
                         "type": "object",
                         "required": ["op"],
+                        "additionalProperties": false,
                         "properties": {
                             "op": { "type": "string", "enum": ["replace", "upsert", "move", "delete"] },
                             "section": { "type": "string", "description": "replace / delete: the section's H1 text; replace's `markdown` is the whole section, heading first." },
                             "id": { "type": "string", "description": "upsert (replace) / move / delete: the existing block id. Omit on upsert to create." },
-                            "if_rev": { "type": "integer", "minimum": 0, "description": "Optional on upsert-with-id and delete: the block's rev. Omitted: the rev this session last read." },
                             "kind": { "type": "string", "enum": block_kind_enum(), "description": "upsert: block kind." },
                             "markdown": { "type": "string", "description": "upsert, kind=prose: the content. replace: the whole section." },
                             "payload": { "type": "object", "description": "upsert, data kinds: the schema-validated payload (see calm.report.blocks.kinds)." },
@@ -539,7 +471,7 @@ pub(super) fn commit_descriptor() -> ToolDescriptor {
             }
         }),
         annotations: Some(role_gated_write_annotations()),
-        visible_to_roles: &[CardRole::Planner],
+        visible_to_roles: &[CardRole::Planner, CardRole::Assistant],
     }
 }
 
@@ -616,7 +548,7 @@ mod task_kind_contract_tests {
     }
 
     #[test]
-    fn task_is_advertised_by_both_block_tool_contracts() {
+    fn task_is_advertised_by_the_commit_contract() {
         let table = kinds_table();
         let task = table["kinds"]
             .as_array()
@@ -677,26 +609,23 @@ mod task_kind_contract_tests {
             "task usage must keep discriminated instruction fields visible: {usage}"
         );
 
-        let upsert = upsert_descriptor();
-        let upsert_kinds = &upsert.input_schema["properties"]["kind"]["enum"];
+        let commit = commit_descriptor();
+        let commit_kinds =
+            &commit.input_schema["properties"]["ops"]["items"]["properties"]["kind"]["enum"];
         assert!(
-            upsert_kinds
+            commit_kinds
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|kind| kind == "task")
         );
-        let commit = commit_descriptor();
-        let commit_kinds =
-            &commit.input_schema["properties"]["ops"]["items"]["properties"]["kind"]["enum"];
-        assert_eq!(commit_kinds, upsert_kinds);
         let table_kinds: Vec<Value> = table["kinds"]
             .as_array()
             .unwrap()
             .iter()
             .map(|entry| entry["kind"].clone())
             .collect();
-        assert_eq!(upsert_kinds, &Value::Array(table_kinds));
+        assert_eq!(commit_kinds, &Value::Array(table_kinds));
     }
 
     #[test]

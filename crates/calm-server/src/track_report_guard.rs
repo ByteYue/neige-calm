@@ -65,10 +65,9 @@ pub(crate) fn guard_non_prose_stomp(doc: &ReportDoc, body: &str) -> Result<(), C
         if !preserved {
             return Err(CalmError::BadRequest(format!(
                 "this write would modify or delete non-prose block {} (kind {}) — the prose \
-                 write/edit path may not touch data blocks; use calm.report.blocks.upsert / \
-                 .delete with if_rev (task deletion must use the block-level DELETE path), or \
-                 calm.report.write_markdown for a whole-document \
-                 rewrite, and keep unrelated ```neige-block fences byte-identical",
+                 write/edit path may not touch data blocks; use the block-level endpoints \
+                 (task deletion must use the block-level DELETE path), and keep unrelated \
+                 ```neige-block fences byte-identical",
                 old.id, old.kind
             )));
         }
@@ -117,7 +116,7 @@ mod tests {
             .unwrap_err();
             assert!(
                 matches!(&err, CalmError::BadRequest(m) if m.contains(&id)
-                    && m.contains("blocks.upsert")),
+                    && m.contains("block-level endpoints")),
                 "body {body:?} → {err:?}"
             );
             assert_eq!(

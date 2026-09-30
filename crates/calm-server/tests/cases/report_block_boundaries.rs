@@ -5,12 +5,10 @@ use super::*;
 async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
     let boot = boot().await;
     for markdown in ["# First\nlocal prose", "# Second\noriginal decision"] {
-        call_tool(
+        upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
-            json!({"kind": "prose", "markdown": markdown,
-                "if_doc_rev": read(&boot, json!({})).await["docRev"]}),
+            json!({"kind": "prose", "markdown": markdown}),
         )
         .await
         .expect("upsert independent prose without final newline");
@@ -47,8 +45,8 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"if_doc_rev": snapshot["docRev"], "message": "local prose update",
-            "ops": [{"op": "upsert", "id": second.id, "if_rev": second.rev, "kind": "prose",
+        json!({ "message": "local prose update",
+            "ops": [{"op": "upsert", "id": second.id, "kind": "prose",
                 "markdown": "# Second\nrevised decision"}]}),
     )
     .await
@@ -69,23 +67,16 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
     assert!(after.body.contains("revised decision\n```neige-block task"));
     assert_eq!(edited["docRev"].as_u64(), Some(after.doc_rev));
     assert!(after.doc_rev > before.doc_rev);
-    let second_rev = edited["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|b| b["id"] == second.id.as_str())
-        .expect("the receipt indexes the edited block")["rev"]
-        .clone();
     call_tool(
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"if_doc_rev": edited["docRev"], "message": "continue with returned revision",
-            "ops": [{"op": "upsert", "id": second.id, "if_rev": second_rev, "kind": "prose",
+        json!({ "message": "continue from the own write",
+            "ops": [{"op": "upsert", "id": second.id, "kind": "prose",
                 "markdown": "# Second\nfinal decision"}]}),
     )
     .await
-    .expect("returned revisions are usable for the next edit");
+    .expect("the own commit counts as read for the next edit");
     let preserved = current_payload(&boot).await;
     assert_eq!(
         preserved
@@ -97,22 +88,14 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
         Some(&task_before)
     );
     // A prose op cannot carry a task change in: an embedded fence is refused and nothing lands.
-    let final_second = preserved
-        .blocks
-        .as_ref()
-        .unwrap()
-        .iter()
-        .find(|b| b.id == second.id)
-        .unwrap()
-        .clone();
     let smuggled = calm_types::report_blocks::flat_text(&task_before)
         .replace("build it", "silently changed task");
     let err = call_tool(
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({"if_doc_rev": preserved.doc_rev, "message": "must refuse task mutation",
-            "ops": [{"op": "upsert", "id": second.id, "if_rev": final_second.rev, "kind": "prose",
+        json!({ "message": "must refuse task mutation",
+            "ops": [{"op": "upsert", "id": second.id, "kind": "prose",
                 "markdown": format!("# Second\nfinal decision\n{smuggled}")}]}),
     )
     .await
@@ -125,12 +108,10 @@ async fn local_prose_edit_preserves_task_after_unterminated_block_upserts() {
 async fn marked_import_and_block_move_keep_unterminated_prose_separate() {
     let boot = boot().await;
     let (task_id, _) = seed_planner_task(&boot, "build").await;
-    let prose = call_tool(
+    let prose = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"kind": "prose", "markdown": "# Decision\nfirst draft",
-            "if_doc_rev": read(&boot, json!({})).await["docRev"]}),
+        json!({"kind": "prose", "markdown": "# Decision\nfirst draft"}),
     )
     .await
     .unwrap();
@@ -141,20 +122,18 @@ async fn marked_import_and_block_move_keep_unterminated_prose_separate() {
         .iter()
         .position(|block| block["id"] == task_id)
         .unwrap();
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({"id": prose["id"], "if_doc_rev": snapshot["docRev"],
-            "to_index": task_index}),
+        json!([{"op": "move", "id": prose["id"],
+            "to_index": task_index}]),
     )
     .await
     .unwrap();
-    let replacement = call_tool(
+    let replacement = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"id": prose["id"], "if_rev": prose["rev"], "kind": "prose",
+        json!({"id": prose["id"], "kind": "prose",
             "markdown": "# Decision\nsecond draft"}),
     )
     .await
@@ -169,12 +148,10 @@ async fn marked_import_and_block_move_keep_unterminated_prose_separate() {
         .unwrap()
         .clone();
     let marked = read(&boot, json!({"with_markers": true})).await;
-    let out = call_tool(
+    let out = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({"body": marked["text"].as_str().unwrap().replace("second draft", "final draft"),
-            "if_doc_rev": marked["docRev"]}),
+        json!({"body": marked["text"].as_str().unwrap().replace("second draft", "final draft")}),
     )
     .await
     .expect("marked import remains usable");

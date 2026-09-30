@@ -1,5 +1,6 @@
 //! Captured execution-context regression through an explicitly authored task.
 use super::*;
+use crate::mcp_track_report::upsert_block;
 
 #[tokio::test]
 async fn candidate_authoring_accepts_captured_execution_context_without_rewriting_commands() {
@@ -27,7 +28,7 @@ async fn candidate_authoring_accepts_captured_execution_context_without_rewritin
         assert_eq!(command.len(), length);
         assert_eq!(format!("{:x}", Sha256::digest(command.as_bytes())), digest);
     }
-    use crate::mcp_track_report::{call_tool, planner_identity};
+    use crate::mcp_track_report::planner_identity;
     let boot = crate::mcp_track_report::boot().await;
     // The fixture is only the captured execution context, not a partial task.
     // Spell out the complete declaration and native request here; provenance is
@@ -42,20 +43,10 @@ async fn candidate_authoring_accepts_captured_execution_context_without_rewritin
         "declared_by": calm_types::report_blocks::tasks::PLANNER_DECLARATION_AUTHOR,
         "context": context.clone()
     });
-    let report = call_tool(
+    upsert_block(
         &boot,
-        "calm.report.read",
         planner_identity(&boot),
-        json!({}),
-    )
-    .await
-    .unwrap();
-    call_tool(
-        &boot,
-        "calm.report.blocks.upsert",
-        planner_identity(&boot),
-        json!({
-            "if_doc_rev": report["docRev"], "kind":"task", "payload":payload
+        json!({ "kind":"task", "payload":payload
         }),
     )
     .await
@@ -102,16 +93,8 @@ async fn candidate_authoring_human_names_are_literal_in_real_gate_wrapper() {
 
 #[tokio::test]
 async fn candidate_authoring_reports_policy_paths_through_native_errors() {
-    use crate::mcp_track_report::{call_tool, planner_identity};
+    use crate::mcp_track_report::planner_identity;
     let boot = crate::mcp_track_report::boot().await;
-    let report = call_tool(
-        &boot,
-        "calm.report.read",
-        planner_identity(&boot),
-        json!({}),
-    )
-    .await
-    .unwrap();
     let cases = [
         ("/timeout_secs", json!(0), "policy.timeout_secs"),
         ("/steps", json!([]), "policy.steps"),
@@ -124,11 +107,10 @@ async fn candidate_authoring_reports_policy_paths_through_native_errors() {
         let policy = &mut payload["context"]["neige_execution"]["file_delivery"]["policy"];
         policy["steps"] = json!([{"name":"first","cmd":"true"},{"name":"second","cmd":"true"}]);
         *policy.pointer_mut(path).unwrap() = replacement;
-        let error = call_tool(
+        let error = upsert_block(
             &boot,
-            "calm.report.blocks.upsert",
             planner_identity(&boot),
-            json!({"if_doc_rev":report["docRev"],"kind":"task","payload":payload}),
+            json!({"kind":"task","payload":payload}),
         )
         .await
         .unwrap_err();

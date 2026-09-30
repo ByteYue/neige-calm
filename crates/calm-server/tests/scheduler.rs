@@ -23,9 +23,6 @@ use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
 use calm_server::mcp_server::tools::emit::{TOOL_TASK_COMPLETE, TOOL_TASK_FAIL};
 use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
-use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_WRITE_MARKDOWN,
-};
 use calm_server::mcp_server::tools::track_state::TOOL_TASK_VERDICT;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{
@@ -539,9 +536,6 @@ async fn seed_projected_task_for(
         .await
         .expect("seed report fixture");
     }
-    let report = call_tool(boot, TOOL_REPORT_READ, identity.clone(), json!({}))
-        .await
-        .expect("read report before task projection");
     let mut payload = serde_json::Map::from_iter([
         ("key".into(), json!(task.key)),
         ("kind".into(), json!(task.kind)),
@@ -578,14 +572,13 @@ async fn seed_projected_task_for(
             serde_json::from_str(gate).expect("task gate JSON"),
         );
     }
-    call_tool(
-        boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
+    support::report_writes::upsert_block(
+        &boot.ctx,
+        &boot.registry,
         identity,
         json!({
             "kind": "task",
-            "payload": payload,
-            "if_doc_rev": report["docRev"]
+            "payload": payload
         }),
     )
     .await
@@ -3232,8 +3225,8 @@ async fn insert_report_payload(boot: &Boot, id: &str, payload: Value) {
     .unwrap();
 }
 
-/// `(id, rev)` of the track's single live task block, straight from the stored report payload.
-async fn live_task_block(boot: &Boot) -> (String, u64) {
+/// The id of the track's single live task block, straight from the stored report payload.
+async fn live_task_block(boot: &Boot) -> String {
     let card = boot
         .repo
         .cards_by_track(boot.track_id.as_str())
@@ -3249,10 +3242,10 @@ async fn live_task_block(boot: &Boot) -> (String, u64) {
         .into_iter()
         .find(|block| block.kind == "task" && block.payload.get("tombstone").is_none())
         .expect("one live task block");
-    (block.id, u64::from(block.rev))
+    block.id
 }
 
-async fn edit_report_blocks(boot: &Boot, blocks: &[(&str, &str, Value)], if_doc_rev: u64) {
+async fn edit_report_blocks(boot: &Boot, blocks: &[(&str, &str, Value)]) {
     let body = blocks
         .iter()
         .map(|(id, kind, payload)| {
@@ -3265,11 +3258,11 @@ async fn edit_report_blocks(boot: &Boot, blocks: &[(&str, &str, Value)], if_doc_
         })
         .collect::<Vec<_>>()
         .join("\n");
-    call_tool(
-        boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
+    support::report_writes::read_then_write_markdown(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(boot),
-        json!({"body": body, "if_doc_rev": if_doc_rev}),
+        json!({"body": body}),
     )
     .await
     .expect("production report edit");
@@ -3528,7 +3521,7 @@ async fn deterministic_root_location_failures_do_not_freeze_or_index() {
         .await;
         let root_id = "b_1001";
         let initial = vec![(root_id, "task", valid_root.clone())];
-        edit_report_blocks(&boot, &initial, 0).await;
+        edit_report_blocks(&boot, &initial).await;
         let task_id = format!("{}:{key}", boot.track_id);
         assert!(
             boot.repo.task_get(&task_id).await.unwrap().is_some(),
@@ -3598,19 +3591,19 @@ async fn deterministic_root_location_failures_do_not_freeze_or_index() {
                 .unwrap();
             tx.commit().await.unwrap();
         } else if case == "absent" {
-            // A whole-document write may not make a live task declaration disappear; the sanctioned way is the block-level delete endpoint.
-            let (id, rev) = live_task_block(&boot).await;
-            call_tool(
-                &boot,
-                TOOL_REPORT_BLOCKS_DELETE,
+            // A whole-document write may not make a live task declaration disappear; the sanctioned way is a delete op naming it.
+            let id = live_task_block(&boot).await;
+            support::report_writes::read_then_commit(
+                &boot.ctx,
+                &boot.registry,
                 planner_identity(&boot),
-                json!({"id": id, "if_rev": rev}),
+                json!([{"op": "delete", "id": id}]),
             )
             .await
-            .expect("block-level delete of the root task block");
-            edit_report_blocks(&boot, &broken, 2).await;
+            .expect("a delete op of the root task block");
+            edit_report_blocks(&boot, &broken).await;
         } else {
-            edit_report_blocks(&boot, &broken, 1).await;
+            edit_report_blocks(&boot, &broken).await;
         }
         scheduler.schedule_track(boot.track_id.clone()).await;
         assert!(event_rows(&boot, "task.context_frozen").await.is_empty());
@@ -6316,7 +6309,6 @@ async fn a_declared_task_is_claimed_and_plan_list_follows_its_attempt() {
                 "ready": true, "declared_by": "spec"
             }),
         )],
-        0,
     )
     .await;
 
@@ -8489,7 +8481,7 @@ async fn acceptance_5b_stale_frozen_context_refuses_real_child_operation() {
         "key":"stale-child", "kind":"codex", "goal":"frozen child contract",
         "spawn":"sub-wave", "ready":true, "declared_by":"spec"
     });
-    edit_report_blocks(&boot, &[("b_stale_child", "task", original.clone())], 0).await;
+    edit_report_blocks(&boot, &[("b_stale_child", "task", original.clone())]).await;
     let task_id = format!("{}:stale-child", boot.track_id);
 
     // Claim through production, but simulate a crash before op insertion by
@@ -8508,7 +8500,7 @@ async fn acceptance_5b_stale_frozen_context_refuses_real_child_operation() {
         "key":"stale-child", "kind":"codex", "goal":"materially edited child contract",
         "spawn":"sub-wave", "ready":true, "declared_by":"spec"
     });
-    edit_report_blocks(&boot, &[("b_stale_child", "task", edited)], 1).await;
+    edit_report_blocks(&boot, &[("b_stale_child", "task", edited)]).await;
     let monitor =
         TaskContextMonitor::new(boot.repo.clone(), boot.events.clone(), boot.write.clone());
     monitor
@@ -8556,7 +8548,7 @@ async fn acceptance_5b_stale_frozen_context_refuses_real_child_operation() {
         "the stale fence must reject the operation"
     );
 
-    edit_report_blocks(&boot, &[("b_stale_child", "task", original)], 2).await;
+    edit_report_blocks(&boot, &[("b_stale_child", "task", original)]).await;
     monitor
         .detect_track_edit(boot.track_id.as_str())
         .await

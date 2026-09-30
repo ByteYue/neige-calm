@@ -596,7 +596,7 @@ fn require_object<'a>(args: &'a Value, tool: &str) -> Result<&'a Map<String, Val
         .ok_or_else(|| RpcError::invalid_params(format!("{tool}: arguments must be an object")))
 }
 
-fn reject_unknown_keys(
+pub(crate) fn reject_unknown_keys(
     obj: &Map<String, Value>,
     allowed: &[&str],
     tool: &str,

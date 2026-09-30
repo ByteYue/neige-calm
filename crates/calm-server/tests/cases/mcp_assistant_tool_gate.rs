@@ -10,22 +10,17 @@ use calm_server::model::CardRole;
 use serde_json::json;
 use support::mcp::{boot_with_role, connect, handshake, recv_frame, send_frame};
 
-/// Tools an Assistant token may call. `calm.report.read` is the only source of `docRev` and
-/// per-block `rev`s, so without it no CAS write is possible; the report write channel carries
-/// lifecycle and stays denied.
+/// Tools an Assistant token may call. Its report writes are anchored by its own `calm.report.read`;
+/// their `lifecycle` field alone is refused.
 const ASSISTANT_ALLOWED_TOOLS: &[&str] = &[
     "calm.report.read",
     "calm.report.blocks.kinds",
-    "calm.report.blocks.upsert",
-    "calm.report.blocks.move",
-    "calm.report.blocks.delete",
+    "calm.report.commit",
     "calm.report.write_markdown",
 ];
 
 /// Denied tools whose handler a **Planner** token gets past; also the control list below.
 const ASSISTANT_DENIED_TOOLS_PLANNER_REACHABLE: &[&str] = &[
-    // Report write channel — planner-only.
-    "calm.report.commit",
     // Cross-track / cross-area report discovery reads.
     "calm.area.outline",
     "calm.report.links.backlinks",
@@ -207,8 +202,8 @@ async fn assistant_token_can_read_the_report_with_concurrency_tokens() {
     assert_eq!(
         payload.get("docRev").and_then(serde_json::Value::as_u64),
         Some(SEEDED_DOC_REV),
-        "`docRev` must be the CRDT-derived revision — it is the only \
-         `if_doc_rev` source a block-channel write has: {payload:#?}"
+        "`docRev` must be the CRDT-derived revision — it is what this read \
+         anchors a later write to: {payload:#?}"
     );
     // `taskDiagnostics` is dispatched-task runtime state, the class `calm.plan.list` stays
     // Planner-only to withhold; it must not leak out the side.
@@ -245,7 +240,7 @@ async fn assistant_token_can_read_the_report_with_concurrency_tokens() {
                 .get("rev")
                 .and_then(serde_json::Value::as_u64)
                 .is_some(),
-            "block index entry needs a numeric `rev` — the `if_rev` source: {block:#?}"
+            "block index entry needs a numeric `rev` — a write's per-block anchor: {block:#?}"
         );
     }
 

@@ -14,7 +14,7 @@ pub(crate) fn card_is_plain_chat(
     marked && (!require_worker_codex || (card.kind == "codex" && role == Some(CardRole::Worker)))
 }
 
-/// Whether a card carries the persisted track-assistant marker. Never conflate with the plain-chat predicate: an assistant holds a token that reaches the block channel, a plain chat has no track authority.
+/// Whether a card carries the persisted track-assistant marker. Never conflate with the plain-chat predicate: an assistant holds a token that reaches the report write tools, a plain chat has no track authority.
 pub(crate) fn card_is_track_assistant(
     card: &Card,
     role: Option<CardRole>,

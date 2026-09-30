@@ -16,7 +16,6 @@ use calm_server::mcp_server::tools::track_history::{
     TOOL_TRACK_CAT_AT, TOOL_TRACK_DIFF, TOOL_TRACK_LOG,
 };
 use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_WRITE_MARKDOWN;
 use calm_server::mcp_server::tools::track_state::TOOL_TASK_VERDICT;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, CardRuntimeView, NewArea, NewCard, NewTrack, now_ms};
@@ -2189,15 +2188,14 @@ async fn hidden_track_history_tools_are_callable_and_patch_report() {
         .unwrap()
         .unwrap();
 
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
+    crate::support::report_writes::read_then_write_markdown(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(&boot),
         json!({
             "body": "# Report\n\n- visible change\n",
             "summary": "changed",
-            "message": "write report for VCS diff",
-            "if_doc_rev": 0
+            "message": "write report for VCS diff"
         }),
     )
     .await

@@ -1,6 +1,6 @@
 //! F4 production authoring, scheduler, Operation, retained files and TaskLaunch.
 use crate::isolated_codex_smoke::{Fixture, fixture};
-use crate::mcp_track_report::{call_tool, planner_identity};
+use crate::mcp_track_report::{call_tool, planner_identity, upsert_block};
 use crate::task_recovery::{current, declare};
 use calm_server::{
     model::{Task, TaskStatus},
@@ -485,18 +485,17 @@ async fn file_delivery_task_launch_rechecks_prepared_bytes_before_first_turn() {
 async fn file_delivery_publication_refuses_withdrawn_ready_without_weakening_start_guard() {
     let fx = fixture("controlled").await;
     fx.state.dispatcher.abort_event_listener_for_test();
-    let (block, rev) = declare(&fx.boot, producer()).await;
+    let (block, _) = declare(&fx.boot, producer()).await;
     schedule(&fx).await;
     let source = current(&fx.boot, "produce").await;
     std::fs::write(workspace(&fx, &source).await.join("result.json"), b"42").unwrap();
     settle(&fx, &source, true).await;
     let mut withdrawn = producer();
     withdrawn["ready"] = json!(false);
-    call_tool(
+    upsert_block(
         &fx.boot,
-        "calm.report.blocks.upsert",
         planner_identity(&fx.boot),
-        json!({"id":block,"kind":"task","payload":withdrawn,"if_rev":rev}),
+        json!({"id":block,"kind":"task","payload":withdrawn}),
     )
     .await
     .unwrap();

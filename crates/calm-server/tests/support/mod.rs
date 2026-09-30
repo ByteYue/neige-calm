@@ -33,6 +33,8 @@ pub mod planner_queue_fixture;
 #[allow(dead_code)]
 pub mod planner_turn;
 #[allow(dead_code)]
+pub mod report_writes;
+#[allow(dead_code)]
 pub mod task;
 #[allow(dead_code)]
 pub mod track_file;

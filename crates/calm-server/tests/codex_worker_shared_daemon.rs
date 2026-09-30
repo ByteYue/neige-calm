@@ -18,7 +18,6 @@ use calm_server::dispatcher::Dispatcher;
 use calm_server::event::{Event, EventBus};
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
 use calm_server::mcp_server::{McpServer, ToolCallIdentity, ToolRegistry, build_default_registry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack, new_id, now_ms};
 use calm_server::operation::codex_adapter::{CodexWorkerAdapter, CodexWorkerOperationPayload};
@@ -113,7 +112,6 @@ struct Boot {
     ctx: Arc<AppContext>,
     registry: Arc<ToolRegistry>,
     planner_card_id: CardId,
-    report_card_id: CardId,
     _tmp: TempDir,
 }
 
@@ -279,7 +277,6 @@ async fn boot(start_shared: bool) -> Boot {
         ctx,
         registry: Arc::new(registry),
         planner_card_id: planner_card.id,
-        report_card_id: report_card.id,
         _tmp: tmp,
     }
 }
@@ -365,23 +362,12 @@ async fn write_codex_task_block(boot: &Boot, key: &str, goal: &str) {
     {
         return;
     }
-    let report = boot
-        .repo
-        .card_get(boot.report_card_id.as_str())
-        .await
-        .unwrap()
-        .expect("report card");
-    let report: TrackReportPayload = serde_json::from_value(report.payload).unwrap();
-    let handler = boot
-        .registry
-        .lookup(TOOL_REPORT_BLOCKS_UPSERT)
-        .expect("task block writer registered");
-    handler(
-        boot.ctx.clone(),
+    support::report_writes::upsert_block(
+        &boot.ctx,
+        &boot.registry,
         planner_identity(boot),
         json!({
             "kind": "task",
-            "if_doc_rev": report.doc_rev,
             "payload": {
                 "key": key,
                 "kind": "codex",

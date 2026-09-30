@@ -226,16 +226,14 @@ fn paths(listing: &Value) -> Vec<String> {
 }
 
 async fn write_body(boot: &Boot, side: &Side, body: &str) {
-    let rev = call(boot, TOOL_REPORT_READ, planner(side), json!({}))
+    call(boot, TOOL_REPORT_READ, planner(side), json!({}))
         .await
-        .expect("read")["docRev"]
-        .as_u64()
-        .expect("docRev");
+        .expect("read");
     call(
         boot,
         TOOL_REPORT_WRITE_MARKDOWN,
         planner(side),
-        json!({ "body": body, "message": "write", "if_doc_rev": rev }),
+        json!({ "body": body, "message": "write" }),
     )
     .await
     .expect("calm.report.write_markdown");

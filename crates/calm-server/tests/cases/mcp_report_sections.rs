@@ -1,17 +1,17 @@
 //! #1877: section-addressed `calm.report.commit` ops anchored by the session's read ledger. A write
-//! passes no rev; the kernel checks it against what this session last read, inside the persist tx.
+//! passes no rev (#1883); the kernel checks it against what this session last read with
+//! `calm.report.read`, inside the persist tx.
 
 #![cfg(unix)]
 
 use crate::mcp_track_report::{
-    Boot, assistant_identity, boot, call_tool, planner_identity, seed_track_root_session,
+    Boot, assistant_identity, boot, call_tool, planner_identity, read_then_commit,
+    read_then_write_markdown, seed_track_root_session, upsert_block,
 };
 use calm_server::mcp_server::ToolCallIdentity;
 use calm_server::mcp_server::tools::track_file::TOOL_TRACK_CAT;
 use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
-use calm_server::mcp_server::tools::track_report_blocks::{
-    RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
-};
+use calm_server::mcp_server::tools::track_report_blocks::{RPC_REV_CONFLICT, TOOL_REPORT_COMMIT};
 use calm_server::plugin_host::mcp::RpcError;
 use calm_server::track_report::TrackReportPayload;
 use serde_json::{Value, json};
@@ -23,12 +23,12 @@ const CONTRACT: &str = "<!-- neige:contract {\"version\":1,\"sections\":[{\"h1\"
 /// `待你定` is declared but absent; `概要` spans two blocks.
 const SECTIONS: &str = "# 概要\n\nalpha\n\n## 细节\n\na2\n\n# 已完成\n\nbeta\n\n# 决策\n\ngamma\n";
 
+/// Written by another session, so the planner starts with no read of the report.
 async fn seed(boot: &Boot, sections: &str) {
-    call_tool(
+    read_then_write_markdown(
         boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(boot),
-        json!({ "body": format!("{CONTRACT}{sections}"), "message": "seed", "if_doc_rev": 0 }),
+        assistant_identity(boot),
+        json!({ "body": format!("{CONTRACT}{sections}"), "message": "seed"}),
     )
     .await
     .expect("seed write");
@@ -93,14 +93,13 @@ fn replace(section: &str, markdown: &str) -> Value {
     json!({ "ops": [{ "op": "replace", "section": section, "markdown": markdown }] })
 }
 
-/// Another session edits the first block of `heading` with explicit revs.
+/// Another session edits the first block of `heading`.
 async fn assistant_edits(boot: &Boot, heading: &str, markdown: &str) {
-    let (id, rev) = section_blocks(boot, heading).await.remove(0);
-    call_tool(
+    let (id, _) = section_blocks(boot, heading).await.remove(0);
+    upsert_block(
         boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(boot),
-        json!({ "id": id, "if_rev": rev, "kind": "prose", "markdown": markdown }),
+        json!({ "id": id, "kind": "prose", "markdown": markdown }),
     )
     .await
     .expect("the other writer's edit");
@@ -166,25 +165,6 @@ async fn read_sections_then_replace_without_revs_keeps_ids_and_touches_only_the_
         body.starts_with(CONTRACT) && body.contains("a3\n\n# 已完成\n\nbeta\n"),
         "{body}"
     );
-
-    // `neige cat report.md --sections` is a read of the same kind.
-    let cat = call_tool(
-        &boot,
-        TOOL_TRACK_CAT,
-        planner_identity(&boot),
-        json!({ "path": "report.md", "sections": ["决策"] }),
-    )
-    .await
-    .expect("cat --sections");
-    let decision = cat["content"].as_str().expect("content");
-    commit(
-        &boot,
-        planner_identity(&boot),
-        replace("决策", &decision.replace("gamma", "delta")),
-    )
-    .await
-    .expect("a cat --sections read anchors the write too");
-    assert!(payload(&boot).await.body.ends_with("# 决策\n\ndelta\n"));
 }
 
 #[tokio::test]
@@ -320,47 +300,12 @@ async fn a_new_session_of_the_card_starts_with_an_empty_ledger() {
     commit(&boot, successor.clone(), replace("决策", "# 决策\n\nx\n"))
         .await
         .expect("the successor's own read");
-    // A session that never read writes with explicit revs exactly as before.
-    let doc_rev = payload(&boot).await.doc_rev;
-    let fresh = supersede_planner(&boot, "planner-session-2", "planner-session-3").await;
-    commit(
-        &boot,
-        fresh,
-        json!({ "if_doc_rev": doc_rev, "summary": "explicit" }),
-    )
-    .await
-    .expect("an explicit if_doc_rev needs no read");
-    assert_eq!(payload(&boot).await.summary, "explicit");
 }
 
+/// #1883: only a `delete` op naming a live task by id may retire it; a section op that would drop
+/// one is refused.
 #[tokio::test]
-async fn explicit_revs_still_decide_over_the_ledger() {
-    let boot = boot().await;
-    seed(&boot, SECTIONS).await;
-    call_tool(&boot, TOOL_REPORT_READ, planner_identity(&boot), json!({}))
-        .await
-        .expect("full read");
-    assistant_edits(&boot, "# 决策", "# 决策\n\nby assistant\n").await;
-    let (id, rev) = section_blocks(&boot, "# 决策").await.remove(0);
-    let doc_rev = payload(&boot).await.doc_rev;
-    let upsert = |if_rev: u64| {
-        json!({ "if_doc_rev": doc_rev, "summary": "s", "ops": [
-            { "op": "upsert", "id": id, "if_rev": if_rev, "kind": "prose", "markdown": "# 决策\n\nmine\n" }
-        ] })
-    };
-    let err = commit(&boot, planner_identity(&boot), upsert(rev - 1))
-        .await
-        .expect_err("a stale explicit if_rev");
-    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
-    assert_eq!(err.data, Some(json!({ "docRev": doc_rev, "rev": rev })));
-    commit(&boot, planner_identity(&boot), upsert(rev))
-        .await
-        .expect("current explicit revs win over the stale ledger");
-    assert!(payload(&boot).await.body.ends_with("# 决策\n\nmine\n"));
-}
-
-#[tokio::test]
-async fn a_section_delete_is_refused_while_it_holds_a_live_task() {
+async fn a_section_op_is_refused_while_its_section_holds_a_live_task() {
     let boot = boot().await;
     let task = calm_types::report_blocks::render_fence(
         "task",
@@ -371,28 +316,32 @@ async fn a_section_delete_is_refused_while_it_holds_a_live_task() {
             "ready": true
         }),
     );
-    seed(
-        &boot,
-        &SECTIONS.replace("beta\n", &format!("beta\n\n{task}")),
-    )
-    .await;
-    call_tool(&boot, TOOL_REPORT_READ, planner_identity(&boot), json!({}))
-        .await
-        .expect("full read");
-    let before = payload(&boot).await;
-    let err = commit(
+    read_then_write_markdown(
         &boot,
         planner_identity(&boot),
-        json!({ "ops": [{ "op": "delete", "section": "已完成" }] }),
+        json!({
+            "body": format!("{CONTRACT}{}", SECTIONS.replace("beta\n", &format!("beta\n\n{task}"))),
+            "message": "seed"
+        }),
     )
     .await
-    .expect_err("live task");
-    assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
-    assert!(
-        err.message
-            .contains("must use the block-level DELETE endpoint"),
-        "{err:?}"
-    );
+    .expect("the planner seeds its task");
+    read_full(&boot).await;
+    let before = payload(&boot).await;
+    for ops in [
+        json!([{ "op": "delete", "section": "已完成" }]),
+        json!([{ "op": "replace", "section": "已完成", "markdown": "# 已完成\n\nbeta\n" }]),
+    ] {
+        let err = commit(
+            &boot,
+            planner_identity(&boot),
+            json!({ "ops": ops.clone() }),
+        )
+        .await
+        .expect_err("live task");
+        assert_eq!(err.code, INVALID_PARAMS, "{ops}: {err:?}");
+        assert!(err.message.contains("must name it by id"), "{ops}: {err:?}");
+    }
     assert_eq!(payload(&boot).await.body, before.body);
 
     commit(
@@ -510,12 +459,11 @@ async fn a_section_another_writer_removed_is_a_conflict_until_the_report_is_read
     let boot = boot().await;
     seed(&boot, SECTIONS).await;
     read_full(&boot).await;
-    let (id, rev) = section_blocks(&boot, "# 决策").await.remove(0);
-    call_tool(
+    let (id, _) = section_blocks(&boot, "# 决策").await.remove(0);
+    read_then_commit(
         &boot,
-        calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_DELETE,
         assistant_identity(&boot),
-        json!({ "id": id, "if_rev": rev }),
+        json!([{"op": "delete",  "id": id}]),
     )
     .await
     .expect("the other writer deletes the section");
@@ -540,36 +488,45 @@ async fn a_section_another_writer_removed_is_a_conflict_until_the_report_is_read
     );
 }
 
+/// #1883: `neige cat` is a view; only `calm.report.read` anchors a write.
 #[tokio::test]
-async fn a_cat_read_does_not_anchor_a_summary_over_one_it_never_showed() {
+async fn a_cat_read_anchors_no_commit() {
     let boot = boot().await;
     seed(&boot, SECTIONS).await;
-    let doc_rev = payload(&boot).await.doc_rev;
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        assistant_identity(&boot),
-        json!({ "body": payload(&boot).await.body, "summary": "用户的", "if_doc_rev": doc_rev }),
-    )
-    .await
-    .expect("another writer sets the summary");
-    call_tool(
-        &boot,
-        TOOL_TRACK_CAT,
-        planner_identity(&boot),
+    for args in [
+        json!({ "path": "report.md" }),
         json!({ "path": "report.md", "sections": ["决策"] }),
-    )
-    .await
-    .expect("cat --sections");
-    let err = commit(&boot, planner_identity(&boot), json!({ "summary": "mine" }))
-        .await
-        .expect_err("cat shows no docRev");
-    assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
-    assert!(
-        err.message.contains("has not read the report's docRev"),
-        "{err:?}"
+    ] {
+        call_tool(&boot, TOOL_TRACK_CAT, planner_identity(&boot), args)
+            .await
+            .expect("cat");
+    }
+    let session = planner_identity(&boot).session_id;
+    assert_eq!(
+        boot.ctx
+            .read_ledger
+            .last_read(&session, boot.report_card_id.as_str()),
+        None
     );
-    assert_eq!(payload(&boot).await.summary, "用户的");
+    let before = payload(&boot).await;
+    for (args, needle) in [
+        (
+            replace("决策", "# 决策\n\nmine\n"),
+            "section `决策` has not been read",
+        ),
+        (
+            json!({ "summary": "mine" }),
+            "this session has not read the report",
+        ),
+    ] {
+        let err = commit(&boot, planner_identity(&boot), args.clone())
+            .await
+            .expect_err("cat is not a read");
+        assert_eq!(err.code, INVALID_PARAMS, "{args}: {err:?}");
+        assert!(err.message.contains(needle), "{args}: {err:?}");
+    }
+    let after = payload(&boot).await;
+    assert_eq!((after.body, after.summary), (before.body, before.summary));
 }
 
 #[tokio::test]
@@ -672,12 +629,10 @@ async fn a_block_an_own_replace_dropped_is_not_read_any_more() {
 
 /// Another writer appends `markdown` as a new block; its id is minted from content and position.
 async fn assistant_appends(boot: &Boot, markdown: &str) -> (String, u64) {
-    let doc_rev = payload(boot).await.doc_rev;
-    let out = call_tool(
+    let out = upsert_block(
         boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(boot),
-        json!({ "kind": "prose", "markdown": markdown, "if_doc_rev": doc_rev }),
+        json!({ "kind": "prose", "markdown": markdown}),
     )
     .await
     .expect("the other writer appends");
@@ -688,7 +643,7 @@ async fn assistant_appends(boot: &Boot, markdown: &str) -> (String, u64) {
 }
 
 /// Delete `id`'s block through `ops`, let another writer re-create the same content at the same
-/// position (the same id at rev 1 again), then edit that id with no `if_rev`.
+/// position (the same id at rev 1 again), then edit that id.
 async fn assert_a_reminted_id_is_not_read(boot: &Boot, id: &str, rev: u64, ops: Value) {
     commit(boot, planner_identity(boot), ops)
         .await
@@ -731,32 +686,4 @@ async fn an_id_an_own_section_delete_removed_and_minted_again_is_not_read() {
     read_full(&boot).await;
     let ops = json!({ "ops": [{ "op": "delete", "section": "附录" }] });
     assert_a_reminted_id_is_not_read(&boot, &id, rev, ops).await;
-}
-
-#[tokio::test]
-async fn an_explicit_doc_anchor_past_the_read_does_not_advance_the_read() {
-    let boot = boot().await;
-    seed(&boot, SECTIONS).await;
-    read_full(&boot).await;
-    let body = payload(&boot).await.body;
-    let doc_rev = payload(&boot).await.doc_rev;
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        assistant_identity(&boot),
-        json!({ "body": body, "summary": "用户的", "if_doc_rev": doc_rev }),
-    )
-    .await
-    .expect("another writer sets the summary");
-    let current = payload(&boot).await.doc_rev;
-    let mut edit = replace("决策", "# 决策\n\nd1\n");
-    edit["if_doc_rev"] = json!(current);
-    commit(&boot, planner_identity(&boot), edit)
-        .await
-        .expect("an explicit current docRev is checked as given");
-    let err = commit(&boot, planner_identity(&boot), json!({ "summary": "mine" }))
-        .await
-        .expect_err("the session never read the other writer's summary");
-    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
-    assert_eq!(payload(&boot).await.summary, "用户的");
 }

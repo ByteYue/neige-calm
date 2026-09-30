@@ -6,7 +6,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::task::Poll;
 
-use crate::mcp_track_report::{Boot, boot as new_boot, call_tool, planner_identity};
+use crate::mcp_track_report::{
+    Boot, boot as new_boot, call_tool, planner_identity, read_then_commit,
+    read_then_write_markdown, upsert_block,
+};
 use axum::body::Body;
 use axum::extract::{FromRef, Path, State};
 use axum::http::Request;
@@ -17,10 +20,6 @@ use calm_server::db::sqlite::{begin_immediate_tx, project_tasks_tx, task_claim_p
 use calm_server::event::{EditAuthor, Event, EventBus};
 use calm_server::ids::ActorId;
 use calm_server::mcp_server::tools::track_report::TOOL_REPORT_READ;
-use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_MOVE, TOOL_REPORT_BLOCKS_UPSERT,
-    TOOL_REPORT_WRITE_MARKDOWN,
-};
 use calm_server::plugin_host::{PluginHost, PluginRegistry};
 use calm_server::routes::track_report_blocks::{
     DeleteReportBlockBody, UpdateReportBlockBody, delete_block, update_block,
@@ -52,21 +51,14 @@ async fn read(boot: &Boot) -> Value {
         .expect("calm.report.read")
 }
 
-async fn upsert(boot: &Boot, id_rev: Option<(&str, u64)>, payload: Value) -> (String, u64) {
-    let args = match id_rev {
-        Some((id, rev)) => json!({"id": id, "kind": "task", "payload": payload, "if_rev": rev}),
-        None => {
-            json!({"kind": "task", "payload": payload, "if_doc_rev": read(boot).await["docRev"]})
-        }
+async fn upsert(boot: &Boot, id: Option<&str>, payload: Value) -> (String, u64) {
+    let args = match id {
+        Some(id) => json!({"id": id, "kind": "task", "payload": payload}),
+        None => json!({"kind": "task", "payload": payload}),
     };
-    let out = call_tool(
-        boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(boot),
-        args,
-    )
-    .await
-    .expect("task upsert");
+    let out = upsert_block(boot, planner_identity(boot), args)
+        .await
+        .expect("task upsert");
     (
         out["id"].as_str().unwrap().to_string(),
         out["rev"].as_u64().unwrap(),
@@ -628,11 +620,10 @@ async fn agent_task_gate_cwd_not_admitted_at_claim() {
     upsert(&boot, None, codex).await;
     let mut empty = task("codex-gate-empty-cwd");
     empty["gate"] = gate(json!(""));
-    let empty_error = call_tool(
+    let empty_error = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"kind": "task", "payload": empty, "if_doc_rev": read(&boot).await["docRev"]}),
+        json!({"kind": "task", "payload": empty}),
     )
     .await
     .expect_err("an empty gate.cwd is refused before projection");
@@ -852,11 +843,10 @@ async fn declare_and_wait_release_and_withdraw_is_end_to_end() {
 
     let mut forbidden = task("forbidden");
     forbidden["released_by_user"] = json!(true);
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"kind":"task", "payload":forbidden, "if_doc_rev":read(&boot).await["docRev"]}),
+        json!({"kind":"task", "payload":forbidden}),
     )
     .await
     .expect_err("planner cannot release");
@@ -903,19 +893,10 @@ async fn inflight_ready_withdrawal_emits_once_and_surfaces_on_both_reads() {
         .await
         .unwrap();
 
-    let latest = read(&boot).await;
-    let rev = latest["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|block| block["id"] == id)
-        .unwrap()["rev"]
-        .as_u64()
-        .unwrap();
     let before_events = boot.repo.events_since(0, i64::MAX).await.unwrap().len();
     let mut withdrawn = declaration;
     withdrawn["ready"] = json!(false);
-    upsert(&boot, Some((&id, rev)), withdrawn).await;
+    upsert(&boot, Some(&id), withdrawn).await;
 
     let stale: Option<i64> = sqlx::query_scalar(
         "SELECT context_stale_at_ms FROM tasks WHERE track_id=?1 AND key='adopted-ready'",
@@ -1001,11 +982,10 @@ async fn release_edges_obey_current_wait_policy_and_forward_edge_is_safe() {
 #[tokio::test]
 async fn in_flight_reference_target_deletion_warns_on_both_reads_without_declaration_edit() {
     let boot = new_boot().await;
-    let target = call_tool(
+    let target = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"kind": "prose", "markdown": "old target", "if_doc_rev": read(&boot).await["docRev"]}),
+        json!({"kind": "prose", "markdown": "old target"}),
     )
     .await
     .unwrap();
@@ -1097,20 +1077,14 @@ async fn in_flight_reference_target_deletion_warns_on_both_reads_without_declara
         .await
         .unwrap();
 
-    let snapshot = read(&boot).await;
     let referring_id = task_id;
     let body = format!(
         "<!-- neige:{referring_id} -->\n{}",
         render_fence("task", &declaration)
     );
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({"body": body, "if_doc_rev": snapshot["docRev"]}),
-    )
-    .await
-    .expect("delete referenced target");
+    read_then_write_markdown(&boot, planner_identity(&boot), json!({"body": body}))
+        .await
+        .expect("delete referenced target");
     let mcp = read(&boot).await;
     let rest = rest_read(&boot).await;
     for snapshot in [&mcp, &rest] {
@@ -1139,22 +1113,16 @@ async fn in_flight_reference_target_deletion_warns_on_both_reads_without_declara
 #[tokio::test]
 async fn production_ids_cover_depth_two_referenced_block_absence() {
     let boot = new_boot().await;
-    let target = call_tool(
+    let target = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({"kind":"prose","markdown":"leaf","if_doc_rev":read(&boot).await["docRev"]}),
+        json!({"kind":"prose","markdown":"leaf"}),
     )
     .await
     .unwrap();
     let target_id = target["id"].as_str().unwrap().to_string();
     let target_rev = target["rev"].as_u64().unwrap();
-    let middle = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({"kind":"prose","markdown":format!("[leaf](neige://wave/{}#{target_id})",boot.track_id),"if_doc_rev":read(&boot).await["docRev"]}),
-    )
+    let middle = upsert_block(&boot, planner_identity(&boot), json!({"kind":"prose","markdown":format!("[leaf](neige://wave/{}#{target_id})",boot.track_id)}))
     .await
     .unwrap();
     let middle_id = middle["id"].as_str().unwrap().to_string();
@@ -1275,17 +1243,16 @@ async fn terminal_task_does_not_receive_in_flight_withdrawal_diagnostic() {
 #[tokio::test]
 async fn deleting_in_flight_task_block_keeps_withdrawal_diagnostic_readable() {
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("deleted-running")).await;
+    let (id, _) = upsert(&boot, None, task("deleted-running")).await;
     sqlx::query("UPDATE tasks SET status='running' WHERE track_id=?1 AND key='deleted-running'")
         .bind(boot.track_id.as_str())
         .execute(&boot.repo.sqlite_pool().unwrap())
         .await
         .unwrap();
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         planner_identity(&boot),
-        json!({"id":id, "if_rev":rev}),
+        json!([{"op": "delete", "id":id}]),
     )
     .await
     .unwrap();
@@ -1313,13 +1280,12 @@ async fn deleting_in_flight_task_block_keeps_withdrawal_diagnostic_readable() {
 #[tokio::test]
 async fn deleted_tombstone_then_same_key_reproposal_creates_a_fresh_row() {
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("phoenix")).await;
+    let (id, _) = upsert(&boot, None, task("phoenix")).await;
     assert_eq!(keys(&boot).await, ["phoenix"]);
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         planner_identity(&boot),
-        json!({"id":id, "if_rev":rev}),
+        json!([{"op": "delete", "id":id}]),
     )
     .await
     .expect("planner deletion is permitted before user tombstone coverage");
@@ -1367,7 +1333,7 @@ async fn deleted_tombstone_then_same_key_reproposal_creates_a_fresh_row() {
 async fn acceptance_1_report_spawn_only_edit_emits_plan_updated_and_changes_frozen_route_column() {
     let boot = new_boot().await;
     let mut rx = boot.ctx.events.subscribe();
-    let (id, rev) = upsert(&boot, None, task("events")).await;
+    let (id, _) = upsert(&boot, None, task("events")).await;
     let events = [
         rx.recv().await.unwrap(),
         rx.recv().await.unwrap(),
@@ -1383,7 +1349,7 @@ async fn acceptance_1_report_spawn_only_edit_emits_plan_updated_and_changes_froz
         rx.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
-    upsert(&boot, Some((&id, rev)), task("events")).await;
+    upsert(&boot, Some(&id), task("events")).await;
     let events = [rx.recv().await.unwrap(), rx.recv().await.unwrap()];
     assert!(matches!(events[0].event, Event::CardUpdated(_)));
     assert!(matches!(events[1].event, Event::TrackReportEdited { .. }));
@@ -1394,16 +1360,7 @@ async fn acceptance_1_report_spawn_only_edit_emits_plan_updated_and_changes_froz
 
     let mut sub_track = task("events");
     sub_track["spawn"] = json!("sub-wave");
-    let current = read(&boot).await;
-    let rev = current["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|block| block["id"] == id)
-        .unwrap()["rev"]
-        .as_u64()
-        .unwrap();
-    upsert(&boot, Some((&id, rev)), sub_track).await;
+    upsert(&boot, Some(&id), sub_track).await;
     let events = [
         rx.recv().await.unwrap(),
         rx.recv().await.unwrap(),
@@ -1428,15 +1385,15 @@ async fn acceptance_1_report_spawn_only_edit_emits_plan_updated_and_changes_froz
 async fn four_db_diagnostics_delete_rows_and_are_visible_on_mcp_and_rest_reads() {
     // unknown_deps
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("unknown")).await;
+    let (id, _) = upsert(&boot, None, task("unknown")).await;
     let mut bad = task("unknown");
     bad["depends_on"] = json!(["missing"]);
-    upsert(&boot, Some((&id, rev)), bad).await;
+    upsert(&boot, Some(&id), bad).await;
     assert_diagnosed_on_both_reads(&boot, "unknown", "unknown dependency").await;
 
     // declare-and-wait
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("waiting")).await;
+    let (id, _) = upsert(&boot, None, task("waiting")).await;
     sqlx::query("UPDATE tracks SET automation_policy='declare-and-wait' WHERE id=?1")
         .bind(boot.track_id.as_str())
         .execute(&boot.repo.sqlite_pool().unwrap())
@@ -1444,12 +1401,12 @@ async fn four_db_diagnostics_delete_rows_and_are_visible_on_mcp_and_rest_reads()
         .unwrap();
     let mut changed = task("waiting");
     changed["goal"] = json!("reevaluate policy");
-    upsert(&boot, Some((&id, rev)), changed).await;
+    upsert(&boot, Some(&id), changed).await;
     assert_diagnosed_on_both_reads(&boot, "waiting", "requires user release").await;
 
     // planner_task_ceiling
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("ceiling")).await;
+    let (id, _) = upsert(&boot, None, task("ceiling")).await;
     sqlx::query("UPDATE tracks SET planner_task_ceiling=0 WHERE id=?1")
         .bind(boot.track_id.as_str())
         .execute(&boot.repo.sqlite_pool().unwrap())
@@ -1457,12 +1414,12 @@ async fn four_db_diagnostics_delete_rows_and_are_visible_on_mcp_and_rest_reads()
         .unwrap();
     let mut changed = task("ceiling");
     changed["goal"] = json!("reevaluate ceiling");
-    upsert(&boot, Some((&id, rev)), changed).await;
+    upsert(&boot, Some(&id), changed).await;
     assert_diagnosed_on_both_reads(&boot, "ceiling", "ceiling of 0").await;
 
     // cross-area reference
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("cross")).await;
+    let (id, _) = upsert(&boot, None, task("cross")).await;
     let other_area = boot
         .repo
         .area_create(calm_server::model::NewArea {
@@ -1489,7 +1446,7 @@ async fn four_db_diagnostics_delete_rows_and_are_visible_on_mcp_and_rest_reads()
         .unwrap();
     let mut changed = task("cross");
     changed["refs"] = json!([format!("neige://wave/{}#b_dead", other_track.id)]);
-    upsert(&boot, Some((&id, rev)), changed).await;
+    upsert(&boot, Some(&id), changed).await;
     assert_diagnosed_on_both_reads(&boot, "cross", "cross-area").await;
 }
 
@@ -1504,23 +1461,22 @@ async fn rebuild_matches_incremental_bytes_after_adversarial_edit_sequence() {
     sqlx::query("INSERT INTO tasks(id,track_id,key,kind,goal,context_json,acceptance_criteria,cwd,depends_on_json,priority,gate_json,status,status_detail,declared_by,created_at_ms,updated_at_ms) VALUES(?1,?2,'flight','codex','goal flight','{\"key\":\"flight\"}','accept flight','/flight','[]',3,'{\"steps\":[{\"name\":\"accept\",\"cmd\":\"true\"}]}','running','owned-byte','spec',0,0)")
         .bind(format!("{}:flight", boot.track_id)).bind(boot.track_id.as_str())
         .execute(&boot.repo.sqlite_pool().unwrap()).await.unwrap();
-    let (a, a_rev) = upsert(&boot, None, task("a")).await;
+    let (a, _) = upsert(&boot, None, task("a")).await;
     let (b, _) = upsert(&boot, None, task("b")).await;
     upsert(&boot, None, task("flight")).await;
-    let (x, x_rev) = upsert(&boot, None, task("x")).await;
-    let (y, y_rev) = upsert(&boot, None, task("y")).await;
+    let (x, _) = upsert(&boot, None, task("x")).await;
+    let (y, _) = upsert(&boot, None, task("y")).await;
     let mut duplicate = task("x");
     duplicate["goal"] = json!("duplicate x");
-    let (duplicate_id, duplicate_rev) = upsert(&boot, None, duplicate).await;
+    let (duplicate_id, _) = upsert(&boot, None, duplicate).await;
     assert!(
         !keys(&boot).await.iter().any(|key| key == "x"),
         "duplicate deletes pending rows"
     );
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         planner_identity(&boot),
-        json!({"id":duplicate_id,"if_rev":duplicate_rev}),
+        json!([{"op": "delete", "id":duplicate_id}]),
     )
     .await
     .unwrap();
@@ -1528,8 +1484,8 @@ async fn rebuild_matches_incremental_bytes_after_adversarial_edit_sequence() {
     cycle_x["depends_on"] = json!(["y"]);
     let mut cycle_y = task("y");
     cycle_y["depends_on"] = json!(["x"]);
-    upsert(&boot, Some((&x, x_rev)), cycle_x).await;
-    upsert(&boot, Some((&y, y_rev)), cycle_y).await;
+    upsert(&boot, Some(&x), cycle_x).await;
+    upsert(&boot, Some(&y), cycle_y).await;
     assert!(
         !keys(&boot).await.iter().any(|key| key == "x" || key == "y"),
         "cycle deletes rows"
@@ -1537,7 +1493,7 @@ async fn rebuild_matches_incremental_bytes_after_adversarial_edit_sequence() {
     let mut changed = task("a");
     changed["goal"] = json!("changed goal");
     changed["ready"] = json!(false);
-    upsert(&boot, Some((&a, a_rev)), changed).await;
+    upsert(&boot, Some(&a), changed).await;
     let before = task_bytes(&boot).await;
     // Damage materialized rows in two distinct ways so rebuild must recreate
     // a surviving pending row and repair declaration bytes on the in-flight row.
@@ -1692,11 +1648,11 @@ async fn rebuild_matches_incremental_withdrawal_outcomes_and_exactly_once_events
 async fn inflight_goal_acceptance_and_gate_changes_are_each_detected_without_row_mutation() {
     for field in ["goal", "acceptance", "gate", "context", "cwd", "depends_on"] {
         let boot = new_boot().await;
-        let (id, rev) = upsert(&boot, None, task("flight")).await;
+        let (id, _) = upsert(&boot, None, task("flight")).await;
         sqlx::query("UPDATE tasks SET status='running',status_detail='owned' WHERE track_id=?1 AND key='flight'")
             .bind(boot.track_id.as_str()).execute(&boot.repo.sqlite_pool().unwrap()).await.unwrap();
         let before = task_bytes(&boot).await;
-        upsert(&boot, Some((&id, rev)), task("flight")).await;
+        upsert(&boot, Some(&id), task("flight")).await;
         assert_eq!(
             task_bytes(&boot).await,
             before,
@@ -1710,14 +1666,6 @@ async fn inflight_goal_acceptance_and_gate_changes_are_each_detected_without_row
             ),
             "unchanged declaration must not be stale"
         );
-        let rev = read(&boot).await["blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|block| block["id"] == id)
-            .unwrap()["rev"]
-            .as_u64()
-            .unwrap();
         let mut changed = task("flight");
         match field {
             "goal" => changed[field] = json!("new goal"),
@@ -1728,7 +1676,7 @@ async fn inflight_goal_acceptance_and_gate_changes_are_each_detected_without_row
             "depends_on" => changed[field] = json!(["other"]),
             _ => unreachable!(),
         }
-        upsert(&boot, Some((&id, rev)), changed).await;
+        upsert(&boot, Some(&id), changed).await;
         assert_eq!(
             task_bytes(&boot).await,
             before,
@@ -1747,7 +1695,7 @@ async fn inflight_goal_acceptance_and_gate_changes_are_each_detected_without_row
 async fn inflight_priority_and_declared_by_changes_do_not_promise_context_rejection() {
     for (field, value) in [("priority", json!(99)), ("declared_by", json!("user"))] {
         let boot = new_boot().await;
-        let (id, rev) = upsert(&boot, None, task("non-context-drift")).await;
+        let (id, _) = upsert(&boot, None, task("non-context-drift")).await;
         sqlx::query(
             "UPDATE tasks SET status='running' WHERE track_id=?1 AND key='non-context-drift'",
         )
@@ -1767,7 +1715,7 @@ async fn inflight_priority_and_declared_by_changes_do_not_promise_context_reject
         } else {
             let mut changed = task("non-context-drift");
             changed[field] = value;
-            upsert(&boot, Some((&id, rev)), changed).await;
+            upsert(&boot, Some(&id), changed).await;
         }
         let stale: Option<i64> = sqlx::query_scalar(
             "SELECT context_stale_at_ms FROM tasks WHERE track_id=?1 AND key='non-context-drift'",
@@ -1789,13 +1737,13 @@ async fn inflight_priority_and_declared_by_changes_do_not_promise_context_reject
 #[tokio::test]
 async fn canonical_gate_and_context_are_semantically_equal_to_block_declaration() {
     let boot = new_boot().await;
-    let (id, rev) = upsert(&boot, None, task("flight")).await;
+    let (id, _) = upsert(&boot, None, task("flight")).await;
     sqlx::query("UPDATE tasks SET status='running',gate_json=?1,context_json=?2 WHERE track_id=?3 AND key='flight'")
         .bind(r#"{"steps":[{"name":"accept","cmd":"true"}]}"#)
         .bind(r#"{"key":"flight"}"#)
         .bind(boot.track_id.as_str())
         .execute(&boot.repo.sqlite_pool().unwrap()).await.unwrap();
-    upsert(&boot, Some((&id, rev)), task("flight")).await;
+    upsert(&boot, Some(&id), task("flight")).await;
     assert!(
         !has_diagnostic_code(
             &read(&boot).await,
@@ -1824,16 +1772,15 @@ async fn unknown_dependencies_treat_inflight_rows_as_known() {
 #[tokio::test]
 async fn deleting_dependency_converges_in_one_evaluation_and_rebuild_matches_reads() {
     let boot = new_boot().await;
-    let (k1, k1_rev) = upsert(&boot, None, task("k1")).await;
+    let (k1, _) = upsert(&boot, None, task("k1")).await;
     let mut k2 = task("k2");
     k2["depends_on"] = json!(["k1"]);
     upsert(&boot, None, k2).await;
     assert_eq!(keys(&boot).await, ["k1", "k2"]);
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         planner_identity(&boot),
-        json!({"id":k1,"if_rev":k1_rev}),
+        json!([{"op": "delete", "id":k1}]),
     )
     .await
     .unwrap();
@@ -1991,11 +1938,10 @@ async fn document_order_is_ceiling_priority_and_move_reprojects_pending_rows() {
     let (second, _) = upsert(&boot, None, task("second")).await;
     assert_eq!(keys(&boot).await, ["first"]);
     // block 0 is the contract header block; the funnel rejects displacing it
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({"id":second,"to_index":1,"if_doc_rev":read(&boot).await["docRev"]}),
+        json!([{"op": "move", "id":second,"to_index":1}]),
     )
     .await
     .unwrap();

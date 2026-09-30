@@ -1,18 +1,19 @@
 //! Receipt `warnings`: the `neige://source/` links in touched prose that this track cannot
-//! resolve, on each of the three agent write doors. The write is never blocked.
+//! resolve, on each of the agent write doors. The write is never blocked.
 
 #![cfg(unix)]
 
 use calm_server::mcp_server::tools::source::TOOL_SOURCE_CAPTURE;
-use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
-};
+use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_COMMIT;
 use serde_json::{Value, json};
 
-use crate::mcp_track_report::{Boot, boot, call_tool, planner_identity};
+use crate::mcp_track_report::{
+    Boot, boot, call_tool, planner_identity, read_then_write_markdown, upsert_block,
+};
 
 const TOOL_REPORT_READ: &str = "calm.report.read";
 
+/// A full read: this session's anchor for the next write, and the docRev it saw.
 async fn doc_rev(boot: &Boot) -> u64 {
     call_tool(boot, TOOL_REPORT_READ, planner_identity(boot), json!({}))
         .await
@@ -63,7 +64,6 @@ async fn commit_reports_a_dangling_source_id_and_still_writes() {
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
         json!({
-            "if_doc_rev": rev,
             "message": "cite",
             "ops": [{ "op": "upsert", "kind": "prose", "markdown": markdown }],
         }),
@@ -81,20 +81,17 @@ async fn commit_reports_a_dangling_source_id_and_still_writes() {
 }
 
 #[tokio::test]
-async fn blocks_upsert_reports_a_dangling_anchor() {
+async fn a_single_upsert_reports_a_dangling_anchor() {
     let boot = boot().await;
     let source_id = capture_manual(&boot).await;
-    let rev = doc_rev(&boot).await;
     let dangling =
         calm_types::report_source_links::format_source_destination(&source_id, Some("q7"));
-    let receipt = call_tool(
+    let receipt = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({
             "kind": "prose",
             "markdown": format!("# Cite\n\n[anchor]({dangling})\n"),
-            "if_doc_rev": rev,
         }),
     )
     .await
@@ -107,9 +104,8 @@ async fn blocks_upsert_reports_a_dangling_anchor() {
     );
     // Replacing the block with a resolved link clears the warning; a
     // non-prose upsert carries an empty list.
-    let receipt = call_tool(
+    let receipt = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({
             "id": id,
@@ -118,7 +114,6 @@ async fn blocks_upsert_reports_a_dangling_anchor() {
                 "# Cite\n\n[anchor]({})\n",
                 calm_types::report_source_links::format_source_destination(&source_id, Some("q1"))
             ),
-            "if_rev": receipt["rev"],
         }),
     )
     .await
@@ -130,20 +125,17 @@ async fn blocks_upsert_reports_a_dangling_anchor() {
 async fn write_markdown_scans_every_prose_block_and_resolved_links_warn_nothing() {
     let boot = boot().await;
     let source_id = capture_manual(&boot).await;
-    let rev = doc_rev(&boot).await;
     let resolved_source =
         calm_types::report_source_links::format_source_destination(&source_id, None);
     let resolved_anchor =
         calm_types::report_source_links::format_source_destination(&source_id, Some("q1"));
-    let receipt = call_tool(
+    let receipt = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!(
                 "# One\n\n[a]({resolved_source})\n\n# Two\n\n[b]({resolved_anchor})\n"
             ),
-            "if_doc_rev": rev,
         }),
     )
     .await
@@ -151,16 +143,13 @@ async fn write_markdown_scans_every_prose_block_and_resolved_links_warn_nothing(
     assert_eq!(receipt["warnings"], json!([]), "{receipt}");
     // The whole document is rescanned: a dangling link anywhere shows up,
     // attributed to its block.
-    let rev = doc_rev(&boot).await;
-    let receipt = call_tool(
+    let receipt = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!(
                 "# One\n\n[a]({resolved_source})\n\n# Two\n\n[b](neige://source/src_00000000#q1)\n"
             ),
-            "if_doc_rev": rev,
         }),
     )
     .await
@@ -183,25 +172,21 @@ async fn write_markdown_scans_every_prose_block_and_resolved_links_warn_nothing(
 #[tokio::test]
 async fn summary_only_commit_carries_no_warnings_even_with_dangling_links_in_place() {
     let boot = boot().await;
-    let rev = doc_rev(&boot).await;
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({
             "kind": "prose",
             "markdown": "# Cite\n\n[dead](neige://source/src_deadbeef)\n",
-            "if_doc_rev": rev,
         }),
     )
     .await
     .expect("seed a dangling link");
-    let rev = doc_rev(&boot).await;
     let receipt = call_tool(
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "if_doc_rev": rev, "message": "summary only", "summary": "new summary" }),
+        json!({ "message": "summary only", "summary": "new summary" }),
     )
     .await
     .expect("summary-only commit");
@@ -214,7 +199,7 @@ async fn summary_only_commit_carries_no_warnings_even_with_dangling_links_in_pla
 async fn malformed_ids_and_anchors_are_warned_about() {
     let boot = boot().await;
     let source_id = capture_manual(&boot).await;
-    let rev = doc_rev(&boot).await;
+    doc_rev(&boot).await;
     let bad_anchor =
         calm_types::report_source_links::format_source_destination(&source_id, Some("q0"));
     let receipt = call_tool(
@@ -222,7 +207,6 @@ async fn malformed_ids_and_anchors_are_warned_about() {
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
         json!({
-            "if_doc_rev": rev,
             "message": "cite badly",
             "ops": [{
                 "op": "upsert",
@@ -256,15 +240,12 @@ async fn warnings_follow_a_dangling_link_through_its_repair_and_a_new_citation()
     let source_id = capture_manual(&boot).await;
     let resolved =
         calm_types::report_source_links::format_source_destination(&source_id, Some("q1"));
-    let rev = doc_rev(&boot).await;
-    let receipt = call_tool(
+    let receipt = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!("# One\n\n[ok]({resolved}) and [dead](neige://source/src_deadbeef)\n"),
             "message": "write",
-            "if_doc_rev": rev,
         }),
     )
     .await
@@ -298,14 +279,9 @@ async fn warnings_follow_a_dangling_link_through_its_repair_and_a_new_citation()
 
 /// Replace the report's only block through `calm.report.commit`; returns the receipt.
 async fn commit_replacing_only_block(boot: &Boot, markdown: &str, message: &str) -> Value {
-    let index = call_tool(
-        boot,
-        TOOL_REPORT_READ,
-        planner_identity(boot),
-        json!({"select": "index"}),
-    )
-    .await
-    .expect("index");
+    let index = call_tool(boot, TOOL_REPORT_READ, planner_identity(boot), json!({}))
+        .await
+        .expect("read");
     let blocks = index["blocks"].as_array().expect("blocks");
     assert_eq!(blocks.len(), 1, "{index}");
     call_tool(
@@ -313,10 +289,9 @@ async fn commit_replacing_only_block(boot: &Boot, markdown: &str, message: &str)
         TOOL_REPORT_COMMIT,
         planner_identity(boot),
         json!({
-            "if_doc_rev": index["docRev"],
             "message": message,
             "ops": [{
-                "op": "upsert", "id": blocks[0]["id"], "if_rev": blocks[0]["rev"],
+                "op": "upsert", "id": blocks[0]["id"],
                 "kind": "prose", "markdown": markdown
             }],
         }),

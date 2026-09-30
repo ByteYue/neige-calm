@@ -1,16 +1,16 @@
-//! Typed `calm.report.blocks.*` + `write_markdown` integration coverage on the `mcp_track_report` fixture.
+//! `calm.report.commit` block ops + `write_markdown` integration coverage on the `mcp_track_report` fixture.
 
 #![cfg(unix)]
 
 use std::time::Duration;
 
 use crate::mcp_track_report::{
-    Boot, assistant_identity, boot, call_tool, collect_n, planner_identity, worker_identity,
+    Boot, assistant_identity, boot, call_tool, collect_n, planner_identity, read_then_commit,
+    read_then_write_markdown, upsert_block, worker_identity,
 };
 use calm_server::event::Event;
 use calm_server::mcp_server::tools::track_report_blocks::{
-    RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_BLOCKS_MOVE,
-    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
+    RPC_REV_CONFLICT, TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
 };
 use calm_server::plugin_host::mcp::RpcError;
 use calm_server::track_report::TrackReportPayload;
@@ -84,15 +84,13 @@ async fn overwrite_report_payload_cache(boot: &Boot, payload: Value) {
 
 /// Seed a two-block body through the whole-document write.
 async fn seed_two_blocks(boot: &Boot) -> Vec<(String, u64)> {
-    call_tool(
+    read_then_write_markdown(
         boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
         json!({
             "body": "# A\n\nalpha\n\n# B\n\nbeta\n",
             "summary": "seeded",
-            "message": "seed two blocks",
-            "if_doc_rev": 0
+            "message": "seed two blocks"
         }),
     )
     .await
@@ -103,15 +101,14 @@ async fn seed_two_blocks(boot: &Boot) -> Vec<(String, u64)> {
 }
 
 #[tokio::test]
-async fn block_write_invalidates_previously_read_whole_document_revision() {
+async fn another_writer_invalidates_a_previously_read_whole_document() {
     let boot = boot().await;
     let before = read(&boot, json!({})).await;
     assert_eq!(before["docRev"], 0);
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({"kind": "prose", "payload": {"markdown": "# Added\n"}, "if_doc_rev": 0}),
+        assistant_identity(&boot),
+        json!({"kind": "prose", "payload": {"markdown": "# Added\n"}}),
     )
     .await
     .unwrap();
@@ -120,7 +117,7 @@ async fn block_write_invalidates_previously_read_whole_document_revision() {
         &boot,
         TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({"body": "# stale rewrite\n", "if_doc_rev": 0}),
+        json!({"body": "# stale rewrite\n"}),
     )
     .await
     .unwrap_err();
@@ -131,95 +128,44 @@ async fn block_write_invalidates_previously_read_whole_document_revision() {
     assert_ne!(after["text"], "# stale rewrite\n");
 }
 
+/// #1883: the agent writes take no revisions; a caller still sending one is refused, never ignored.
 #[tokio::test]
-async fn block_revision_cannot_be_used_as_a_whole_document_anchor() {
+async fn removed_revision_params_are_refused_as_unknown_parameters() {
     let boot = boot().await;
-    let created = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({"kind": "prose", "markdown": "# Added\n", "if_doc_rev": 0}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(created["rev"], 1);
-    assert_eq!(created["docRev"], 1);
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({
-            "body": "# accidental overwrite\n",
-            "message": "wrong revision domain",
-            "if_rev": 1
-        }),
-    )
-    .await
-    .expect_err("a block if_rev must not satisfy the document anchor");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains("if_doc_rev"));
-    assert_ne!(
-        read(&boot, json!({})).await["text"],
-        "# accidental overwrite\n"
-    );
-}
-
-#[tokio::test]
-async fn old_create_and_move_shapes_return_self_healing_invalid_params() {
-    let boot = boot().await;
-    let create = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({"kind": "prose", "markdown": "# Old caller\n"}),
-    )
-    .await
-    .expect_err("old create shape must be rejected during contract migration");
-    assert_eq!(create.code, RpcError::INVALID_PARAMS);
-    assert!(create.message.contains("if_doc_rev"));
-    assert!(create.message.contains("calm.report.read"));
-    assert!(create.message.contains("docRev"));
-
-    let current = read(&boot, json!({})).await;
-    let created = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({
-            "kind": "prose",
-            "markdown": "# Retried caller\n",
-            "if_doc_rev": current["docRev"]
-        }),
-    )
-    .await
-    .expect("caller can self-heal by reading docRev and retrying");
-    assert_eq!(created["docRev"], current["docRev"].as_u64().unwrap() + 1);
-
-    let current = read(&boot, json!({})).await;
-    let index = index_of(&current);
-    let moved = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
-        planner_identity(&boot),
-        json!({"id": index[0].0, "to_index": 0}),
-    )
-    .await
-    .expect_err("old move shape must be rejected during contract migration");
-    assert_eq!(moved.code, RpcError::INVALID_PARAMS);
-    assert!(moved.message.contains("if_doc_rev"));
-    assert!(moved.message.contains("calm.report.read"));
-    assert!(moved.message.contains("docRev"));
-
-    let moved = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
-        planner_identity(&boot),
-        json!({"id": index[0].0, "to_index": 0, "if_doc_rev": current["docRev"]}),
-    )
-    .await
-    .expect("caller can self-heal move by reading docRev and retrying");
-    assert_eq!(moved["docRev"], current["docRev"].as_u64().unwrap() + 1);
+    let index = index_of(&read(&boot, json!({})).await);
+    let before = current_payload(&boot).await;
+    let cases = [
+        (
+            TOOL_REPORT_COMMIT,
+            json!({ "if_doc_rev": 0, "message": "m", "summary": "x" }),
+            "unknown key `if_doc_rev`",
+        ),
+        (
+            TOOL_REPORT_COMMIT,
+            json!({ "message": "m", "ops": [
+                { "op": "upsert", "id": index[1].0, "if_rev": index[1].1, "kind": "prose", "markdown": "# x\n" }
+            ] }),
+            "ops[0]: unknown key `if_rev`",
+        ),
+        (
+            TOOL_REPORT_WRITE_MARKDOWN,
+            json!({ "body": "# overwrite\n", "if_doc_rev": 0 }),
+            "unknown key `if_doc_rev`",
+        ),
+        (
+            TOOL_REPORT_WRITE_MARKDOWN,
+            json!({ "body": "# overwrite\n", "if_rev": 1 }),
+            "unknown key `if_rev`",
+        ),
+    ];
+    for (tool, args, needle) in cases {
+        let err = call_tool(&boot, tool, planner_identity(&boot), args)
+            .await
+            .expect_err("a revision parameter must be refused");
+        assert_eq!(err.code, RpcError::INVALID_PARAMS, "{tool}: {err:?}");
+        assert!(err.message.contains(needle), "{tool}: {err:?}");
+    }
+    assert_eq!(current_payload(&boot).await, before, "nothing was written");
 }
 
 #[tokio::test]
@@ -301,7 +247,7 @@ async fn kinds_returns_all_seven_schemas() {
             .get("usage")
             .and_then(Value::as_str)
             .unwrap()
-            .contains("blocks.upsert"),
+            .contains(r#"{ "op": "upsert", "kind": "chart.candles""#),
         "usage carries a minimal example"
     );
     let series = &kinds[2];
@@ -567,11 +513,10 @@ async fn upsert_new_block_appends_and_emits_both_events() {
     let sub = tokio::spawn(async move { collect_n(&events, 2).await });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# 新块\n\ncontent\n", "if_doc_rev": 0 }),
+        json!({ "kind": "prose", "markdown": "# 新块\n\ncontent\n"}),
     )
     .await
     .expect("upsert create succeeds");
@@ -621,11 +566,10 @@ async fn upsert_new_block_appends_and_emits_both_events() {
 async fn upsert_new_block_at_position_inserts() {
     let boot = boot().await;
     let ids = seed_two_blocks(&boot).await;
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# 首块\n\nfirst\n", "position": 0, "if_doc_rev": 1 }),
+        json!({ "kind": "prose", "markdown": "# 首块\n\nfirst\n", "position": 0}),
     )
     .await
     .expect("insert at 0 succeeds");
@@ -639,11 +583,10 @@ async fn upsert_new_block_at_position_inserts() {
     let payload = current_payload(&boot).await;
     assert!(payload.body.starts_with("# 首块\n\nfirst\n# A\n"));
 
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "prose", "markdown": "x\n", "position": 99, "if_doc_rev": 2 }),
+        json!({ "kind": "prose", "markdown": "x\n", "position": 99}),
     )
     .await
     .expect_err("position out of range");
@@ -652,7 +595,7 @@ async fn upsert_new_block_at_position_inserts() {
 }
 
 #[tokio::test]
-async fn upsert_replace_with_if_rev_bumps_rev() {
+async fn upsert_replace_bumps_rev() {
     let boot = boot().await;
     // The id `read` hands out on a never-persisted card must be a valid target: the CRDT seed mints the same deterministic ids.
     let read_out = read(&boot, json!({})).await;
@@ -661,14 +604,13 @@ async fn upsert_replace_with_if_rev_bumps_rev() {
     let (id, rev) = index[at].clone();
     assert_eq!(rev, 1);
 
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "id": id, "kind": "prose", "markdown": "# 概要\n\nrewritten\n", "if_rev": rev }),
+        json!({ "id": id, "kind": "prose", "markdown": "# 概要\n\nrewritten\n"}),
     )
     .await
-    .expect("replace with matching if_rev succeeds");
+    .expect("replace of a block this session read succeeds");
     assert_eq!(out.get("id").and_then(Value::as_str), Some(id.as_str()));
     assert_eq!(out.get("rev").and_then(Value::as_u64), Some(2));
 
@@ -696,71 +638,34 @@ async fn upsert_replace_with_if_rev_bumps_rev() {
 }
 
 #[tokio::test]
-async fn upsert_replace_without_if_rev_is_invalid_params() {
+async fn upsert_of_a_block_another_writer_replaced_returns_32001_and_writes_nothing() {
     let boot = boot().await;
     let index = index_of(&read(&boot, json!({})).await);
-    let err = call_tool(
+    let (id, rev) = index[1].clone();
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({ "id": index[0].0, "kind": "prose", "markdown": "x\n" }),
+        assistant_identity(&boot),
+        json!({ "id": id, "kind": "prose", "markdown": "# 概要\n\nassistant\n" }),
     )
     .await
-    .expect_err("replace without if_rev must be rejected");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains("if_rev"), "msg = {err:?}");
-}
-
-#[tokio::test]
-async fn upsert_replace_rejects_if_doc_rev_instead_of_ignoring_it() {
-    let boot = boot().await;
-    let index = index_of(&read(&boot, json!({})).await);
-    let (id, rev) = index[0].clone();
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({
-            "id": id,
-            "kind": "prose",
-            "markdown": "x\n",
-            "if_rev": rev,
-            "if_doc_rev": 0
-        }),
-    )
-    .await
-    .expect_err("replace must reject the create-only document revision anchor");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains("if_doc_rev"), "msg = {err:?}");
-    assert!(err.message.contains("if_rev"), "msg = {err:?}");
-    assert!(err.message.contains("block-level rev"), "msg = {err:?}");
-}
-
-#[tokio::test]
-async fn upsert_rev_conflict_returns_32001_and_writes_nothing() {
-    let boot = boot().await;
-    let index = index_of(&read(&boot, json!({})).await);
-    let (id, rev) = index[0].clone();
+    .expect("another session replaces the block");
     let before = current_payload(&boot).await;
     let mut rx = boot.ctx.events.subscribe();
 
     let err = call_tool(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
+        TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "id": id, "kind": "prose", "markdown": "# stomp\n", "if_rev": rev + 41 }),
+        json!({ "message": "stale", "ops": [
+            { "op": "upsert", "id": id, "kind": "prose", "markdown": "# stomp\n" }
+        ] }),
     )
     .await
-    .expect_err("stale if_rev must conflict");
+    .expect_err("a block changed since this session's read must conflict");
     assert_eq!(err.code, RPC_REV_CONFLICT, "err = {err:?}");
     assert!(err.message.contains("rev conflict"), "msg = {err:?}");
     assert!(
-        err.message.contains(&format!("current rev is {rev}")),
-        "msg = {err:?}",
-    );
-    assert!(
-        err.message
-            .contains(&format!("expected if_rev {}", rev + 41)),
+        err.message.contains(&format!("current rev is {}", rev + 1)),
         "msg = {err:?}",
     );
 
@@ -774,9 +679,8 @@ async fn upsert_rev_conflict_returns_32001_and_writes_nothing() {
 async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
     let boot = boot().await;
     let before = current_payload(&boot).await;
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({ "kind": "metrics", "payload": {} }),
     )
@@ -784,9 +688,8 @@ async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
     .expect_err("unknown kind must be rejected");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
     assert!(err.message.contains("unknown kind"), "msg = {err:?}");
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({ "kind": "chart.candles" }),
     )
@@ -794,12 +697,7 @@ async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
     .expect_err("missing payload");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
     assert!(err.message.contains("payload"), "msg = {err:?}");
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({ "kind": "table", "markdown": "# nope\n", "payload": { "columns": [], "rows": [] } }),
-    )
+    let err = upsert_block(&boot, planner_identity(&boot), json!({ "kind": "table", "markdown": "# nope\n", "payload": { "columns": [], "rows": [] } }))
     .await
     .expect_err("markdown on a data kind");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
@@ -807,12 +705,7 @@ async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
         err.message.contains("only valid for kind=prose"),
         "msg = {err:?}"
     );
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        planner_identity(&boot),
-        json!({ "kind": "chart.candles", "payload": { "symbol": "0700.HK", "candles": [[1, 2, 3, 4, 5]], "range": "1y" } }),
-    )
+    let err = upsert_block(&boot, planner_identity(&boot), json!({ "kind": "chart.candles", "payload": { "symbol": "0700.HK", "candles": [[1, 2, 3, 4, 5]], "range": "1y" } }))
     .await
     .expect_err("schema-invalid chart payload");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
@@ -827,9 +720,8 @@ async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
         "/\\evil.example/x",
         "/apps\\x",
     ] {
-        let err = call_tool(
+        let err = upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
             json!({ "kind": "app", "payload": { "src": src } }),
         )
@@ -844,9 +736,8 @@ async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
         (json!({ "key": "fe", "height": 50 }), "height"),
         (json!({ "key": "fe", "port": 4050 }), "port: unknown field"),
     ] {
-        let err = call_tool(
+        let err = upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
             json!({ "kind": "preview", "payload": payload }),
         )
@@ -856,9 +747,8 @@ async fn upsert_rejects_unknown_kind_and_invalid_payloads() {
         assert!(err.message.contains(needle), "{payload} → {err:?}");
     }
     let candles: Vec<Value> = (0..5001i64).map(|i| json!([i, 1, 2, 0, 1])).collect();
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({ "kind": "chart.candles", "payload": { "symbol": "X", "candles": candles } }),
     )
@@ -877,9 +767,8 @@ async fn upsert_prose_rejects_embedded_neige_fences() {
         // Typo'd fence (bad JSON) — must not silently persist as prose.
         "# A\n```neige-block app\nnot json\n```\n",
     ] {
-        let err = call_tool(
+        let err = upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
             json!({ "kind": "prose", "markdown": markdown }),
         )
@@ -891,13 +780,13 @@ async fn upsert_prose_rejects_embedded_neige_fences() {
 }
 
 #[tokio::test]
-async fn upsert_refuses_worker() {
+async fn commit_refuses_worker() {
     let boot = boot().await;
     let err = call_tool(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
+        TOOL_REPORT_COMMIT,
         worker_identity(&boot),
-        json!({ "kind": "prose", "markdown": "evil\n" }),
+        json!({ "message": "m", "ops": [{ "op": "upsert", "kind": "prose", "markdown": "evil\n" }] }),
     )
     .await
     .expect_err("worker must be denied");
@@ -909,15 +798,13 @@ async fn upsert_refuses_worker() {
 async fn move_reorders_without_touching_rev() {
     let boot = boot().await;
     let ids = seed_two_blocks(&boot).await;
-    let out = call_tool(
+    let out = read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({ "id": ids[1].0, "to_index": 0, "if_doc_rev": 1 }),
+        json!([{"op": "move",  "id": ids[1].0, "to_index": 0}]),
     )
     .await
     .expect("move succeeds");
-    assert_eq!(out.get("rev").and_then(Value::as_u64), Some(ids[1].1));
 
     let payload = current_payload(&boot).await;
     assert_eq!(out["docRev"], payload.doc_rev);
@@ -930,129 +817,118 @@ async fn move_reorders_without_touching_rev() {
     );
 }
 
+/// #1883: a rewrite drops every block its body does not carry, so it needs this session to have
+/// seen the whole report at the current docRev.
 #[tokio::test]
-async fn move_doc_rev_conflict_returns_32001_and_moves_nothing() {
+async fn write_markdown_needs_a_whole_read_at_the_current_doc_rev() {
     let boot = boot().await;
-    let ids = seed_two_blocks(&boot).await;
-    let before = current_payload(&boot).await;
-    let mut rx = boot.ctx.events.subscribe();
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
-        planner_identity(&boot),
-        json!({ "id": ids[1].0, "to_index": 0, "if_doc_rev": 8 }),
-    )
-    .await
-    .expect_err("stale if_rev must conflict");
-    assert_eq!(err.code, RPC_REV_CONFLICT);
+    let write = |body: &str| {
+        call_tool(
+            &boot,
+            TOOL_REPORT_WRITE_MARKDOWN,
+            planner_identity(&boot),
+            json!({ "body": body }),
+        )
+    };
+    let unread = write("# Unread\n").await.expect_err("no read at all");
+    assert_eq!(unread.code, RpcError::INVALID_PARAMS);
     assert!(
-        err.message.contains("document revision conflict"),
-        "msg = {err:?}"
+        unread.message.contains("full calm.report.read"),
+        "{unread:?}"
     );
-    assert_eq!(current_payload(&boot).await, before);
-    let no_event = tokio::time::timeout(Duration::from_millis(150), rx.recv()).await;
-    assert!(no_event.is_err(), "conflict emitted event: {no_event:?}");
 
-    // Unknown id and out-of-range index are invalid-params, not conflicts.
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
-        planner_identity(&boot),
-        json!({ "id": "b_nope", "to_index": 0, "if_doc_rev": 1 }),
-    )
-    .await
-    .expect_err("unknown id");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
-        planner_identity(&boot),
-        json!({ "id": ids[0].0, "to_index": 5, "if_doc_rev": 1 }),
-    )
-    .await
-    .expect_err("index out of range");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-}
-
-#[tokio::test]
-async fn delete_requires_if_rev_and_honors_it() {
-    let boot = boot().await;
-    let ids = seed_two_blocks(&boot).await;
-
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
-        planner_identity(&boot),
-        json!({ "id": ids[0].0 }),
-    )
-    .await
-    .expect_err("delete without if_rev must be rejected");
-    assert_eq!(err.code, RpcError::INVALID_PARAMS);
-    assert!(err.message.contains("if_rev"), "msg = {err:?}");
-
-    let before = current_payload(&boot).await;
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
-        planner_identity(&boot),
-        json!({ "id": ids[0].0, "if_rev": ids[0].1 + 1 }),
-    )
-    .await
-    .expect_err("stale if_rev must conflict");
-    assert_eq!(err.code, RPC_REV_CONFLICT);
-    assert!(err.message.contains("rev conflict"), "msg = {err:?}");
-    assert_eq!(current_payload(&boot).await, before);
-
-    let out = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
-        planner_identity(&boot),
-        json!({ "id": ids[0].0, "if_rev": ids[0].1 }),
-    )
-    .await
-    .expect("delete succeeds");
-    let payload = current_payload(&boot).await;
-    assert_eq!(out["docRev"], payload.doc_rev);
-    assert_eq!(payload.body, "# B\n\nbeta\n");
-    let index = index_of(&read(&boot, json!({})).await);
-    assert_eq!(index, vec![(ids[1].0.clone(), ids[1].1)]);
-}
-
-#[tokio::test]
-async fn write_markdown_requires_if_doc_rev_and_maps_stale_revision_to_conflict() {
-    let boot = boot().await;
-    let missing = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": "# Missing rev\n" }),
-    )
-    .await
-    .expect_err("write_markdown without if_doc_rev must be rejected");
-    assert_eq!(missing.code, RpcError::INVALID_PARAMS);
-
-    let first = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": "# First\n", "if_doc_rev": 0 }),
-    )
-    .await
-    .expect("fresh revision succeeds");
+    read(&boot, json!({})).await;
+    let first = write("# First\n\none\n")
+        .await
+        .expect("a full read anchors it");
     assert_eq!(first["docRev"], 1);
 
-    let stale = call_tool(
+    // Another writer moves the doc on; a read of one section there shows only part of it.
+    upsert_block(
+        &boot,
+        assistant_identity(&boot),
+        json!({ "kind": "prose", "markdown": "# Second\n\ntwo\n" }),
+    )
+    .await
+    .expect("assistant appends");
+    read(&boot, json!({ "select": { "sections": ["First"] } })).await;
+    let partial = write("# First\n\nonly\n")
+        .await
+        .expect_err("a partial read at a newer docRev must not anchor a rewrite");
+    assert_eq!(partial.code, RpcError::INVALID_PARAMS);
+    assert!(
+        partial.message.contains("full calm.report.read"),
+        "{partial:?}"
+    );
+    assert!(current_payload(&boot).await.body.contains("# Second"));
+
+    read(&boot, json!({ "with_markers": true })).await;
+    // The session's own commit advances its whole read.
+    call_tool(
+        &boot,
+        TOOL_REPORT_COMMIT,
+        planner_identity(&boot),
+        json!({ "message": "m", "summary": "s" }),
+    )
+    .await
+    .expect("own commit");
+    let own = write("# First\n\nthree\n")
+        .await
+        .expect("an own commit keeps the whole read");
+    assert_eq!(own["docRev"], 4);
+    assert_eq!(current_payload(&boot).await.body, "# First\n\nthree\n");
+}
+
+/// #1883: an own `write_markdown` counts as read, the same rule as an own commit; a foreign write
+/// in between still breaks the anchor.
+#[tokio::test]
+async fn an_own_write_markdown_counts_as_read_but_a_foreign_write_in_between_does_not() {
+    let boot = boot().await;
+    let commit_summary = |summary: &str| {
+        call_tool(
+            &boot,
+            TOOL_REPORT_COMMIT,
+            planner_identity(&boot),
+            json!({ "message": "m", "summary": summary }),
+        )
+    };
+    read(&boot, json!({})).await;
+    let written = call_tool(
         &boot,
         TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "body": "# Stale\n", "if_doc_rev": 0 }),
+        json!({ "body": "# A\n\nalpha\n" }),
     )
     .await
-    .expect_err("stale whole-document anchor must conflict");
-    assert_eq!(stale.code, RPC_REV_CONFLICT);
-    assert!(stale.message.contains("current doc_rev is 1"));
-    assert_eq!(current_payload(&boot).await.body, "# First\n");
+    .expect("a full read anchors the rewrite");
+    let out = commit_summary("s1")
+        .await
+        .expect("the own rewrite counts as read: no re-read before the summary");
+    assert_eq!(
+        out["docRev"].as_u64(),
+        written["docRev"].as_u64().map(|r| r + 1)
+    );
+
+    call_tool(
+        &boot,
+        TOOL_REPORT_WRITE_MARKDOWN,
+        planner_identity(&boot),
+        json!({ "body": "# A\n\nalpha 2\n" }),
+    )
+    .await
+    .expect("the own commit kept the whole read");
+    upsert_block(
+        &boot,
+        assistant_identity(&boot),
+        json!({ "kind": "prose", "markdown": "# B\n\nforeign\n" }),
+    )
+    .await
+    .expect("another session writes");
+    let err = commit_summary("s2")
+        .await
+        .expect_err("a foreign write since the rewrite");
+    assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
+    assert_eq!(current_payload(&boot).await.summary, "s1");
 }
 
 #[tokio::test]
@@ -1068,14 +944,9 @@ async fn write_markdown_with_markers_reuses_ids_and_strips_them() {
         "<!-- neige:{} -->\n# A\n\nalpha\n\n<!-- neige:{} -->\n# B\n\nbeta edited\n",
         ids[0].0, ids[1].0
     );
-    let out = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": body, "if_doc_rev": 1 }),
-    )
-    .await
-    .expect("write_markdown succeeds");
+    let out = read_then_write_markdown(&boot, planner_identity(&boot), json!({ "body": body}))
+        .await
+        .expect("write_markdown succeeds");
 
     let index = index_of(&read(&boot, json!({})).await);
     assert_eq!(
@@ -1115,14 +986,12 @@ async fn write_markdown_with_markers_reuses_ids_and_strips_them() {
 async fn write_markdown_markers_make_duplicate_blocks_addressable() {
     // Two byte-identical blocks are undecidable without markers; markers must pin them exactly.
     let boot = boot().await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# A\nsame\n# A\nsame\n",
-            "message": "seed duplicate blocks",
-            "if_doc_rev": 0
+            "message": "seed duplicate blocks"
         }),
     )
     .await
@@ -1134,14 +1003,9 @@ async fn write_markdown_markers_make_duplicate_blocks_addressable() {
         "<!-- neige:{} -->\n# A\nsame\n<!-- neige:{} -->\n# A\nsame edited\n",
         ids[1].0, ids[0].0
     );
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": body, "if_doc_rev": 1 }),
-    )
-    .await
-    .expect("write_markdown succeeds");
+    read_then_write_markdown(&boot, planner_identity(&boot), json!({ "body": body}))
+        .await
+        .expect("write_markdown succeeds");
 
     let index = index_of(&read(&boot, json!({})).await);
     assert_eq!(index[0].0, ids[1].0, "marker pinned the swap");
@@ -1154,14 +1018,12 @@ async fn write_markdown_markers_make_duplicate_blocks_addressable() {
 async fn write_markdown_without_markers_falls_back_to_lcs() {
     let boot = boot().await;
     let ids = seed_two_blocks(&boot).await;
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": "# X\n\nbrand new\n\n# A\n\nalpha touched\n\n# B\n\nbeta\n",
-            "summary": "restructured",
-            "if_doc_rev": 1
+            "summary": "restructured"
         }),
     )
     .await
@@ -1181,7 +1043,7 @@ async fn write_markdown_without_markers_falls_back_to_lcs() {
 
 #[tokio::test]
 async fn upsert_identical_content_keeps_rev_and_still_emits_events() {
-    // A byte-identical replace must not bump the rev: a retried request would otherwise invalidate the caller's `if_rev` anchor.
+    // A byte-identical replace must not bump the rev: a retried request would otherwise invalidate the caller's block anchor.
     let boot = boot().await;
     let ids = seed_two_blocks(&boot).await;
     let (id, rev) = ids[0].clone();
@@ -1190,11 +1052,10 @@ async fn upsert_identical_content_keeps_rev_and_still_emits_events() {
     let sub = tokio::spawn(async move { collect_n(&events, 2).await });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "id": id, "kind": "prose", "markdown": "# A\n\nalpha\n\n", "if_rev": rev }),
+        json!({ "id": id, "kind": "prose", "markdown": "# A\n\nalpha\n\n"}),
     )
     .await
     .expect("identical replace succeeds");
@@ -1217,14 +1078,13 @@ async fn upsert_identical_content_keeps_rev_and_still_emits_events() {
         other => panic!("expected TrackReportEdited, got {other:?}"),
     }
 
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "id": id, "kind": "prose", "markdown": "# A\n\nalpha edited\n\n", "if_rev": rev }),
+        json!({ "id": id, "kind": "prose", "markdown": "# A\n\nalpha edited\n\n"}),
     )
     .await
-    .expect("subsequent real edit succeeds with the same if_rev");
+    .expect("a subsequent real edit succeeds");
     assert_eq!(out.get("rev").and_then(Value::as_u64), Some(rev + 1));
     let index = index_of(&read(&boot, json!({})).await);
     assert_eq!(index[0], (id, rev + 1));
@@ -1233,15 +1093,14 @@ async fn upsert_identical_content_keeps_rev_and_still_emits_events() {
 #[tokio::test]
 async fn read_blocks_index_comes_from_crdt_truth_when_cache_missing() {
     // With the JSON `blocks` cache missing, `read` must serve the index from the CRDT doc: re-deriving from
-    // the flat body mints position-dependent ids that diverge after a `blocks.move`.
+    // the flat body mints position-dependent ids that diverge after a `move`.
     let boot = boot().await;
     let ids = seed_two_blocks(&boot).await;
     // Move B to the front so the CRDT order/ids can no longer be reproduced from the flat body.
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({ "id": ids[1].0, "to_index": 0, "if_doc_rev": 1 }),
+        json!([{"op": "move",  "id": ids[1].0, "to_index": 0}]),
     )
     .await
     .expect("move succeeds");
@@ -1266,11 +1125,10 @@ async fn read_blocks_index_comes_from_crdt_truth_when_cache_missing() {
     assert_eq!(index_of(&out), truth, "index comes from the CRDT doc");
 
     let (id, rev) = truth[0].clone();
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "id": id, "kind": "prose", "markdown": "# B\n\nbeta v2\n", "if_rev": rev }),
+        json!({ "id": id, "kind": "prose", "markdown": "# B\n\nbeta v2\n"}),
     )
     .await
     .expect("id from CRDT-truth read is upsertable");
@@ -1283,11 +1141,10 @@ async fn read_serves_one_self_consistent_snapshot_when_cache_missing() {
     // from the stale `payload.body` with a block index from the doc.
     let boot = boot().await;
     let ids = seed_two_blocks(&boot).await;
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({ "id": ids[1].0, "to_index": 0, "if_doc_rev": 1 }),
+        json!([{"op": "move",  "id": ids[1].0, "to_index": 0}]),
     )
     .await
     .expect("move succeeds");
@@ -1339,14 +1196,10 @@ const CHART_PAYLOAD_V1: &str = r#"{
 
 /// Upsert one chart block after the seed prose; returns `(id, rev)`.
 async fn upsert_chart(boot: &Boot, payload: Value) -> (String, u64) {
-    let if_doc_rev = read(boot, json!({})).await["docRev"]
-        .as_u64()
-        .expect("read returns docRev");
-    let out = call_tool(
+    let out = upsert_block(
         boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(boot),
-        json!({ "kind": "chart.candles", "payload": payload, "if_doc_rev": if_doc_rev }),
+        json!({ "kind": "chart.candles", "payload": payload}),
     )
     .await
     .expect("chart upsert succeeds");
@@ -1359,13 +1212,11 @@ async fn upsert_chart(boot: &Boot, payload: Value) -> (String, u64) {
 #[tokio::test]
 async fn upsert_preview_block_round_trips_its_payload() {
     let boot = boot().await;
-    let if_doc_rev = read(&boot, json!({})).await["docRev"].as_u64().unwrap();
     let payload = json!({ "key": "fe", "title": "前端", "path": "/next/", "height": 720 });
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "preview", "payload": payload, "if_doc_rev": if_doc_rev }),
+        json!({ "kind": "preview", "payload": payload}),
     )
     .await
     .expect("preview upsert succeeds");
@@ -1412,11 +1263,10 @@ async fn upsert_chart_block_projects_canonical_fence_and_typed_payload() {
 
     let mut v2 = payload.clone();
     v2["overlays"] = json!(["ma20", "ma60"]);
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "id": id, "kind": "chart.candles", "payload": v2, "if_rev": rev }),
+        json!({ "id": id, "kind": "chart.candles", "payload": v2}),
     )
     .await
     .expect("chart replace succeeds");
@@ -1447,14 +1297,12 @@ async fn write_markdown_preserving_the_fence_verbatim_passes_and_holds_id_rev() 
     let (id, rev) = upsert_chart(&boot, payload.clone()).await;
     let fence = calm_types::report_blocks::render_fence("chart.candles", &payload);
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!("# 概要\n\nrewritten prose\n{fence}# 新节\n\ntail\n"),
-            "message": "legal whole-document rewrite",
-            "if_doc_rev": 1
+            "message": "legal whole-document rewrite"
         }),
     )
     .await
@@ -1481,11 +1329,10 @@ async fn write_markdown_edits_fence_params_with_rev_bump_and_rejects_bad_fences(
     let fence = calm_types::report_blocks::render_fence("chart.candles", &payload);
 
     let before = current_payload(&boot).await;
-    let err = call_tool(
+    let err = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "body": "# 概要\n```neige-block chart.candles\n{oops\n```\n", "if_doc_rev": before.doc_rev }),
+        json!({ "body": "# 概要\n```neige-block chart.candles\n{oops\n```\n"}),
     )
     .await
     .expect_err("malformed fence must reject the whole write");
@@ -1494,11 +1341,10 @@ async fn write_markdown_edits_fence_params_with_rev_bump_and_rejects_bad_fences(
     assert_eq!(current_payload(&boot).await, before);
 
     let edited = fence.replace("\"ma20\"", "\"ma20\", \"ma60\"");
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "body": format!("{}{edited}", seed_body()), "if_doc_rev": before.doc_rev }),
+        json!({ "body": format!("{}{edited}", seed_body())}),
     )
     .await
     .expect("fence-editing write_markdown passes");
@@ -1548,15 +1394,12 @@ fn planner_task_payload(key: &str, goal: &str) -> Value {
 
 /// Planner-declared live task, plus the `tasks` row key set it projects.
 async fn seed_planner_task(boot: &Boot, key: &str) -> (String, u64) {
-    let doc_rev = current_payload(boot).await.doc_rev;
-    let out = call_tool(
+    let out = upsert_block(
         boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(boot),
         json!({
             "kind": "task",
-            "payload": planner_task_payload(key, "build it"),
-            "if_doc_rev": doc_rev
+            "payload": planner_task_payload(key, "build it")
         }),
     )
     .await
@@ -1592,11 +1435,10 @@ async fn task_gate_rejects_kernel_cli_before_persisting_or_scheduling() {
     ] {
         let mut payload = planner_task_payload("analyze", "Analyze artifacts");
         payload["gate"]["steps"][0]["cmd"] = json!(cmd);
-        let err = call_tool(
+        let err = upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
-            json!({"kind": "task", "payload": payload, "if_doc_rev": before.doc_rev}),
+            json!({"kind": "task", "payload": payload}),
         )
         .await
         .expect_err("credential-dependent gate must be rejected before expensive work");
@@ -1628,12 +1470,10 @@ async fn task_gate_accepts_artifact_checks() {
         let key = format!("check-{index}");
         let mut payload = planner_task_payload(&key, "Check local artifacts");
         payload["gate"]["steps"][0]["cmd"] = json!(cmd);
-        call_tool(
+        upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
-            json!({"kind": "task", "payload": payload,
-                "if_doc_rev": current_payload(&boot).await.doc_rev}),
+            json!({"kind": "task", "payload": payload}),
         )
         .await
         .expect("artifact verification must remain authorable");
@@ -1653,18 +1493,17 @@ async fn write_markdown_cannot_silently_drop_a_planner_task_block() {
     );
     assert_eq!(task_keys(&boot).await, ["build"], "task row is projected");
 
-    let err = call_tool(
+    let err = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "body": seed_body(), "if_doc_rev": before.doc_rev }),
+        json!({ "body": seed_body()}),
     )
     .await
     .expect_err("a body that drops the task fence must be rejected");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
     assert!(
-        err.message.contains("block-level DELETE"),
-        "the error must point at the delete endpoint: {err:?}"
+        err.message.contains("must name it by id"),
+        "the error must point at the delete op: {err:?}"
     );
     assert_eq!(
         current_payload(&boot).await,
@@ -1682,17 +1521,15 @@ async fn write_markdown_cannot_silently_drop_a_planner_task_block() {
 async fn write_markdown_may_still_edit_a_task_fence_in_place() {
     let boot = boot().await;
     let (id, rev) = seed_planner_task(&boot, "build").await;
-    let before = current_payload(&boot).await;
     let edited = calm_types::report_blocks::render_fence(
         "task",
         &planner_task_payload("build", "build it better"),
     );
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
-        json!({ "body": format!("{}{edited}", seed_body()), "if_doc_rev": before.doc_rev }),
+        json!({ "body": format!("{}{edited}", seed_body())}),
     )
     .await
     .expect("editing the fence body in place stays legal");
@@ -1705,18 +1542,18 @@ async fn write_markdown_may_still_edit_a_task_fence_in_place() {
 }
 
 #[tokio::test]
-async fn planner_block_level_delete_of_its_own_task_still_succeeds() {
+async fn planner_commit_delete_by_id_retires_its_live_task() {
     let boot = boot().await;
-    let (id, rev) = seed_planner_task(&boot, "build").await;
+    let (id, _) = seed_planner_task(&boot, "build").await;
+    assert_eq!(task_keys(&boot).await, ["build"]);
 
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         planner_identity(&boot),
-        json!({ "id": id, "if_rev": rev }),
+        json!([{ "op": "delete", "id": id }]),
     )
     .await
-    .expect("planner may delete its own task through the block-level endpoint");
+    .expect("a delete naming the live task by id retires it");
 
     let payload = current_payload(&boot).await;
     assert!(
@@ -1747,14 +1584,9 @@ async fn write_markdown_changing_one_section_leaves_the_contract_byte_identical(
     let edited = text.replacen("# 概要\n", "# 概要\n\n当前进展一句话。\n", 1);
     assert_ne!(edited, text, "the fixture must actually change something");
 
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": edited, "if_doc_rev": marked["docRev"] }),
-    )
-    .await
-    .expect("marker-channel write passes");
+    read_then_write_markdown(&boot, planner_identity(&boot), json!({ "body": edited}))
+        .await
+        .expect("marker-channel write passes");
 
     let after_body = current_payload(&boot).await.body;
     let after_slices = calm_types::report_blocks::split_body(&after_body);
@@ -1798,9 +1630,8 @@ async fn drain_events(
     out
 }
 
-fn commit_args(if_doc_rev: u64, ops: Value) -> Value {
+fn commit_args(ops: Value) -> Value {
     json!({
-        "if_doc_rev": if_doc_rev,
         "message": "一次提交",
         "ops": ops
     })
@@ -1811,7 +1642,7 @@ async fn commit_three_ops_and_summary_land_atomically_with_one_doc_rev_bump() {
     let boot = boot().await;
     let index = seed_two_blocks(&boot).await; // docRev 1, A@1, B@1
     let (a_id, a_rev) = index[0].clone();
-    let (b_id, b_rev) = index[1].clone();
+    let (b_id, _) = index[1].clone();
     let before = current_payload(&boot).await;
     assert_eq!(before.doc_rev, 1);
     let mut rx = boot.ctx.events.subscribe();
@@ -1821,12 +1652,11 @@ async fn commit_three_ops_and_summary_land_atomically_with_one_doc_rev_bump() {
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
         json!({
-            "if_doc_rev": 1,
             "message": "三个块 + summary 一次提交",
             "summary": "新摘要",
             "ops": [
-                { "op": "upsert", "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nalpha v2\n" },
-                { "op": "delete", "id": b_id, "if_rev": b_rev },
+                { "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n\nalpha v2\n" },
+                { "op": "delete", "id": b_id},
                 { "op": "upsert", "kind": "prose", "markdown": "# C\n\ngamma\n", "position": 0 }
             ]
         }),
@@ -1893,8 +1723,15 @@ async fn commit_three_ops_and_summary_land_atomically_with_one_doc_rev_bump() {
 #[tokio::test]
 async fn commit_stale_doc_rev_returns_32001_and_writes_nothing() {
     let boot = boot().await;
-    let index = seed_two_blocks(&boot).await; // docRev 1
-    let (a_id, a_rev) = index[0].clone();
+    let index = seed_two_blocks(&boot).await; // the planner read docRev 1
+    let (a_id, _) = index[0].clone();
+    upsert_block(
+        &boot,
+        assistant_identity(&boot),
+        json!({ "kind": "prose", "markdown": "# C\n\nelsewhere\n" }),
+    )
+    .await
+    .expect("another session moves the doc to docRev 2");
     let before = current_payload(&boot).await;
     let mut rx = boot.ctx.events.subscribe();
 
@@ -1903,16 +1740,15 @@ async fn commit_stale_doc_rev_returns_32001_and_writes_nothing() {
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
         json!({
-            "if_doc_rev": 0,
             "message": "stale anchor",
             "summary": "must not land",
             "ops": [
-                { "op": "upsert", "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nstale\n" }
+                { "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n\nstale\n" }
             ]
         }),
     )
     .await
-    .expect_err("stale if_doc_rev is a conflict");
+    .expect_err("a summary over a doc changed since the read is a conflict");
     assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
     assert!(
         err.message.contains("document revision conflict"),
@@ -1929,9 +1765,16 @@ async fn commit_stale_doc_rev_returns_32001_and_writes_nothing() {
 #[tokio::test]
 async fn commit_stale_block_rev_in_second_op_rolls_back_the_first_op() {
     let boot = boot().await;
-    let index = seed_two_blocks(&boot).await; // docRev 1
+    let index = seed_two_blocks(&boot).await; // the planner read A@1, B@1
     let (a_id, a_rev) = index[0].clone();
-    let (b_id, b_rev) = index[1].clone();
+    let (b_id, _) = index[1].clone();
+    upsert_block(
+        &boot,
+        assistant_identity(&boot),
+        json!({ "id": b_id, "kind": "prose", "markdown": "# B\n\nassistant\n" }),
+    )
+    .await
+    .expect("another session replaces B");
     let before = current_payload(&boot).await;
     let mut rx = boot.ctx.events.subscribe();
 
@@ -1939,17 +1782,13 @@ async fn commit_stale_block_rev_in_second_op_rolls_back_the_first_op() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        commit_args(
-            1,
-            json!([
-                { "op": "upsert", "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nwould apply\n" },
-                { "op": "delete", "id": b_id, "if_rev": b_rev + 7 },
-                { "op": "upsert", "kind": "prose", "markdown": "# C\n\nnever\n" }
-            ]),
-        ),
+        commit_args(json!([
+            { "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n\nwould apply\n" },
+            { "op": "delete", "id": b_id }
+        ])),
     )
     .await
-    .expect_err("op 2 carries a stale if_rev");
+    .expect_err("op 2 is anchored by a stale read of B");
     assert_eq!(err.code, RPC_REV_CONFLICT, "{err:?}");
     assert!(
         err.message.contains("ops[1]"),
@@ -1972,24 +1811,18 @@ async fn commit_stale_block_rev_in_second_op_rolls_back_the_first_op() {
 async fn commit_with_a_lifecycle_key_returns_32602_and_persists_no_content() {
     let boot = boot().await;
     let index = seed_two_blocks(&boot).await;
-    let (a_id, a_rev) = index[0].clone();
+    let (a_id, _) = index[0].clone();
     let before = current_payload(&boot).await;
     let mut rx = boot.ctx.events.subscribe();
 
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_COMMIT,
-        planner_identity(&boot),
-        json!({
-            "if_doc_rev": 1,
+    let err = call_tool(&boot, TOOL_REPORT_COMMIT, planner_identity(&boot), json!({
             "message": "lifecycle is removed",
             "summary": "must not land",
             "lifecycle": "done",
             "ops": [
-                { "op": "upsert", "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nmust not land\n" }
+                { "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n\nmust not land\n" }
             ]
-        }),
-    )
+        }))
     .await
     .expect_err("a lifecycle key is refused");
     assert_eq!(err.code, -32602, "{err:?}");
@@ -2013,7 +1846,7 @@ async fn commit_summary_only_with_empty_ops_bumps_doc_rev_and_keeps_blocks() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "if_doc_rev": 1, "message": "只改摘要", "summary": "摘要 v2", "ops": [] }),
+        json!({ "message": "只改摘要", "summary": "摘要 v2", "ops": [] }),
     )
     .await
     .expect("summary-only commit");
@@ -2038,7 +1871,7 @@ async fn commit_summary_only_with_empty_ops_bumps_doc_rev_and_keeps_blocks() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        json!({ "if_doc_rev": 2, "message": "再改摘要", "summary": "摘要 v3" }),
+        json!({ "message": "再改摘要", "summary": "摘要 v3" }),
     )
     .await
     .expect("commit without ops key");
@@ -2071,63 +1904,44 @@ async fn commit_summary_only_with_empty_ops_bumps_doc_rev_and_keeps_blocks() {
 async fn commit_rejects_empty_commits_and_malformed_ops_before_touching_the_doc() {
     let boot = boot().await;
     let index = seed_two_blocks(&boot).await;
-    let (a_id, a_rev) = index[0].clone();
+    let (a_id, _) = index[0].clone();
     let before = current_payload(&boot).await;
 
     let cases: Vec<(&str, Value, &str)> = vec![
         (
             "nothing to commit",
-            json!({ "if_doc_rev": 1, "message": "empty" }),
+            json!({ "message": "empty" }),
             "nothing to commit",
         ),
         (
             "missing message",
-            json!({ "if_doc_rev": 1, "summary": "x" }),
+            json!({ "summary": "x" }),
             "message must be non-empty",
         ),
         (
-            "op carries if_doc_rev",
-            commit_args(
-                1,
-                json!([{ "op": "upsert", "kind": "prose", "markdown": "# X\n", "if_doc_rev": 1 }]),
-            ),
-            "ops[0]: `if_doc_rev` belongs on the commit",
-        ),
-        (
             "unknown op",
-            commit_args(1, json!([{ "op": "rename", "id": a_id }])),
+            commit_args(json!([{ "op": "rename", "id": a_id }])),
             "ops[0]: unknown op `rename`",
         ),
         (
-            "create with if_rev",
-            commit_args(
-                1,
-                json!([{ "op": "upsert", "if_rev": 1, "kind": "prose", "markdown": "# A\n" }]),
-            ),
-            "ops[0]: `if_rev` without `id` is meaningless",
-        ),
-        (
             "move without to_index",
-            commit_args(1, json!([{ "op": "move", "id": a_id }])),
+            commit_args(json!([{ "op": "move", "id": a_id }])),
             "ops[0]: missing `to_index`",
         ),
         (
             "prose smuggling a fence in op 2",
-            commit_args(
-                1,
-                json!([
-                    { "op": "upsert", "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nok\n" },
-                    { "op": "upsert", "kind": "prose", "markdown": "# B\n\n```neige-block table\n{}\n```\n" }
-                ]),
-            ),
+            commit_args(json!([
+                { "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n\nok\n" },
+                { "op": "upsert", "kind": "prose", "markdown": "# B\n\n```neige-block table\n{}\n```\n" }
+            ])),
             "ops[1]:",
         ),
         (
             "too many ops",
-            commit_args(
-                1,
-                Value::Array(vec![json!({ "op": "move", "id": a_id, "to_index": 0 }); 65]),
-            ),
+            commit_args(Value::Array(vec![
+                json!({ "op": "move", "id": a_id, "to_index": 0 });
+                65
+            ])),
             "at most 64",
         ),
     ];
@@ -2148,89 +1962,17 @@ async fn commit_rejects_empty_commits_and_malformed_ops_before_touching_the_doc(
 }
 
 #[tokio::test]
-async fn commit_is_planner_only_and_block_tools_refuse_a_lifecycle_key() {
-    let boot = boot().await;
-    seed_two_blocks(&boot).await;
-    let before = current_payload(&boot).await;
-    let mut rx = boot.ctx.events.subscribe();
-
-    for identity in [assistant_identity(&boot), worker_identity(&boot)] {
-        let role = identity.role;
-        let err = call_tool(
-            &boot,
-            TOOL_REPORT_COMMIT,
-            identity,
-            json!({ "if_doc_rev": 1, "message": "m", "summary": "x" }),
-        )
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("{role:?} must be refused"));
-        // `require_role` reports a role mismatch as invalid params, the same code every other planner-only tool returns.
-        assert_eq!(err.code, -32602, "{role:?}: {err:?}");
-        assert!(err.message.contains("requires role=Planner"), "{err:?}");
-    }
-
-    // The block tools stay open to the assistant; a `lifecycle` key is refused for every role.
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        assistant_identity(&boot),
-        json!({
-            "kind": "prose", "markdown": "# 助手\n\n内容\n", "if_doc_rev": 1,
-            "message": "assistant note", "lifecycle": "dispatching"
-        }),
-    )
-    .await
-    .expect_err("a lifecycle key is refused");
-    assert_eq!(err.code, -32602, "{err:?}");
-    assert!(err.message.contains("`lifecycle` is removed"), "{err:?}");
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": "# 助手\n\n重写\n", "if_doc_rev": 1, "lifecycle": "dispatching" }),
-    )
-    .await
-    .expect_err("a lifecycle key is refused");
-    assert_eq!(err.code, -32602, "{err:?}");
-
-    let after = current_payload(&boot).await;
-    assert_eq!(after.doc_rev, before.doc_rev);
-    assert_eq!(after.body, before.body);
-    assert!(drain_events(&mut rx).await.is_empty(), "nothing emitted");
-
-    let out = call_tool(
-        &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        assistant_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# 助手\n\n内容\n", "if_doc_rev": 1, "message": "assistant note" }),
-    )
-    .await
-    .expect("assistant upsert with message");
-    assert_eq!(out["docRev"].as_u64(), Some(2));
-    let envs = drain_events(&mut rx).await;
-    assert_eq!(envs.len(), 2, "{envs:?}");
-    match &envs[1].event {
-        Event::TrackReportEdited { agent_message, .. } => {
-            assert_eq!(agent_message.as_deref(), Some("assistant note"));
-        }
-        other => panic!("expected TrackReportEdited, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn upsert_and_write_markdown_carry_message_for_the_planner() {
     let boot = boot().await;
     let index = seed_two_blocks(&boot).await;
     let (a_id, a_rev) = index[0].clone();
     let mut rx = boot.ctx.events.subscribe();
 
-    let out = call_tool(
+    let out = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
         json!({
-            "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nalpha v2\n",
+            "id": a_id, "kind": "prose", "markdown": "# A\n\nalpha v2\n",
             "message": "upsert 带说明"
         }),
     )
@@ -2246,12 +1988,11 @@ async fn upsert_and_write_markdown_carry_message_for_the_planner() {
         other => panic!("expected TrackReportEdited, got {other:?}"),
     }
 
-    let out = call_tool(
+    let out = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
-            "body": "# A\n\nalpha v3\n\n# B\n\nbeta\n", "if_doc_rev": 2,
+            "body": "# A\n\nalpha v3\n\n# B\n\nbeta\n",
             "message": "write_markdown 带说明"
         }),
     )
@@ -2267,11 +2008,10 @@ async fn upsert_and_write_markdown_carry_message_for_the_planner() {
         other => panic!("expected TrackReportEdited, got {other:?}"),
     }
 
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# X\n", "if_doc_rev": 3, "message": "  " }),
+        json!({ "kind": "prose", "markdown": "# X\n", "message": "  " }),
     )
     .await
     .expect_err("blank message");
@@ -2281,32 +2021,10 @@ async fn upsert_and_write_markdown_carry_message_for_the_planner() {
 #[tokio::test]
 async fn commit_touching_a_task_block_illegally_is_refused_as_a_whole() {
     let boot = boot().await;
-    let (task_id, task_rev) = seed_planner_task(&boot, "batch-task").await;
+    let (task_id, _) = seed_planner_task(&boot, "batch-task").await;
     assert_eq!(task_keys(&boot).await, vec!["batch-task".to_string()]);
     let before = current_payload(&boot).await;
     let mut rx = boot.ctx.events.subscribe();
-
-    // A batch delete carries no live-task exemption: the task block may only leave through `calm.report.blocks.delete`.
-    let err = call_tool(
-        &boot,
-        TOOL_REPORT_COMMIT,
-        planner_identity(&boot),
-        commit_args(
-            before.doc_rev,
-            json!([
-                { "op": "upsert", "kind": "prose", "markdown": "# 说明\n\nwould land\n" },
-                { "op": "delete", "id": task_id, "if_rev": task_rev }
-            ]),
-        ),
-    )
-    .await
-    .expect_err("batch may not drop a live task");
-    assert_eq!(err.code, -32602, "{err:?}");
-    assert!(
-        err.message
-            .contains("must use the block-level DELETE endpoint"),
-        "{err:?}"
-    );
 
     let mut flipped = planner_task_payload("batch-task", "build it");
     flipped["declared_by"] = json!("user");
@@ -2314,12 +2032,10 @@ async fn commit_touching_a_task_block_illegally_is_refused_as_a_whole() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        commit_args(
-            before.doc_rev,
-            json!([
-                { "op": "upsert", "id": task_id, "if_rev": task_rev, "kind": "task", "payload": flipped }
-            ]),
-        ),
+        commit_args(json!([
+            { "op": "upsert", "kind": "prose", "markdown": "# 说明\n\nwould land\n" },
+            { "op": "upsert", "id": task_id, "kind": "task", "payload": flipped }
+        ])),
     )
     .await
     .expect_err("declared_by is immutable");
@@ -2328,10 +2044,7 @@ async fn commit_touching_a_task_block_illegally_is_refused_as_a_whole() {
 
     let after = current_payload(&boot).await;
     assert_eq!(after.doc_rev, before.doc_rev);
-    assert_eq!(
-        after.body, before.body,
-        "the prose op of (a) rolled back too"
-    );
+    assert_eq!(after.body, before.body, "the prose op rolled back too");
     assert_eq!(task_keys(&boot).await, vec!["batch-task".to_string()]);
     assert!(drain_events(&mut rx).await.is_empty(), "nothing emitted");
 
@@ -2344,36 +2057,58 @@ async fn commit_touching_a_task_block_illegally_is_refused_as_a_whole() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        commit_args(
-            before.doc_rev,
-            json!([
-                { "op": "upsert", "kind": "prose", "markdown": "# 说明\n\nlands\n" },
-                { "op": "upsert", "id": task_id, "if_rev": task_rev, "kind": "task", "payload": tombstone }
-            ]),
-        ),
+        commit_args(json!([
+            { "op": "upsert", "kind": "prose", "markdown": "# 说明\n\nlands\n" },
+            { "op": "upsert", "id": task_id, "kind": "task", "payload": tombstone }
+        ])),
     )
     .await
     .expect("legal tombstone in a batch");
     assert_eq!(out["docRev"].as_u64(), Some(before.doc_rev + 1));
 }
 
+/// #1883: a batch `delete` naming a live task by id retires it, alongside the batch's other ops.
+#[tokio::test]
+async fn commit_delete_naming_a_live_task_retires_it_inside_a_batch() {
+    let boot = boot().await;
+    let (task_id, _) = seed_planner_task(&boot, "batch-task").await;
+    let before = current_payload(&boot).await;
+
+    let out = call_tool(
+        &boot,
+        TOOL_REPORT_COMMIT,
+        planner_identity(&boot),
+        commit_args(json!([
+            { "op": "upsert", "kind": "prose", "markdown": "# Notes\n\nlands\n" },
+            { "op": "delete", "id": task_id }
+        ])),
+    )
+    .await
+    .expect("a delete by id may retire a live task");
+    assert_eq!(out["docRev"].as_u64(), Some(before.doc_rev + 1));
+    let after = current_payload(&boot).await;
+    assert!(after.body.contains("# Notes\n\nlands\n"));
+    assert!(!after.body.contains("neige-block task"));
+    assert!(task_keys(&boot).await.is_empty(), "task row is withdrawn");
+}
+
 #[tokio::test]
 async fn commit_rejects_duplicate_block_ids_before_touching_the_doc() {
     let boot = boot().await;
     let index = seed_two_blocks(&boot).await;
-    let (a_id, a_rev) = index[0].clone();
-    let (b_id, b_rev) = index[1].clone();
+    let (a_id, _) = index[0].clone();
+    let (b_id, _) = index[1].clone();
     let before = current_payload(&boot).await;
     assert_eq!(before.doc_rev, 1);
     let mut rx = boot.ctx.events.subscribe();
 
-    // A content-changing upsert would bump A to rev 2, so the delete's `if_rev: 1` could never be right — refused up front instead of failing -32001.
+    // A content-changing upsert would bump A to rev 2, so a later op on A could never match the read — refused up front instead of failing -32001.
     let cases: Vec<(&str, Value)> = vec![
         (
             "upsert then delete the same id",
             json!([
-                { "op": "upsert", "id": a_id, "if_rev": a_rev, "kind": "prose", "markdown": "# A\n\nv2\n" },
-                { "op": "delete", "id": a_id, "if_rev": a_rev }
+                { "op": "upsert", "id": a_id, "kind": "prose", "markdown": "# A\n\nv2\n" },
+                { "op": "delete", "id": a_id }
             ]),
         ),
         (
@@ -2387,8 +2122,8 @@ async fn commit_rejects_duplicate_block_ids_before_touching_the_doc() {
         (
             "delete then upsert the same id",
             json!([
-                { "op": "delete", "id": b_id, "if_rev": b_rev },
-                { "op": "upsert", "id": b_id, "if_rev": b_rev, "kind": "prose", "markdown": "# B\n\nback\n" }
+                { "op": "delete", "id": b_id },
+                { "op": "upsert", "id": b_id, "kind": "prose", "markdown": "# B\n\nback\n" }
             ]),
         ),
     ];
@@ -2397,7 +2132,7 @@ async fn commit_rejects_duplicate_block_ids_before_touching_the_doc() {
             &boot,
             TOOL_REPORT_COMMIT,
             planner_identity(&boot),
-            commit_args(1, ops),
+            commit_args(ops),
         )
         .await
         .err()
@@ -2425,75 +2160,14 @@ async fn commit_rejects_duplicate_block_ids_before_touching_the_doc() {
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        commit_args(
-            1,
-            json!([
-                { "op": "upsert", "kind": "prose", "markdown": "# C\n\nc\n" },
-                { "op": "upsert", "kind": "prose", "markdown": "# D\n\nd\n" }
-            ]),
-        ),
+        commit_args(json!([
+            { "op": "upsert", "kind": "prose", "markdown": "# C\n\nc\n" },
+            { "op": "upsert", "kind": "prose", "markdown": "# D\n\nd\n" }
+        ])),
     )
     .await
     .expect("two creates");
     assert_eq!(out["docRev"].as_u64(), Some(2));
-}
-
-#[tokio::test]
-async fn move_and_delete_refuse_message_and_lifecycle_with_32602() {
-    let boot = boot().await;
-    let index = seed_two_blocks(&boot).await;
-    let (a_id, a_rev) = index[0].clone();
-    let before = current_payload(&boot).await;
-    let mut rx = boot.ctx.events.subscribe();
-
-    let cases: Vec<(&str, &str, Value)> = vec![
-        (
-            TOOL_REPORT_BLOCKS_MOVE,
-            "message",
-            json!({ "id": a_id, "to_index": 1, "if_doc_rev": 1, "message": "reorder" }),
-        ),
-        (
-            TOOL_REPORT_BLOCKS_MOVE,
-            "lifecycle",
-            json!({ "id": a_id, "to_index": 1, "if_doc_rev": 1, "lifecycle": "working" }),
-        ),
-        (
-            TOOL_REPORT_BLOCKS_DELETE,
-            "message",
-            json!({ "id": a_id, "if_rev": a_rev, "message": "drop it" }),
-        ),
-        (
-            TOOL_REPORT_BLOCKS_DELETE,
-            "lifecycle",
-            json!({ "id": a_id, "if_rev": a_rev, "lifecycle": "working" }),
-        ),
-    ];
-    for (tool, key, args) in cases {
-        let err = call_tool(&boot, tool, planner_identity(&boot), args)
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{tool} with `{key}` must be refused"));
-        assert_eq!(err.code, -32602, "{tool} `{key}`: {err:?}");
-        let expected = if key == "lifecycle" {
-            "`lifecycle` is removed: close with calm.track.close"
-        } else {
-            "`message` is not accepted here; use `calm.report.commit`"
-        };
-        assert!(
-            err.message.contains(tool) && err.message.contains(expected),
-            "{tool} `{key}`: names the tool and the way out: {err:?}"
-        );
-    }
-
-    let after = current_payload(&boot).await;
-    assert_eq!(after.doc_rev, before.doc_rev, "nothing persisted");
-    assert_eq!(after.body, before.body);
-    assert_eq!(
-        index_of(&read(&boot, json!({})).await),
-        index,
-        "order untouched"
-    );
-    assert!(drain_events(&mut rx).await.is_empty(), "nothing emitted");
 }
 
 /// Keys out of declaration order and an explicit `"omit_if_empty":false`, so a stored canonical line proves the ingress rewrote it.
@@ -2525,11 +2199,10 @@ async fn report_edited_rows(boot: &Boot) -> i64 {
 #[tokio::test]
 async fn move_that_displaces_the_contract_block_is_rejected_by_the_funnel() {
     let boot = boot().await;
-    let appended = call_tool(
+    let appended = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# Appended\n\nlast\n", "if_doc_rev": 0 }),
+        json!({ "kind": "prose", "markdown": "# Appended\n\nlast\n"}),
     )
     .await
     .expect("an append keeps the header on line 1");
@@ -2543,11 +2216,10 @@ async fn move_that_displaces_the_contract_block_is_rejected_by_the_funnel() {
     let edits_before = report_edited_rows(&boot).await;
     let mut rx = boot.ctx.events.subscribe();
 
-    let err = call_tool(
+    let err = read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({ "id": id, "to_index": 0, "if_doc_rev": 1 }),
+        json!([{"op": "move",  "id": id, "to_index": 0}]),
     )
     .await
     .expect_err("moving a block above the contract block displaces the header");
@@ -2569,11 +2241,10 @@ async fn move_that_displaces_the_contract_block_is_rejected_by_the_funnel() {
     );
     assert!(drain_events(&mut rx).await.is_empty(), "nothing broadcast");
 
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         planner_identity(&boot),
-        json!({ "id": id, "to_index": 1, "if_doc_rev": 1 }),
+        json!([{"op": "move",  "id": id, "to_index": 1}]),
     )
     .await
     .expect("moving below the contract block is an ordinary reorder");
@@ -2586,15 +2257,13 @@ async fn upsert_prose_at_position_0_with_a_header_is_accepted_only_when_the_doc_
 
     let headless = boot().await;
     let _ = seed_two_blocks(&headless).await; // docRev 1, no header
-    call_tool(
+    upsert_block(
         &headless,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&headless),
         json!({
             "kind": "prose",
             "markdown": format!("{NON_CANONICAL_HEADER}\n"),
-            "position": 0,
-            "if_doc_rev": 1
+            "position": 0
         }),
     )
     .await
@@ -2614,15 +2283,13 @@ async fn upsert_prose_at_position_0_with_a_header_is_accepted_only_when_the_doc_
     let birth = boot().await; // birth body: header already on line 1
     let before = current_payload(&birth).await;
     let edits_before = report_edited_rows(&birth).await;
-    let err = call_tool(
+    let err = upsert_block(
         &birth,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&birth),
         json!({
             "kind": "prose",
             "markdown": format!("{NON_CANONICAL_HEADER}\n"),
-            "position": 0,
-            "if_doc_rev": 0
+            "position": 0
         }),
     )
     .await
@@ -2652,9 +2319,7 @@ async fn commit_whose_steps_leave_the_header_off_line_1_is_rejected_as_a_whole()
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        commit_args(
-            1,
-            json!([
+        commit_args(json!([
                 { "op": "upsert", "kind": "prose", "markdown": format!("{NON_CANONICAL_HEADER}\n"), "position": 0 },
                 { "op": "move", "id": a_id, "to_index": 0 }
             ]),
@@ -2676,9 +2341,7 @@ async fn commit_whose_steps_leave_the_header_off_line_1_is_rejected_as_a_whole()
         &boot,
         TOOL_REPORT_COMMIT,
         planner_identity(&boot),
-        commit_args(
-            1,
-            json!([
+        commit_args(json!([
                 { "op": "upsert", "kind": "prose", "markdown": format!("{NON_CANONICAL_HEADER}\n"), "position": 0 }
             ]),
         ),

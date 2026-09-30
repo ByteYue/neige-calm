@@ -1,5 +1,7 @@
 //! Bounded Planner handoff through authored tasks, native reports and track views.
-use crate::mcp_track_report::{Boot, boot, call_tool, planner_identity, worker_identity};
+use crate::mcp_track_report::{
+    Boot, boot, call_tool, planner_identity, upsert_block, worker_identity,
+};
 use crate::task_recovery::{current, declare};
 use calm_server::db::sqlite::{begin_immediate_tx, card_create_with_id_tx, task_mark_running_tx};
 use calm_server::model::{CardRole, NewCard, Task, TaskStatus};
@@ -89,7 +91,7 @@ async fn planner_advertised_result_route_reads_recorded_audit() {
         "goal":"Recommend a timeout from the selected finding; leave the source unchanged.",
         "ready":false, "declared_by":PLANNER_DECLARATION_AUTHOR, "depends_on":["audit"],
         "no_gate_reason":"Recommendation only; no implementation is changed."});
-    let (b_block, b_rev) = declare(&boot, downstream.clone()).await;
+    let (b_block, _) = declare(&boot, downstream.clone()).await;
     let a = current(&boot, "audit").await;
     assert_ne!(a.id, a.key, "execution IDs are opaque, not author keys");
     // A codex declaration does not take `gate.cwd` (#1727 S4): the gate runs in the bound
@@ -225,11 +227,10 @@ async fn planner_advertised_result_route_reads_recorded_audit() {
     assert!(context["source_event_id"].as_i64().unwrap() > 0);
     downstream["context"] = context.clone();
     downstream["ready"] = json!(true);
-    call_tool(
+    upsert_block(
         &boot,
-        "calm.report.blocks.upsert",
         planner_identity(&boot),
-        json!({"id":b_block,"kind":"task","payload":downstream,"if_rev":b_rev}),
+        json!({"id":b_block,"kind":"task","payload":downstream}),
     )
     .await
     .unwrap();

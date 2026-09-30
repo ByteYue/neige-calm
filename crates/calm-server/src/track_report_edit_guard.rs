@@ -130,13 +130,13 @@ fn guard_assistant_leaves_task_blocks_alone(
     Ok(())
 }
 
-/// `block_delete_id` is the block a block-level delete op targeted; it is the one way a live task
-/// declaration may leave the document.
+/// `deleted_by_id` are the blocks the op's delete steps named by id; naming one is the one way a
+/// live task declaration may leave the document.
 pub(crate) fn guard_task_declarations(
     before: &[ReportBlock],
     after: &[ReportBlock],
     author: EditAuthor,
-    block_delete_id: Option<&str>,
+    deleted_by_id: &[&str],
 ) -> Result<(), CalmError> {
     let before_by_id: HashMap<_, _> = before.iter().map(|block| (&block.id, block)).collect();
     let after_by_id: HashMap<_, _> = after.iter().map(|block| (&block.id, block)).collect();
@@ -225,7 +225,10 @@ pub(crate) fn guard_task_declarations(
                 old.id
             )));
         }
-        if !is_tombstone(old) && !next.is_some_and(is_task) && block_delete_id != Some(&old.id) {
+        if !is_tombstone(old)
+            && !next.is_some_and(is_task)
+            && !deleted_by_id.contains(&old.id.as_str())
+        {
             let key = string_field(old, "key");
             // A whole-document write may retire a task only by carrying a *fresh* tombstone for the same key
             // attributed to the writer itself; reserved writers have no attribution name and fail closed.
@@ -245,7 +248,8 @@ pub(crate) fn guard_task_declarations(
             });
             if !has_tombstone {
                 return Err(bad(format!(
-                    "deletion of task block {} must use the block-level DELETE endpoint",
+                    "deletion of task block {} must name it by id: a commit `delete` op or \
+                     the block-level DELETE endpoint",
                     old.id
                 )));
             }
@@ -379,7 +383,7 @@ mod tests {
             &[],
             std::slice::from_ref(&self_attributed),
             EditAuthor::Assistant,
-            None,
+            &[],
         )
         .expect_err("Assistant must not be able to declare a task block");
         let CalmError::BadRequest(message) = &error else {
@@ -395,7 +399,7 @@ mod tests {
             &[],
             std::slice::from_ref(&block("b_task", live("spec"))),
             EditAuthor::Planner,
-            None,
+            &[],
         )
         .expect("Planner may still declare its own task block");
     }
@@ -411,7 +415,7 @@ mod tests {
             std::slice::from_ref(&planner),
             &[rewritten],
             EditAuthor::Assistant,
-            None,
+            &[],
         )
         .expect_err("an assistant may not rewrite a planner-declared task");
         let CalmError::BadRequest(message) = &error else {
@@ -427,7 +431,7 @@ mod tests {
             std::slice::from_ref(&planner),
             &[],
             EditAuthor::Assistant,
-            Some("b_task"),
+            &["b_task"],
         )
         .expect_err("an assistant may not use the block-level delete exemption");
         let CalmError::BadRequest(message) = &error else {
@@ -438,7 +442,7 @@ mod tests {
             std::slice::from_ref(&planner),
             &[],
             EditAuthor::Planner,
-            Some("b_task"),
+            &["b_task"],
         )
         .expect("the block-level delete exemption still works for the planner");
 
@@ -446,7 +450,7 @@ mod tests {
             &[planner.clone(), user.clone()],
             &[user, planner],
             EditAuthor::Assistant,
-            None,
+            &[],
         )
         .expect(
             "task blocks that survive the write unchanged — in any order — \
@@ -464,7 +468,7 @@ mod tests {
         );
 
         assert!(
-            guard_task_declarations(&[], std::slice::from_ref(&user), EditAuthor::Planner, None)
+            guard_task_declarations(&[], std::slice::from_ref(&user), EditAuthor::Planner, &[])
                 .is_err()
         );
         for author in [
@@ -473,7 +477,7 @@ mod tests {
             EditAuthor::Assistant,
         ] {
             assert!(
-                guard_task_declarations(&[], std::slice::from_ref(&planner), author, None).is_err()
+                guard_task_declarations(&[], std::slice::from_ref(&planner), author, &[]).is_err()
             );
         }
         assert!(
@@ -481,7 +485,7 @@ mod tests {
                 std::slice::from_ref(&planner),
                 std::slice::from_ref(&user),
                 EditAuthor::User,
-                None
+                &[]
             )
             .is_err()
         );
@@ -494,7 +498,7 @@ mod tests {
                 std::slice::from_ref(&planner),
                 &[changed_owner_tombstone],
                 EditAuthor::User,
-                None
+                &[]
             )
             .is_err()
         );
@@ -507,7 +511,7 @@ mod tests {
                 std::slice::from_ref(&user_tombstone),
                 &[planner_tombstone],
                 EditAuthor::User,
-                None
+                &[]
             )
             .is_err()
         );
@@ -516,7 +520,7 @@ mod tests {
                 std::slice::from_ref(&user_tombstone),
                 std::slice::from_ref(&planner),
                 EditAuthor::User,
-                None
+                &[]
             )
             .is_err()
         );
@@ -527,15 +531,15 @@ mod tests {
             EditAuthor::Assistant,
         ] {
             assert!(
-                guard_task_declarations(std::slice::from_ref(&user), &[], author, None).is_err()
+                guard_task_declarations(std::slice::from_ref(&user), &[], author, &[]).is_err()
             );
             assert!(
-                guard_task_declarations(std::slice::from_ref(&user_tombstone), &[], author, None)
+                guard_task_declarations(std::slice::from_ref(&user_tombstone), &[], author, &[])
                     .is_err()
             );
         }
         assert!(
-            guard_task_declarations(std::slice::from_ref(&planner), &[], EditAuthor::User, None)
+            guard_task_declarations(std::slice::from_ref(&planner), &[], EditAuthor::User, &[])
                 .is_err()
         );
         let older_same_key_tombstone = block(
@@ -547,7 +551,7 @@ mod tests {
                 &[planner.clone(), older_same_key_tombstone.clone()],
                 &[older_same_key_tombstone],
                 EditAuthor::User,
-                None
+                &[]
             )
             .is_err(),
             "an unrelated pre-existing same-key tombstone must not authorize deletion"
@@ -559,7 +563,7 @@ mod tests {
                 std::slice::from_ref(&planner),
                 &[released],
                 EditAuthor::Planner,
-                None
+                &[]
             )
             .is_err()
         );
@@ -845,7 +849,7 @@ mod tests {
             &[deleted.clone(), collateral],
             std::slice::from_ref(&deleted),
             EditAuthor::Planner,
-            Some("b_deleted"),
+            &["b_deleted"],
         )
         .unwrap_err();
         assert!(matches!(error, CalmError::BadRequest(_)));
@@ -866,7 +870,7 @@ mod tests {
                 std::slice::from_ref(&old),
                 std::slice::from_ref(&mine),
                 author,
-                None,
+                &[],
             )
             .expect("a fresh self-signed tombstone retires the declaration");
 
@@ -879,7 +883,7 @@ mod tests {
                     std::slice::from_ref(&old),
                     std::slice::from_ref(&theirs),
                     author,
-                    None,
+                    &[],
                 )
                 .is_err(),
                 "{author:?} must not lean on a {other} tombstone"
@@ -894,7 +898,7 @@ mod tests {
                     &[old.clone(), stale.clone()],
                     std::slice::from_ref(&stale),
                     author,
-                    None,
+                    &[],
                 )
                 .is_err(),
                 "{author:?} must not reuse a pre-existing tombstone"

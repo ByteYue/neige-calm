@@ -79,9 +79,9 @@ async fn dispatch_request(
     Ok(json!({
         "error": "calm.dispatch_request was retired (#644); no task was dispatched",
         "migration": {
-            "use": "calm.report.blocks.upsert",
-            "shape": "{ kind: \"task\", payload: { key, kind, goal (codex/claude) | command (terminal), acceptance?, depends_on?, priority?, gate?, ready: true, declared_by: \"spec\" }, if_doc_rev }",
-            "notes": "Read docRev with calm.report.read. The kernel schedules ready task blocks and runs verification gates; use calm.plan.list for status."
+            "use": "calm.report.commit",
+            "shape": "{ message, ops: [{ op: \"upsert\", kind: \"task\", payload: { key, kind, goal (codex/claude) | command (terminal), acceptance?, depends_on?, priority?, gate?, ready: true, declared_by: \"spec\" } }] }",
+            "notes": "Read the report with calm.report.read first. The kernel schedules ready task blocks and runs verification gates; use calm.plan.list for status."
         }
     }))
 }

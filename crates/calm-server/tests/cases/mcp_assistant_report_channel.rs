@@ -1,17 +1,17 @@
-//! What a `CardRole::Assistant` token can and cannot do on the block channel, driven through
+//! What a `CardRole::Assistant` token can and cannot do on the report write surface, driven through
 //! the real tool handlers, decision sink, and recorder gate. Every negative has a Planner-token
 //! control next to it.
 
 #![cfg(unix)]
 
 use crate::mcp_track_report::{
-    Boot, assistant_identity, boot, call_tool, planner_identity, worker_identity,
+    Boot, assistant_identity, boot, call_tool, planner_identity, read_then_commit,
+    read_then_write_markdown, upsert_block, worker_identity,
 };
 use calm_server::event::{EditAuthor, Event};
 use calm_server::mcp_server::registry::ToolCallIdentity;
 use calm_server::mcp_server::tools::track_report_blocks::{
-    TOOL_REPORT_BLOCKS_DELETE, TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_BLOCKS_MOVE,
-    TOOL_REPORT_BLOCKS_UPSERT, TOOL_REPORT_WRITE_MARKDOWN,
+    TOOL_REPORT_BLOCKS_KINDS, TOOL_REPORT_COMMIT, TOOL_REPORT_WRITE_MARKDOWN,
 };
 use calm_server::plugin_host::mcp::RpcError;
 use calm_types::report_blocks::{KIND_TASK, marker_line, render_fence};
@@ -104,11 +104,10 @@ async fn seed_prose_and_two_tasks(boot: &Boot) -> (String, String) {
     let user_fence = task_fence("user", "review");
 
     let planner_body = format!("# Plan\n\nthe original prose\n\n{planner_fence}");
-    call_tool(
+    read_then_write_markdown(
         boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(boot),
-        json!({ "body": planner_body, "summary": "seed", "if_doc_rev": doc_rev(boot).await }),
+        json!({ "body": planner_body, "summary": "seed"}),
     )
     .await
     .expect("planner declares its task");
@@ -165,7 +164,7 @@ async fn marked_text(boot: &Boot, identity: ToolCallIdentity) -> String {
 }
 
 #[tokio::test]
-async fn assistant_drives_the_whole_block_channel() {
+async fn assistant_drives_commit_and_write_markdown() {
     let boot = boot().await;
 
     call_tool(
@@ -177,69 +176,53 @@ async fn assistant_drives_the_whole_block_channel() {
     .await
     .expect("blocks.kinds serves an assistant");
 
-    let created = call_tool(
+    let created = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
         json!({
             "kind": "prose",
-            "markdown": "# Assistant note\n\nfirst pass\n",
-            "if_doc_rev": doc_rev(&boot).await
+            "markdown": "# Assistant note\n\nfirst pass\n"
         }),
     )
     .await
-    .expect("blocks.upsert create serves an assistant");
+    .expect("a commit create serves an assistant");
     let id = created["id"].as_str().expect("created id").to_string();
-    let rev = created["rev"].as_u64().expect("created rev");
 
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
         json!({
             "id": id,
             "kind": "prose",
-            "markdown": "# Assistant note\n\nsecond pass\n",
-            "if_rev": rev
+            "markdown": "# Assistant note\n\nsecond pass\n"
         }),
     )
     .await
-    .expect("blocks.upsert replace serves an assistant");
+    .expect("a commit replace serves an assistant");
 
     // block 0 is the contract header block; the funnel rejects displacing it
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_MOVE,
         assistant_identity(&boot),
-        json!({ "id": id, "to_index": 1, "if_doc_rev": doc_rev(&boot).await }),
+        json!([{"op": "move", "id": id, "to_index": 1}]),
     )
     .await
-    .expect("blocks.move serves an assistant");
+    .expect("a commit move serves an assistant");
 
     let marked = marked_text(&boot, assistant_identity(&boot)).await;
     call_tool(
         &boot,
         TOOL_REPORT_WRITE_MARKDOWN,
         assistant_identity(&boot),
-        json!({ "body": marked, "if_doc_rev": doc_rev(&boot).await }),
+        json!({ "body": marked }),
     )
     .await
     .expect("write_markdown serves an assistant");
 
-    let current_rev = read(&boot, planner_identity(&boot), json!({}))
-        .await
-        .get("blocks")
-        .and_then(Value::as_array)
-        .expect("blocks index")
-        .iter()
-        .find(|block| block["id"].as_str() == Some(id.as_str()))
-        .map(|block| block["rev"].as_u64().expect("rev"))
-        .expect("the assistant's block survived the round trip");
-    call_tool(
+    read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         assistant_identity(&boot),
-        json!({ "id": id, "if_rev": current_rev }),
+        json!([{"op": "delete", "id": id}]),
     )
     .await
     .expect("an assistant may delete a PROSE block it wrote");
@@ -249,15 +232,40 @@ async fn assistant_drives_the_whole_block_channel() {
     );
 }
 
-/// The block channel is opened by exactly one role, not "for agents".
+/// The launchpad's today-summary writer is an assistant conversation: a full read, then a rewrite.
+#[tokio::test]
+async fn the_assistant_today_summary_path_is_a_full_read_then_write_markdown() {
+    let boot = boot().await;
+    let marked = marked_text(&boot, assistant_identity(&boot)).await;
+    let rewritten = format!("{marked}\nToday: two things shipped.\n");
+
+    let out = call_tool(
+        &boot,
+        TOOL_REPORT_WRITE_MARKDOWN,
+        assistant_identity(&boot),
+        json!({ "body": rewritten, "message": "record today" }),
+    )
+    .await
+    .expect("a full read anchors the assistant's rewrite");
+    assert_eq!(out["docRev"], 1);
+    assert!(
+        body_text(&boot)
+            .await
+            .contains("Today: two things shipped.")
+    );
+    assert_eq!(
+        report_edit_authors(&boot).await,
+        vec![EditAuthor::Assistant]
+    );
+}
+
+/// The report write surface is opened to two roles, not "for agents".
 #[tokio::test]
 async fn worker_is_still_refused_at_the_block_channel_entry() {
     let boot = boot().await;
     for tool in [
         TOOL_REPORT_BLOCKS_KINDS,
-        TOOL_REPORT_BLOCKS_UPSERT,
-        TOOL_REPORT_BLOCKS_MOVE,
-        TOOL_REPORT_BLOCKS_DELETE,
+        TOOL_REPORT_COMMIT,
         TOOL_REPORT_WRITE_MARKDOWN,
     ] {
         let err = call_tool(&boot, tool, worker_identity(&boot), json!({}))
@@ -278,19 +286,17 @@ async fn worker_is_still_refused_at_the_block_channel_entry() {
 async fn an_assistant_block_write_is_persisted_as_edit_author_assistant() {
     let boot = boot().await;
 
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         planner_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# Planner\n\nspec text\n", "if_doc_rev": doc_rev(&boot).await }),
+        json!({ "kind": "prose", "markdown": "# Planner\n\nspec text\n"}),
     )
     .await
     .expect("planner writes first");
-    call_tool(
+    upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
-        json!({ "kind": "prose", "markdown": "# Assistant\n\nassistant text\n", "if_doc_rev": doc_rev(&boot).await }),
+        json!({ "kind": "prose", "markdown": "# Assistant\n\nassistant text\n"}),
     )
     .await
     .expect("assistant writes second");
@@ -314,11 +320,10 @@ async fn an_assistant_may_rewrite_prose_around_user_and_planner_task_blocks() {
     let rewritten = marked.replace("the original prose", "the assistant's rewrite");
     assert_ne!(rewritten, marked, "the rewrite must actually change prose");
 
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         assistant_identity(&boot),
-        json!({ "body": rewritten, "if_doc_rev": doc_rev(&boot).await }),
+        json!({ "body": rewritten}),
     )
     .await
     .expect(
@@ -342,9 +347,8 @@ async fn an_assistant_may_rewrite_prose_around_user_and_planner_task_blocks() {
 #[tokio::test]
 async fn an_assistant_may_not_declare_a_task_block() {
     let boot = boot().await;
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
         json!({
             "kind": KIND_TASK,
@@ -354,8 +358,7 @@ async fn an_assistant_may_not_declare_a_task_block() {
                 "goal": "dispatch a worker",
                 "ready": true,
                 "declared_by": "assistant"
-            },
-            "if_doc_rev": doc_rev(&boot).await
+            }
         }),
     )
     .await
@@ -378,14 +381,12 @@ async fn an_assistant_may_not_flip_a_planner_task_to_ready() {
     // 1. Planner seeds a gate-clean but withdrawn declaration.
     let withheld = gated_task_fence("dispatchable", false);
     let released = gated_task_fence("dispatchable", true);
-    call_tool(
+    read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         planner_identity(&boot),
         json!({
             "body": format!("# Plan\n\nthe original prose\n\n{withheld}"),
             "summary": "seed",
-            "if_doc_rev": doc_rev(&boot).await,
         }),
     )
     .await
@@ -406,11 +407,10 @@ async fn an_assistant_may_not_flip_a_planner_task_to_ready() {
          actually flipping `ready`"
     );
     let before = body_text(&boot).await;
-    let err = call_tool(
+    let err = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         assistant_identity(&boot),
-        json!({ "body": flipped.clone(), "if_doc_rev": doc_rev(&boot).await }),
+        json!({ "body": flipped.clone()}),
     )
     .await
     .expect_err("an assistant releasing a planner-declared task must be refused");
@@ -435,14 +435,9 @@ async fn an_assistant_may_not_flip_a_planner_task_to_ready() {
     );
 
     // 3. Control: the planner makes the identical edit and a task appears.
-    call_tool(
-        &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
-        planner_identity(&boot),
-        json!({ "body": flipped, "if_doc_rev": doc_rev(&boot).await }),
-    )
-    .await
-    .expect("the planner releases its own declaration");
+    read_then_write_markdown(&boot, planner_identity(&boot), json!({ "body": flipped}))
+        .await
+        .expect("the planner releases its own declaration");
     assert_eq!(
         task_rows(&boot).await,
         vec![("dispatchable".to_string(), "pending".to_string())],
@@ -474,7 +469,7 @@ async fn an_assistant_may_not_modify_or_delete_an_existing_task_block() {
     assert_eq!(tasks.len(), 2, "fixture holds the planner and user tasks");
 
     // 1. In-place rewrite of the PLANNER-signed declaration (the user-only rule does not cover it).
-    let (planner_task_id, planner_task_rev) = {
+    let (planner_task_id, _) = {
         let marked = marked_text(&boot, assistant_identity(&boot)).await;
         let planner_marker_owner = tasks
             .iter()
@@ -487,9 +482,8 @@ async fn an_assistant_may_not_modify_or_delete_an_existing_task_block() {
             .expect("locate the planner-declared task block");
         planner_marker_owner.clone()
     };
-    let err = call_tool(
+    let err = upsert_block(
         &boot,
-        TOOL_REPORT_BLOCKS_UPSERT,
         assistant_identity(&boot),
         json!({
             "id": planner_task_id,
@@ -500,31 +494,28 @@ async fn an_assistant_may_not_modify_or_delete_an_existing_task_block() {
                 "goal": "rewritten by the assistant",
                 "ready": true,
                 "declared_by": "spec"
-            },
-            "if_rev": planner_task_rev
+            }
         }),
     )
     .await
     .expect_err("an assistant rewriting a planner-declared task must be refused");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
 
-    // 2. Block-level delete.
-    let err = call_tool(
+    // 2. A delete op naming it by id.
+    let err = read_then_commit(
         &boot,
-        TOOL_REPORT_BLOCKS_DELETE,
         assistant_identity(&boot),
-        json!({ "id": planner_task_id, "if_rev": planner_task_rev }),
+        json!([{"op": "delete",  "id": planner_task_id}]),
     )
     .await
     .expect_err("an assistant deleting a task block must be refused");
     assert_eq!(err.code, RpcError::INVALID_PARAMS);
 
     // 3. Whole-document rewrite that simply drops both fences.
-    let err = call_tool(
+    let err = read_then_write_markdown(
         &boot,
-        TOOL_REPORT_WRITE_MARKDOWN,
         assistant_identity(&boot),
-        json!({ "body": "# Plan\n\nno more tasks\n", "if_doc_rev": doc_rev(&boot).await }),
+        json!({ "body": "# Plan\n\nno more tasks\n"}),
     )
     .await
     .expect_err("a whole-document write may not launder a task deletion");
@@ -549,9 +540,8 @@ async fn the_planner_may_still_rewrite_its_own_task_block() {
         .iter()
         .filter(|block| block["kind"].as_str() == Some(KIND_TASK))
     {
-        let out = call_tool(
+        let out = upsert_block(
             &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
             planner_identity(&boot),
             json!({
                 "id": block["id"],
@@ -562,8 +552,7 @@ async fn the_planner_may_still_rewrite_its_own_task_block() {
                     "goal": "planner revises its own goal",
                     "ready": true,
                     "declared_by": "spec"
-                },
-                "if_rev": block["rev"]
+                }
             }),
         )
         .await;

@@ -1,7 +1,6 @@
 //! Explicit single-task selection through the production report and dispatch codec.
-use crate::mcp_track_report::{boot, call_tool, planner_identity};
+use crate::mcp_track_report::{boot, call_tool, planner_identity, upsert_block};
 use crate::task_recovery::{current, declare};
-use calm_server::mcp_server::tools::track_report_blocks::TOOL_REPORT_BLOCKS_UPSERT;
 use calm_server::scheduler::build_worker_payload;
 use serde_json::{Value, json};
 
@@ -75,19 +74,10 @@ async fn isolated_codex_authoring_rejects_invalid_and_unsupported_selection() {
         cases.push(payload);
     }
     for payload in cases {
-        let report = call_tool(
+        let result = upsert_block(
             &boot,
-            "calm.report.read",
             planner_identity(&boot),
-            json!({}),
-        )
-        .await
-        .unwrap();
-        let result = call_tool(
-            &boot,
-            TOOL_REPORT_BLOCKS_UPSERT,
-            planner_identity(&boot),
-            json!({"kind":"task","payload":payload,"if_doc_rev":report["docRev"]}),
+            json!({"kind":"task","payload":payload}),
         )
         .await;
         assert!(

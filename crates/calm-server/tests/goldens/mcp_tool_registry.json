@@ -50,7 +50,7 @@
   },
   {
     "name": "calm.dispatch_request",
-    "description_sha256": "6fa63ed8b77160fe35edf4b5bbdf1e099c4cd467b630745e831865865e142f59",
+    "description_sha256": "ce1cce3d15a9877d436187081cdefe37fa19d650ba6c0224e19c4ae539d0b463",
     "input_schema": {
       "properties": {
         "acceptance_criteria": {
@@ -209,7 +209,7 @@
   },
   {
     "name": "calm.plan.upsert",
-    "description_sha256": "02dadd421a85de6a7fd914239d605723e8ca02ee363538d1139c541325293c55",
+    "description_sha256": "77a57bd78bfa9b58d9d719bc61156e785a8ec85d38ba0361ed7522a52d0474cc",
     "input_schema": {
       "properties": {
         "message": {
@@ -382,7 +382,7 @@
   },
   {
     "name": "calm.preview.register",
-    "description_sha256": "8ce02efc72982defcefd324bb90e126842071fc76ef8d520336e5217e1b95434",
+    "description_sha256": "1d65e8a9bde0371768810aeccbc10cd40c8664343b193e920961451851a7cc93",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -471,38 +471,8 @@
     ]
   },
   {
-    "name": "calm.report.blocks.delete",
-    "description_sha256": "00fe27caf945d42eafe89dbc909fa73b5df59f5b38f89f711ecff5637909a085",
-    "input_schema": {
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "if_rev": {
-          "description": "The revision of this specific report block; not the document-wide docRev.",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "id",
-        "if_rev"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "destructiveHint": false,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "visible_to_roles": [
-      "planner",
-      "assistant"
-    ]
-  },
-  {
     "name": "calm.report.blocks.kinds",
-    "description_sha256": "cabf4db6a9a26649e06768c2c1271809890235348ed7f57b0a6db288f2a26698",
+    "description_sha256": "1af7203bb38febf4eb77f58824dff6190b0bc06ca45d3f470d57693cc6abd512",
     "input_schema": {
       "properties": {},
       "type": "object"
@@ -516,116 +486,11 @@
     ]
   },
   {
-    "name": "calm.report.blocks.move",
-    "description_sha256": "75674f594e531067e780f19f6fa8e75dea4a01b86e30b1c979a6f813211e35fe",
-    "input_schema": {
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "if_doc_rev": {
-          "description": "Required document revision; read docRev from calm.report.read.",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "to_index": {
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "id",
-        "to_index",
-        "if_doc_rev"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "destructiveHint": false,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "visible_to_roles": [
-      "planner",
-      "assistant"
-    ]
-  },
-  {
-    "name": "calm.report.blocks.upsert",
-    "description_sha256": "3b423485fe15967b2387e1125027e3f5f479902cfaa7bcca78281a3b0f8f5abc",
-    "input_schema": {
-      "properties": {
-        "id": {
-          "description": "Existing block id to replace. Omit to create a new block.",
-          "type": "string"
-        },
-        "if_doc_rev": {
-          "description": "Required when creating: read docRev from calm.report.read.",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "if_rev": {
-          "description": "Required when `id` is given: the block rev you last read.",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "kind": {
-          "description": "Block kind.",
-          "enum": [
-            "prose",
-            "chart.candles",
-            "chart.series",
-            "table",
-            "app",
-            "task",
-            "preview"
-          ],
-          "type": "string"
-        },
-        "markdown": {
-          "description": "Prose content (kind=prose only).",
-          "type": "string"
-        },
-        "message": {
-          "description": "Optional human-readable rationale for this write, persisted as agent_message on the emitted event.",
-          "minLength": 1,
-          "type": "string"
-        },
-        "payload": {
-          "description": "Kind-specific payload: required for data kinds; for prose, `{ markdown }` is accepted as an alternative to the top-level `markdown`.",
-          "type": "object"
-        },
-        "position": {
-          "description": "Insertion index for a NEW block (default: append).",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "kind"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "destructiveHint": false,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "visible_to_roles": [
-      "planner",
-      "assistant"
-    ]
-  },
-  {
     "name": "calm.report.commit",
-    "description_sha256": "cf379c033ab5bddec56dfa134162a6740a2e06408bf7c7857e43499d55cdbb86",
+    "description_sha256": "2eb84fb037b56b3b7eda8c8d641583f461396d89c6ce48d92a3e9962ed1b3e4e",
     "input_schema": {
+      "additionalProperties": false,
       "properties": {
-        "if_doc_rev": {
-          "description": "Optional: the docRev to check. Omitted: this session's last read, checked only for summary/create/move.",
-          "minimum": 0,
-          "type": "integer"
-        },
         "message": {
           "description": "Required human-readable rationale for this write. The kernel persists it on the emitted event as agent_message.",
           "minLength": 1,
@@ -634,15 +499,11 @@
         "ops": {
           "description": "Ordered block ops; may be omitted or empty.",
           "items": {
+            "additionalProperties": false,
             "properties": {
               "id": {
                 "description": "upsert (replace) / move / delete: the existing block id. Omit on upsert to create.",
                 "type": "string"
-              },
-              "if_rev": {
-                "description": "Optional on upsert-with-id and delete: the block's rev. Omitted: the rev this session last read.",
-                "minimum": 0,
-                "type": "integer"
               },
               "kind": {
                 "description": "upsert: block kind.",
@@ -713,7 +574,8 @@
       "readOnlyHint": false
     },
     "visible_to_roles": [
-      "planner"
+      "planner",
+      "assistant"
     ]
   },
   {
@@ -759,7 +621,7 @@
   },
   {
     "name": "calm.report.read",
-    "description_sha256": "29959e6e9befa69ee63d7c05fe854133aa074eb17aefa7554f92552c6fc8e9c4",
+    "description_sha256": "d84796fe16e463b44cb42b9ae639627595f3b2ad6526b838f65cf9aed3863ea0",
     "input_schema": {
       "properties": {
         "resolve": {
@@ -867,17 +729,13 @@
   },
   {
     "name": "calm.report.write_markdown",
-    "description_sha256": "2e68cf116afa1d653b102379c256ed37a5d3de2b2c9c6175441970fc8e3f480e",
+    "description_sha256": "9569e535d1f040dd89c4cea7e1bc9ad96d6b11a69ff5e02be0e3b6b0e32ae9d3",
     "input_schema": {
+      "additionalProperties": false,
       "properties": {
         "body": {
           "description": "Full report Markdown, optionally with `<!-- neige:b_xxxx -->` marker lines.",
           "type": "string"
-        },
-        "if_doc_rev": {
-          "description": "The document-wide docRev returned by calm.report.read; not a block rev.",
-          "minimum": 0,
-          "type": "integer"
         },
         "message": {
           "description": "Optional human-readable rationale for this write, persisted as agent_message on the emitted event.",
@@ -889,8 +747,7 @@
         }
       },
       "required": [
-        "body",
-        "if_doc_rev"
+        "body"
       ],
       "type": "object"
     },
@@ -1961,7 +1818,7 @@
   },
   {
     "name": "calm.track.cat",
-    "description_sha256": "efcc3dc7559ca5115a228aec89e377311b35c4843df22f6c78d85752d0396794",
+    "description_sha256": "5149734b0e4a545eaf7847d8e2754f994a13f87456586f0bba28fc285df60f1d",
     "input_schema": {
       "properties": {
         "blocks": {
