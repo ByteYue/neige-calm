@@ -21,6 +21,8 @@ import { EdgeNavigator } from '../../../ui/edge-navigation/public.tsx';
 import { observeResize } from '../../../ui/edge-navigation/resize.ts';
 import { drawerSeamAround } from '../../../ui/drawer/public.tsx';
 import { Icon } from '../../../ui/icon/public.tsx';
+import { triggerMenuKeyRoute } from '../../../ui/trigger-menu-keys/public.ts';
+import { useTriggerFieldAria } from '../../../ui/trigger-menu-keys/field-aria.ts';
 import { useState } from '../../../ui/state/public.ts';
 
 import { activityLabelOf, cardActivityOf, type CardActivity } from '../../../../../core/domain/activity.ts';
@@ -503,7 +505,7 @@ function isThenable(value: unknown): value is Promise<SendOutcome> {
 export function ChatComposer({
   onSend, onStop, onNewConversation, disabled = false, focusOnMount = false, draft: controlledDraft,
   footerActions, sendAdornment,
-  drawer, headerActions, allowEmptyText = false,
+  drawer, headerActions, allowEmptyText = false, mentionTrigger,
 }: {
   /** A caller with its own draft persistence returns `void`. */
   onSend: (text: string) => void | Promise<SendOutcome>;
@@ -525,6 +527,8 @@ export function ChatComposer({
   headerActions?: ReactNode;
   /** Whether a send with no words is a real send (an attached image); a prop because the drawer is an opaque node. */
   allowEmptyText?: boolean;
+  /** The `@` menu (`useMentionTrigger`), present only where a Planner reads what is sent; the caller keeps it stable. */
+  mentionTrigger?: ChatComposerTrigger;
 }) {
   const [localDraft, setLocalDraft] = useState('');
   const draft = controlledDraft?.text ?? localDraft;
@@ -536,6 +540,7 @@ export function ChatComposer({
   newConversationRef.current = onNewConversation;
 
   const rootRef = useRef<HTMLDivElement>(null);
+  useTriggerFieldAria(rootRef);
   const [sendCount, setSendCount] = useState(0);
   const wantsFieldFocus = useRef(focusOnMount);
   /** The element this component last put focus on; `null` while no restore is in flight. */
@@ -563,7 +568,7 @@ export function ChatComposer({
     parkedFocus.current = document.activeElement;
   }, [sendCount, disabled]);
 
-  const triggers = useMemo<ChatComposerTrigger[]>(() => [{
+  const commandTrigger = useMemo<ChatComposerTrigger>(() => ({
     character: '/',
     searchSource: createStaticSource([NEW_CONVERSATION_COMMAND]),
     menuLabel: 'Commands',
@@ -582,7 +587,13 @@ export function ChatComposer({
       newConversationRef.current?.();
       return '';
     },
-  }], []);
+  }), []);
+  const hasCommands = onNewConversation !== undefined;
+  /* One array per combination: a new array per render would make `useTriggerMenu` drop an open menu. */
+  const triggers = useMemo<ChatComposerTrigger[]>(() => [
+    ...(hasCommands ? [commandTrigger] : []),
+    ...(mentionTrigger === undefined ? [] : [mentionTrigger]),
+  ], [hasCommands, commandTrigger, mentionTrigger]);
 
   /** Hand one message to the caller. `stopShown` is not a reason to refuse: `POST /planner/input` queues the text behind the turn in flight. `disabled` is the router's "last POST has not settled". */
   const submit = (value: string) => {
@@ -630,18 +641,28 @@ export function ChatComposer({
         /* Astryx clears its input after Enter even when its parent refuses
            submission. Keep unsent words while disabled, and
            let IME Enter accept its candidate without submitting. */
-        if (event.key !== 'Enter' || event.shiftKey) return;
+        if (event.key !== 'Enter' && event.key !== 'Tab') return;
         /* Only Enter pressed in the field is a send: this handler captures on the root, and the `drawer` slot puts buttons under it. */
-        if (!(event.target instanceof Element)
-          || event.target.closest('[contenteditable], textarea, input') === null) return;
-        if (event.nativeEvent.isComposing) {
+        const field = event.target instanceof Element ? event.target.closest('[contenteditable], textarea, input') : null;
+        if (field === null) return;
+        const route = triggerMenuKeyRoute(event.nativeEvent, field);
+        if (route === 'composing' || route === 'swallow') {
+          if (route === 'swallow') event.preventDefault();
           event.stopPropagation();
           return;
         }
+        if (route === 'menu' || event.key !== 'Enter' || event.shiftKey) return;
         if (disabled) {
           event.preventDefault();
           event.stopPropagation();
           return;
+        }
+        /* A send over an open menu with nothing to pick: Astryx's submit empties the field but leaves the
+           menu armed at the old offset, so the next pick throws. Its own Escape resets it first. Cancelable,
+           so Astryx's `preventDefault` marks it handled and the drawer's Escape does not close the drawer;
+           the router's Escape listener leaves an expanded combobox alone. */
+        if (field.getAttribute('aria-expanded') === 'true') {
+          field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
         }
         /* Astryx's own `handleSubmit` refuses an empty draft (`if (!value.trim()) return;`), so an image-only send has to go through here. */
         if (allowEmptyText && draft.trim() === '') {
@@ -672,8 +693,10 @@ export function ChatComposer({
           <ChatComposerInput
             label="Message"
             placeholder="Say something"
-            /* No triggers where there is no command: otherwise the field becomes an `aria-expanded="false"` combobox that can never expand. */
-            {...(onNewConversation === undefined ? {} : { triggers })}
+            /* No triggers where there is neither a command nor a mention: otherwise the field becomes an `aria-expanded="false"` combobox that can never expand. */
+            {...(triggers.length === 0 ? {} : { triggers })}
+            /* The `@` source waits out keystrokes itself (`MENTION_SEARCH_DELAY_MS` says why Astryx's own delay must be off); the `/` source is synchronous and never delayed. */
+            debounceMs={0}
           />
         )}
         /* Send's availability is Astryx's own (`canSend`). Astryx renders `aria-disabled` only with a `tooltip`, which `ChatSendButton` does not take, so this is a native `disabled` that drops focus to `<body>` — the focus effect above moves it back into the field first. */
