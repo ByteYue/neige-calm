@@ -112,12 +112,9 @@ This is a limited local-development path, not Linux feature parity. The Tailnet
 helper and the `make prod` build path remain Linux-only. Configure a local
 `neige-app` installation with Tailnet disabled and `child.fe_dist` pointing to
 the absolute `fe/web/dist` path; the frontend is served at `/next/`.
-Linux namespace-isolated workers (and with them every dedicated Codex home:
-the isolated-task path connects through `/proc/self/fd/<fd>/app-server.sock`,
-which does not exist on macOS), artifact delivery, secure workspace file
-access requiring `openat2`, and `/proc`-based process recovery are not ported.
-Unsupported isolation and file operations fail closed; they never fall back to
-less restrictive filesystem access. This build does not change Codex sandbox
+Secure workspace file access requiring `openat2` and `/proc`-based process
+recovery are not ported. Unsupported file operations fail closed; they never
+fall back to less restrictive filesystem access. This build does not change Codex sandbox
 permissions or grant access to the user's home directory.
 
 Shared Codex daemon supervision on macOS is socket-driven only. A persisted
@@ -268,7 +265,7 @@ Neige Calm is converging on four user-facing ideas:
 3. **Report** — the current, inspectable outcome rather than a summary buried in chat.
 4. **Recipe** — a reusable way to perform and deliver a kind of work.
 
-The frontend is served at `/next/`. Plugin installation and Recipe editing are available today. Structured checkpoints and resuming a failed attempt with preserved recovery evidence remain [follow-up work](docs/architecture/long-task-reliability.md#delivery-scope).
+The frontend is served at `/next/`. Plugin installation and Recipe editing are available today. Structured checkpoints remain [follow-up work](docs/architecture/long-task-reliability.md#delivery-scope).
 
 ## Documentation
 

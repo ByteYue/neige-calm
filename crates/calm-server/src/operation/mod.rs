@@ -1,7 +1,4 @@
 #[cfg(test)]
-mod isolated_output_tests;
-
-#[cfg(test)]
 pub(crate) mod launch_cleanup_test_support;
 
 #[cfg(test)]
@@ -65,9 +62,8 @@ const OPERATION_LEASE_MS: TimestampMs = 60_000;
 
 /// Authoritative registry of operation adapters whose payload is bound to a
 /// task row and must therefore enforce the stale-context admission fence.
-pub const TASK_BOUND_ADAPTER_KINDS: [&str; 6] = [
+pub const TASK_BOUND_ADAPTER_KINDS: [&str; 5] = [
     "codex-worker",
-    "codex-isolated-worker",
     "claude-worker",
     "terminal-worker",
     "task-verify",
@@ -106,7 +102,7 @@ pub async fn refuse_if_context_stale(tx: &mut Tx<'_>, task_id: Option<&str>) -> 
     crate::task_recovery::require_attempt_startable_tx(tx, task_id).await
 }
 
-/// Call immediately before new provider/process effects; recovered attempts additionally recheck their admitted frozen contract.
+/// Call immediately before new provider/process effects.
 pub(crate) async fn admit_task_side_effect(
     repo: &dyn crate::db::RepoEventWrite,
     task_id: &str,
@@ -844,9 +840,7 @@ pub trait OperationRepo: Send + Sync {
                    updated_at_ms = ?1
                WHERE id = ?3
                  AND lease_owner = ?4
-                 AND (spawn_artifacts_json IS NOT NULL
-                   OR (kind='codex-isolated-worker' AND json_type(tx_output_json,
-                       '$.data.isolated_execution.provider.record.endpoint.boundary')='object'))"#,
+                 AND spawn_artifacts_json IS NOT NULL"#,
         )
         .bind(now)
         .bind(deadline_ms)
