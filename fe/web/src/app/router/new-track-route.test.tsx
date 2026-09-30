@@ -11,6 +11,7 @@ import type { ApiRequest, ApiTransportPort, ApiTransportResponse } from '../../.
 import { createUnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
 import { APP_BASEPATH, createAppRouter } from './public.tsx';
 import { bootTestCardRuntime } from './test-card-runtime.ts';
+import { ISSUE_INPUT_BODY, ISSUE_INPUT_SCHEMA } from '../../features/area/new-track/template-input-fixture.ts';
 import { ThemeProvider } from '../theme/public.tsx';
 
 const unauthorized = createUnauthorizedChannel({ enqueue: (task) => task() });
@@ -59,7 +60,7 @@ const TEMPLATES = [
   {
     id: 'issue-development',
     title: 'Issue development',
-    input_schema: { type: 'object', required: ['issue_url', 'repo', 'issue_number'] },
+    input_schema: JSON.parse(ISSUE_INPUT_SCHEMA) as unknown,
     tasks: [{ key: 'inspect-issue', goal: 'Read the bound issue.' }],
   },
 ];
@@ -101,6 +102,7 @@ async function pick(trigger: string, group: 'Codex' | 'Claude', item: string | R
 
 function harness(options: {
   templates?: unknown;
+  templateDetailDelayMs?: number;
   areaDefaults?: Readonly<{ default_template_id: string | null; default_cwd: string | null }>;
   otherAreaDefaults?: Readonly<{ default_template_id: string | null; default_cwd: string | null }>;
   trackCreate?: ApiTransportResponse;
@@ -205,6 +207,15 @@ function harness(options: {
         return templates === undefined
           ? Promise.resolve({ status: 500, statusText: 'Server Error', body: { message: 'boom' } })
           : Promise.resolve({ status: 200, statusText: 'OK', body: templates });
+      }
+      if (request.method === 'GET' && request.path.startsWith('/api/track-templates/')) {
+        const id = decodeURIComponent(request.path.slice('/api/track-templates/'.length));
+        if (id !== 'issue-development' && id !== 'small-change') return Promise.resolve({ status: 404, statusText: 'Not Found', body: {} });
+        const detail = { status: 200, statusText: 'OK', body: { id, title: id, description: null, instructions: null,
+          body: id === 'issue-development' ? ISSUE_INPUT_BODY : '# Template source' } };
+        return options.templateDetailDelayMs
+          ? new Promise((resolve) => setTimeout(() => resolve(detail), options.templateDetailDelayMs))
+          : Promise.resolve(detail);
       }
       /* Served rather than left to fall through to `[]`: a decode failure would look
                identical to "the feature did not run". */
@@ -537,13 +548,13 @@ describe('Track creation drafts survive navigation', () => {
   });
 
   it('restores unsent text and options independently for each Area', async () => {
-    harness({ templates: TEMPLATES });
+    harness({ templates: TEMPLATES, templateDetailDelayMs: 100 });
     await userEvent.click(await screen.findByRole('button', { name: 'New track in Work' }));
     await findComposer();
     await userEvent.type(screen.getByLabelText(TASK_LABEL), 'Unsent intent');
     await userEvent.click(screen.getByRole('button', { name: 'Template: No template' }));
     await userEvent.click(screen.getByRole('menuitem', { name: /Issue development/ }));
-    await userEvent.type(screen.getByLabelText('Issue URL'), 'unfinished-url');
+    await userEvent.type(await screen.findByLabelText('Issue URL'), 'unfinished-url');
     await userEvent.click(screen.getByRole('button', { name: 'New track in Reading' }));
     await findComposer();
     expect(composerText()).toBe('');
@@ -551,7 +562,7 @@ describe('Track creation drafts survive navigation', () => {
     await userEvent.click(screen.getByRole('button', { name: 'New track in Work' }));
     await findComposer();
     expect(composerText()).toBe('Unsent intent');
-    expect(screen.getByLabelText<HTMLInputElement>('Issue URL').value).toBe('unfinished-url');
+    expect((await screen.findByLabelText<HTMLInputElement>('Issue URL')).value).toBe('unfinished-url');
     await userEvent.click(screen.getByRole('button', { name: 'New track in Reading' }));
     await findComposer();
     expect(composerText()).toBe('Other draft');
@@ -1039,7 +1050,7 @@ describe('the new-track page is a route reached from Area groups', () => {
     await userEvent.click(screen.getByRole('button', { name: TEMPLATE_CHIP }));
     await userEvent.click(await screen.findByRole('menuitem', { name: /^Issue development/ }));
     await userEvent.type(
-      screen.getByLabelText('Issue URL'),
+      await screen.findByLabelText('Issue URL'),
       'https://github.com/keanji-x/neige-calm/issues/1209',
     );
     await userEvent.click(screen.getByRole('button', { name: 'Create track' }));
