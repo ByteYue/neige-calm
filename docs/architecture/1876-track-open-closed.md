@@ -100,6 +100,8 @@ The guards key on `child.closed_at IS NOT NULL` with the same quiescence subquer
   - Area-chat tracks refuse a change to `closed`.
   - `can_resume` becomes `can_reopen` = closed ∧ ¬area-chat ∧ ¬referenced child.
   - "Resume work" becomes **Reopen**. **Close** is a new track action in PR-2.
+    The track detail carries `can_close` = open ∧ ¬area-chat beside `can_reopen`, derived in the
+    same read, so the page offers Close only where the PATCH accepts it (PR-2).
 - **Planner.** New tool `calm.track.close {message}` (Planner-only) emits `track.updated` with
   `agent_message`. Closing a closed track is a no-op that returns the current `closed_at`.
   - `lifecycle` leaves the schema of every tool in F17.
@@ -361,12 +363,19 @@ The `isolated_codex` first-start refusal is not a separate NEW test: the first-s
 (`validate_isolated_start_tx`) reads the same `Track::is_open` as the user start, and its fixture
 needs a running isolated executor. `user_start_refuses_on_a_closed_track` pins the shared predicate.
 
+Measured on PR-2 (`npm test` + `test:browser`, then the touched files re-run in isolation under the
+mutation, with clean runs before and after): row 7 reddened exactly its two predicted tests and row 8
+exactly its one. The full four-project run under each mutation also reddened 1 (row 7) and 3 (row 8)
+timing-bound tests elsewhere (thread hover delay, mobile push, Tab order, recipe editor load); none
+renders a closed track, and each was green under the same mutation in isolation.
+The rows stay hand-run evidence: no fe gate requires a manifest entry for them, so PR-2 adds none.
+
 ## 7. Slices
 
 | PR | Content | Size (hand-edited, estimate) | Preview |
 |---|---|---|---|
 | PR-1 | Migration, calm-types/truth/exec/server kernel and `calm-truth-test-harness` fakes (D1-D5), event deletion, `calm.track.close` + `neige track-close`, parser refusal, CLI render, prompts and template, goldens and vectors, and generated wire. FE compile fixes: decoders, labels, badge, Reopen, `activeTracksOn`, invalidation, Today Open, mobile meta, deleting `visibleTracks` and its callers, independent-task admission, and fixtures (about 51 test files). The existing mutation-manifest entries and oracle INV-APP-118 / CAP-APP-032. The e2e case 110 and the Playwright resume test | ~2k lines touched, plus about 1.25k deleted in whole blocks (the FSM and transition functions of both `track_lifecycle.rs`, ~770 of 838 lines; the FSM golden and its test, 501) | no |
-| PR-2 | The whole rail rule (`railAreaTracks`: hidden unless unread or active), `area-closed:${id}` preference, Show closed / Hide closed item, Close track action, a11y oracle INV-A11Y-061, new mutation entries, jsdom + browser tests | ~400 | owner preview |
+| PR-2 | The whole rail rule (`railAreaTracks`: hidden unless unread or active), `area-closed:${id}` preference, Show closed / Hide closed item, Close track action, a11y oracle INV-A11Y-061, jsdom + browser tests | ~400 | owner preview |
 
 - **Why PR-1 is not split to ~1k.** Deleting `TrackLifecycle` is one compile unit across 3 crates.
   The wire change forces the FE decoders into the same PR (`openapi-drift` + `fe-unit-lint`).

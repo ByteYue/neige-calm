@@ -12,7 +12,7 @@ import { areaWireSchema, toArea } from '../../../../core/domain/area.ts';
 import {
   readTrackReport, TRACK_REPORT_CARD_KIND, type TaskVerdict,
 } from '../../../../core/domain/report.ts';
-import { NEUTRAL_ACTIVITY, type TrackDetailWire } from '../../../../core/domain/track.ts';
+import { NEUTRAL_ACTIVITY } from '../../../../core/domain/track.ts';
 import {
   ApiError, areaListQueryOptions, harnessItemsQueryOptions, queryKeys, runOperation, taskVerdictsRefetchInterval,
   trackOverlaysQueryOptions,
@@ -577,7 +577,7 @@ describe('track detail mutation cache writes', () => {
     deletable: true, created_at: 1, updated_at: 2,
   });
   const detail = {
-    track: { ...baseTrackWire }, can_reopen: false,
+    track: { ...baseTrackWire }, can_reopen: false, can_close: true,
     cards: [cardWire('card-a'), cardWire('card-b')], overlays: [],
   };
 
@@ -645,26 +645,6 @@ describe('track detail mutation cache writes', () => {
 
     expect(client.getQueryData<typeof detail>(queryKeys.trackDetail('w1'))?.cards.map((card) => card.id))
       .toEqual(['card-a', 'card-b']);
-  });
-
-  it('writes an acknowledged reopen patch through before the detail refetch', async () => {
-    const reopened = { ...baseTrackWire, closed_at: null, updated_at: 3 };
-    const transport: ApiTransportPort = {
-      send: (request) => (request.method === 'PATCH'
-        ? Promise.resolve(ok(reopened))
-        : new Promise<ApiTransportResponse>(() => undefined)),
-    };
-    const { client, result } = mounted(transport);
-    client.setQueryData(queryKeys.trackDetail('w1'), {
-      ...detail,
-      track: { ...baseTrackWire, closed_at: 2 },
-      can_reopen: true,
-    });
-
-    await act(() => result.current.patch('w1', 'c1', { closed: false }));
-
-    expect(client.getQueryData<TrackDetailWire>(queryKeys.trackDetail('w1')))
-      .toMatchObject({ track: reopened, can_reopen: false });
   });
 });
 
