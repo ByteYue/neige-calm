@@ -32,6 +32,14 @@ mod card_composite;
 mod database_identity;
 mod events;
 mod infra;
+mod opencode_submission;
+#[cfg(test)]
+mod opencode_submission_tests;
+pub use opencode_submission::{
+    opencode_submission_claim_prepared, opencode_submission_get_by_client,
+    opencode_submission_get_unresolved, opencode_submission_get_unresolved_by_card,
+    opencode_submission_mark_unknown, opencode_submission_prepare, opencode_submission_settle,
+};
 mod out_of_domain;
 mod overlay;
 mod read;
