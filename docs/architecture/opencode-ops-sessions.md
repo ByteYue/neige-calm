@@ -2,7 +2,8 @@
 
 Status: scoped design; implementation and live acceptance are pending.
 
-Tracking: [issue #1928](https://github.com/keanji-x/neige-calm/issues/1928).
+Tracking: [fork issue #1](https://github.com/ByteYue/neige-calm/issues/1).
+Original scope: [upstream issue #1928](https://github.com/keanji-x/neige-calm/issues/1928).
 
 ## Outcome
 
