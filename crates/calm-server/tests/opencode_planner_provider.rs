@@ -52,19 +52,15 @@ impl Root {
         .unwrap();
         root
     }
-
     fn path(&self) -> &Path {
         self.0.path()
     }
-
     fn fake(&self) -> PathBuf {
         self.path().join("fake")
     }
-
     fn mode(&self, mode: &str) {
         std::fs::write(self.fake().join("scenario"), mode).unwrap();
     }
-
     fn records(&self, name: &str) -> Vec<Value> {
         std::fs::read_to_string(self.fake().join(name))
             .unwrap_or_default()
@@ -72,11 +68,9 @@ impl Root {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
-
     fn requests(&self) -> Vec<Value> {
         self.records("requests.jsonl")
     }
-
     fn last_token(&self) -> String {
         self.records("spawns.jsonl")
             .iter()
@@ -89,13 +83,11 @@ impl Root {
             })
             .expect("managed server received its minted token")
     }
-
     fn marker_prefix(&self) -> String {
         MarkerInstance::for_data_dir(&self.path().join("data"))
             .unwrap()
             .marker("")
     }
-
     fn live_processes(&self) -> Vec<(i32, u64)> {
         let prefix = format!("{MARKER_KEY}={}", self.marker_prefix());
         std::fs::read_dir("/proc")
@@ -166,11 +158,9 @@ impl Stack {
             .with_state(state.clone());
         Self { state, app }
     }
-
     fn repo(&self) -> &dyn Repo {
         self.state.raw_repo()
     }
-
     async fn request(&self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
         let builder = Request::builder()
             .method(method)
@@ -191,7 +181,6 @@ impl Stack {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
     }
-
     async fn create(&self) -> (String, String) {
         let area = self
             .repo()
@@ -221,7 +210,6 @@ impl Stack {
         assert_eq!(card.payload["planner_provider"], "opencode");
         (track, card.id.to_string())
     }
-
     async fn runtime(&self, card: &str) -> WorkerSessionProjection {
         self.repo()
             .session_projection_active_for_card(&card.to_owned())
@@ -229,7 +217,6 @@ impl Stack {
             .unwrap()
             .unwrap()
     }
-
     async fn input(&self, card: &str, text: &str) {
         let (status, body) = self
             .request(
@@ -244,7 +231,6 @@ impl Stack {
             "stable queued input identity: {body}"
         );
     }
-
     async fn run(&self, card: &str) -> Value {
         let (status, body) = self
             .request("GET", &format!("/api/cards/{card}/planner/run"), None)
@@ -252,7 +238,6 @@ impl Stack {
         assert_eq!(status, StatusCode::OK, "{body}");
         body
     }
-
     async fn rows(&self, card: &str) -> Vec<Value> {
         let (status, body) = self
             .request(
@@ -264,7 +249,6 @@ impl Stack {
         assert_eq!(status, StatusCode::OK, "{body}");
         body.as_array().unwrap().clone()
     }
-
     async fn transcript(&self, card: &str) -> Vec<Value> {
         self.rows(card)
             .await
@@ -272,7 +256,6 @@ impl Stack {
             .map(|row| serde_json::from_str(row["params"].as_str().unwrap()).unwrap())
             .collect()
     }
-
     async fn outcomes(&self, card: &str) -> Vec<Value> {
         self.rows(card)
             .await
@@ -281,7 +264,6 @@ impl Stack {
             .map(|row| serde_json::from_str(row["params"].as_str().unwrap()).unwrap())
             .collect()
     }
-
     async fn unknown(&self, card: &str) -> bool {
         let pool = self.repo().sqlite_pool().unwrap();
         calm_server::db::sqlite::opencode_submission_get_unresolved_by_card(&pool, card)
@@ -292,15 +274,16 @@ impl Stack {
                     == calm_truth::opencode_submission::OpenCodeSubmissionState::Unknown
             })
     }
-
     async fn completed(&self, card: &str, count: usize) {
-        wait("native outcome projected and harness settled", || async {
-            self.outcomes(card).await.len() >= count
-                && self.run(card).await["phase"] == "turn_completed"
-        })
+        wait(
+            &format!("native outcome count={count} projected and harness settled"),
+            || async {
+                self.outcomes(card).await.len() >= count
+                    && self.run(card).await["phase"] == "turn_completed"
+            },
+        )
         .await;
     }
-
     async fn reset(&self, card: &str) -> (StatusCode, Value) {
         self.request(
             "POST",
@@ -309,7 +292,6 @@ impl Stack {
         )
         .await
     }
-
     async fn authenticates(&self, token: &str) -> bool {
         let socket = self.state.opencode_planner_wiring().host.mcp_socket.clone();
         let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
@@ -327,7 +309,6 @@ impl Stack {
         let reply: Value = serde_json::from_str(&reply).unwrap();
         reply.get("result").is_some() && reply.get("error").is_none()
     }
-
     async fn shutdown(self) {
         for harness in self.state.harness.drain_all_for_dev() {
             harness.shutdown().await.expect("quiesce owned harness");
@@ -636,5 +617,182 @@ async fn opencode_rest_response_loss_reboot_and_retry_never_repeat_post() {
     })
     .await;
     assert_eq!(root.requests().len(), 1);
+    stack.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opencode_rest_lost_response_settles_and_retires_receipt_for_next_turn() {
+    let root = Root::new("loss-terminal");
+    let stack = Stack::boot(&root).await;
+    let (track, card) = stack.create().await;
+    stack
+        .input(&card, "first receipt with lost HTTP response")
+        .await;
+    // Withhold the exact user message beyond turn_start's admission budget, so this
+    // exercises TurnAdmission::Unknown and its retained receipt, not just a lost response.
+    wait("unknown admission before native completion", || async {
+        stack.unknown(&card).await
+            && stack.run(&card).await["blocked_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("admission is unknown"))
+    })
+    .await;
+    assert_eq!(root.requests().len(), 1);
+    std::fs::write(root.fake().join("release"), "").unwrap();
+    stack.completed(&card, 1).await;
+    root.mode("complete");
+    stack.input(&card, "a different second receipt").await;
+    stack.completed(&card, 2).await;
+    let requests = root.requests();
+    assert_eq!(requests.len(), 2, "one POST per admitted local turn");
+    assert_eq!(requests[0]["session"], requests[1]["session"]);
+    assert_ne!(
+        requests[0]["payload"]["messageID"],
+        requests[1]["payload"]["messageID"]
+    );
+    let pool = stack.repo().sqlite_pool().unwrap();
+    let receipts: Vec<String> = sqlx::query_scalar(
+        "SELECT client_id FROM opencode_submissions WHERE card_id=?1 ORDER BY created_at_ms,id",
+    )
+    .bind(&card)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert_ne!(
+        receipts[0], receipts[1],
+        "settled admission cannot retain the next turn's receipt"
+    );
+    let run = stack.run(&card).await;
+    assert!(
+        run["blocked_reason"].is_null(),
+        "settled admission notice must retire: {run}"
+    );
+    let (status, body) = stack
+        .request("DELETE", &format!("/api/tracks/{track}"), None)
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    stack.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opencode_rest_prepared_recovery_retires_real_queued_batch_without_post() {
+    use calm_server::harness::queue::input_segments_for_entries;
+    use calm_truth::opencode_submission::{OpenCodeSubmissionIntent, OpenCodeSubmissionState};
+    let root = Root::new("complete");
+    let stack = Stack::boot(&root).await;
+    let (track, card) = stack.create().await;
+    stack.input(&card, "establish native binding").await;
+    stack.completed(&card, 1).await;
+    let runtime = stack.runtime(&card).await;
+    let harness = stack.state.harness.get(&runtime.id).unwrap();
+    harness.pause_issuance_for_dev();
+    stack
+        .input(&card, "prepared operation that must never be sent")
+        .await;
+    let mut snapshot = harness.snapshot().await;
+    let entries = snapshot.pending_entries();
+    assert_eq!(entries.len(), 1);
+    let receipt = entries[0].id().unwrap().clone();
+    let segments = input_segments_for_entries(&card.clone().into(), &entries);
+    let text = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pool = stack.repo().sqlite_pool().unwrap();
+    let (scope, generation): (String, i64) =
+        sqlx::query_as("SELECT scope_id,generation FROM opencode_submissions WHERE card_id=?1")
+            .bind(&card)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut input = root.requests()[0]["payload"].clone();
+    input["messageID"] = json!("msg_prepared_integration");
+    input["parts"] = json!([{"id":"prt_prepared_integration","type":"text","text":text}]);
+    snapshot.phase = calm_types::harness::HarnessPhaseTag::IssuingTurn;
+    snapshot.projection_client_id = Some(receipt.clone());
+    stack.shutdown().await;
+    // Persist a crash image using the real snapshot and admission writers. The original
+    // REST-enqueued head stays present, exactly as before dispatch claims its journal row.
+    let mut tx = pool.begin().await.unwrap();
+    calm_server::db::sqlite::session_set_handle_state_of_any_runtime_tx(
+        &mut tx,
+        &runtime.id,
+        Some(serde_json::to_value(snapshot).unwrap()),
+        1,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let intent = OpenCodeSubmissionIntent {
+        id: "prepared-integration".into(),
+        worker_session_id: runtime.id.clone(),
+        card_id: card.clone(),
+        scope_id: scope.clone(),
+        generation,
+        thread_id: runtime.thread_id.unwrap(),
+        native_session_id: runtime.session_id.unwrap(),
+        client_id: receipt.to_string(),
+        native_message_id: "msg_prepared_integration".into(),
+        input_json: input,
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+    };
+    let prepared = calm_server::db::sqlite::opencode_submission_prepare(&pool, &intent)
+        .await
+        .unwrap();
+    assert_eq!(prepared.state, OpenCodeSubmissionState::Prepared);
+    let stack = Stack::boot(&root).await;
+    stack.completed(&card, 2).await;
+    let recovered = calm_server::db::sqlite::opencode_submission_get_by_client(
+        &pool,
+        &scope,
+        &intent.native_session_id,
+        receipt.as_str(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.state, OpenCodeSubmissionState::Failed);
+    let settled = stack
+        .state
+        .harness
+        .get(&runtime.id)
+        .unwrap()
+        .snapshot()
+        .await;
+    assert_eq!(settled.last_turn_id.as_deref(), Some(intent.id.as_str()));
+    assert!(
+        settled.projection_client_id.is_none(),
+        "unsent receipt retired"
+    );
+    assert_eq!(
+        root.requests().len(),
+        1,
+        "Prepared recovery must send zero additional POSTs"
+    );
+    assert!(
+        stack
+            .outcomes(&card)
+            .await
+            .iter()
+            .any(|turn| turn["id"] == intent.id && turn["status"] == "failed")
+    );
+    assert!(
+        stack.run(&card).await["pending"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "original batch was retired"
+    );
+    stack
+        .input(&card, "a new operation after unsent recovery")
+        .await;
+    stack.completed(&card, 3).await;
+    assert_eq!(root.requests().len(), 2);
+    let (status, body) = stack
+        .request("DELETE", &format!("/api/tracks/{track}"), None)
+        .await;
+    assert!(status.is_success(), "{status} {body}");
     stack.shutdown().await;
 }

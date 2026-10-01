@@ -98,6 +98,11 @@ def assistant(sid, user, running=False, aborted=False):
              "time": {"start": now, "end": now + 1}}])
     return {"info": info, "parts": parts}
 
+def finish_after_release(sid, user):
+    while not (ROOT / "release").exists():
+        time.sleep(0.05)
+    store(sid, assistant(sid, user))
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -146,6 +151,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif len(path) >= 4 and path[1] == "session" and path[3] == "message":
             rows = messages(path[2])
             if len(path) == 5:
+                if (ROOT / "scenario").read_text().strip() == "loss-terminal" and not (ROOT / "release").exists():
+                    self.reply(404, {})
+                    return
                 exact = next((row for row in rows if row["info"]["id"] == path[4]), None)
                 self.reply(200 if exact else 404, exact or {})
             else:
@@ -188,7 +196,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "time": {"created": int(time.time() * 1000)}, "model": payload.get("model")},
                     "parts": payload["parts"]}
             store(sid, user)
-            if mode == "loss":
+            if mode in ("loss", "loss-terminal"):
+                if mode == "loss-terminal":
+                    threading.Thread(target=finish_after_release,
+                                     args=(sid, payload["messageID"]), daemon=True).start()
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
