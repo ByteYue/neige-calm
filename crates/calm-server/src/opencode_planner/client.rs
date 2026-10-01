@@ -93,7 +93,7 @@ impl Client {
                     .await
                     .map_err(|e| CalmError::Conflict(format!("OpenCode HTTP handshake: {e}")))?;
             let _connection = AbortConnection(tokio::spawn(connection));
-            let result = async {
+            async {
                 let response = sender
                     .send_request(request)
                     .await
@@ -134,8 +134,7 @@ impl Client {
                 })?;
                 Ok(Page { value, next_cursor })
             }
-            .await;
-            result
+            .await
         };
         tokio::time::timeout(timeout, exchange).await.map_err(|_| {
             CalmError::Conflict("OpenCode request outcome is unknown after timeout".into())

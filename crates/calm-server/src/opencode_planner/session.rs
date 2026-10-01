@@ -566,13 +566,11 @@ impl OpenCodePlannerSession {
             if let Ok(message) = acknowledgement_client
                 .get(&format!("/session/{native}/message/{native_message_id}"))
                 .await
+                && message["info"]["id"].as_str() == Some(&native_message_id)
+                && message["info"]["sessionID"].as_str() == Some(&native)
+                && message["info"]["role"].as_str() == Some("user")
             {
-                if message["info"]["id"].as_str() == Some(&native_message_id)
-                    && message["info"]["sessionID"].as_str() == Some(&native)
-                    && message["info"]["role"].as_str() == Some("user")
-                {
-                    return Ok(TurnAdmission::Accepted { turn_id: id });
-                }
+                return Ok(TurnAdmission::Accepted { turn_id: id });
             }
             if tokio::time::Instant::now() >= until {
                 break;
@@ -603,12 +601,12 @@ impl OpenCodePlannerSession {
             .as_ref()
             .filter(|a| a.submission.thread_id == thread && a.submission.id == turn)
             .map(|a| a.cancelled.clone());
-        if let Some(slot) = slot {
-            if slot.send(true).is_err() {
-                // A failed observer already stopped its process; repeat cleanup rather than
-                // treating a send to a closed watch channel as successful interruption.
-                self.shared.stop_process().await?;
-            }
+        if let Some(slot) = slot
+            && slot.send(true).is_err()
+        {
+            // A failed observer already stopped its process; repeat cleanup rather than
+            // treating a send to a closed watch channel as successful interruption.
+            self.shared.stop_process().await?;
         }
         Ok(())
     }
@@ -733,8 +731,7 @@ async fn validate_receipt(
         .repo
         .session_get(&WorkerSessionId(receipt.worker_session_id.clone()))
         .await?
-    {
-        if original.provider != WorkerProviderKind::OpenCode
+        && (original.provider != WorkerProviderKind::OpenCode
             || original.contract != WorkerContract::Planner
             || original
                 .card_id
@@ -743,12 +740,11 @@ async fn validate_receipt(
                 .as_deref()
                 != Some(&params.card_id)
             || original.thread_id.as_deref() != Some(&receipt.thread_id)
-            || original.agent_session_id.as_deref() != Some(&receipt.native_session_id)
-        {
-            return Err(CalmError::Conflict(
-                "OpenCode recovery receipt has conflicting original attribution".into(),
-            ));
-        }
+            || original.agent_session_id.as_deref() != Some(&receipt.native_session_id))
+    {
+        return Err(CalmError::Conflict(
+            "OpenCode recovery receipt has conflicting original attribution".into(),
+        ));
     }
     super::client::native_id(&receipt.native_session_id, "ses")?;
     super::client::native_id(&receipt.native_message_id, "msg")?;

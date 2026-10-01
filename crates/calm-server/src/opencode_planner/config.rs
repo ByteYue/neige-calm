@@ -140,7 +140,7 @@ impl OpenCodePlannerHost {
         let mut env = vec![
             (
                 "PATH".into(),
-                crate::kernel_bin_path::kernel_led_path()?.path.into(),
+                crate::kernel_bin_path::kernel_led_path()?.path,
             ),
             ("HOME".into(), config.config_dir.clone().into_os_string()),
         ];
