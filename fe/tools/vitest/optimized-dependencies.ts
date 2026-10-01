@@ -3,10 +3,20 @@
  * mid-run and reloads the page importing a test. Browser projects do not inherit the root list.
  */
 export const OPTIMIZED_DEPENDENCIES = Object.freeze([
+  '@fullcalendar/react',
+  '@fullcalendar/react/daygrid',
+  '@fullcalendar/react/interaction',
+  '@fullcalendar/react/themes/monarch',
+  'temporal-polyfill',
+  '@astryxdesign/core/Switch',
   '@tanstack/react-query',
   '@tanstack/react-router',
   '@astryxdesign/core/Badge',
   '@astryxdesign/core/Button',
+  '@astryxdesign/core/Banner',
+  '@astryxdesign/core/DateInput',
+  '@astryxdesign/core/TimeInput',
+  '@astryxdesign/core/TextArea',
   '@astryxdesign/core/Calendar',
   '@astryxdesign/core/Card',
   '@astryxdesign/core/Chat',

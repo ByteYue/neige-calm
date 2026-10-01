@@ -17,6 +17,9 @@ export type TrackRowRenderer = (
 ) => ReactNode;
 
 export type TodayPageProps = Readonly<{
+  /** Integrated sidebar calendar, with its focused local date owned by Today; desktop only. */
+  renderCalendarTasks?: (date: string, onDateChange: (date: string) => void, trackCountOn: (date: string) => number | null) => ReactNode;
+  isTrackUnread?: (track: Track) => boolean;
   tracks: readonly Track[];
   areas: readonly Area[];
   /** Partial or failed workspace reads cannot establish aggregate activity. */
@@ -48,6 +51,8 @@ export type Disposition =
 
 /** Every `TodayPageProps` key, and whether `TodayCompact` may receive it. `satisfies` is the exhaustiveness check; do not add a widening type annotation — it collapses `CompactRenderedKeys` to `never`. */
 export const TODAY_VIEWPORT_LEDGER = Object.freeze({
+  renderCalendarTasks: Object.freeze({ render: false, why: 'Calendar task creation and scheduling are desktop-only in #1913; mobile is deferred by the owner.' } as const),
+  isTrackUnread: Object.freeze({ render: false, why: 'Activity filters are desktop-only.' } as const),
   activityAvailable: Object.freeze({
     render: false,
     why: 'The compact calendar displays dates only; activity summaries and agenda rows belong to desktop.',

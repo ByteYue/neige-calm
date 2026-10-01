@@ -1,3 +1,17 @@
+# Calendar commitments (#1913)
+
+Today mounts Week/Month date navigation in the desktop sidebar. Dates show Track
+counts above and task counts below. Task details remain in the fixed-height
+scrolling list below; Activity is a separate fixed-height list with update times
+and a closed-track visibility toggle. No separate Open group is rendered.
+
+Today owns date selection and Track counts. The app queries the visible date
+window and selected day; Calendar projects task counts from those entries.
+Astryx controls and shared PanelModules provide consistent controls and dividers.
+
+The compact viewport ledger excludes the renderer, preserving the explicit
+desktop-only scope. An open dialog keeps its captured creation date.
+
 # `features/today`
 
 The landing route: a status bar and **the day's document**, beside a panel
