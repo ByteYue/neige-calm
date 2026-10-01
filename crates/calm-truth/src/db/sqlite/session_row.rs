@@ -95,50 +95,90 @@ pub async fn session_mcp_token_set_if_active_tx(
     .await?;
     if res.rows_affected() != 1 {
         return Err(CalmError::Conflict(format!(
-            "worker session {session_id} is no longer active; its Claude Planner credential was not minted"
+            "worker session {session_id} is no longer active; its Planner credential was not minted"
         )));
     }
     Ok(())
 }
 
-/// Which Claude Planner rows a revocation covers.
+/// The owned provider whose session credential must be revoked.
 #[derive(Clone, Copy, Debug)]
-pub enum ClaudePlannerScope<'a> {
+pub enum OwnedPlannerProvider {
+    Claude,
+    OpenCode,
+}
+
+impl OwnedPlannerProvider {
+    fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
+/// Which owned Planner rows a revocation covers.
+#[derive(Clone, Copy, Debug)]
+pub enum OwnedPlannerScope<'a> {
     /// Every row: boot, before the MCP listener starts.
     All,
     /// Every row of one track: before a destructive step on it.
     Track(&'a str),
+    /// One session, including an inactive historical row.
+    Session(&'a str),
 }
 
-/// Null the MCP hash of every `(claude, planner)` row in `scope`, in any state, and return their
-/// ids for the marker sweep that follows (#1791 §5.1 items 1 and 4). A revoked row authenticates
-/// again only after its next first-turn mint.
-pub async fn claude_planner_revoke_tx(
+pub type ClaudePlannerScope<'a> = OwnedPlannerScope<'a>;
+pub type OpenCodePlannerScope<'a> = OwnedPlannerScope<'a>;
+
+/// Revoke every credential in the scope, including inactive historical rows.
+pub async fn owned_planner_revoke_tx(
     tx: &mut Transaction<'_, Sqlite>,
-    scope: ClaudePlannerScope<'_>,
+    provider: OwnedPlannerProvider,
+    scope: OwnedPlannerScope<'_>,
 ) -> Result<Vec<String>> {
-    let track = match scope {
-        ClaudePlannerScope::All => None,
-        ClaudePlannerScope::Track(track_id) => Some(track_id),
+    let (track, session) = match scope {
+        OwnedPlannerScope::All => (None, None),
+        OwnedPlannerScope::Track(track_id) => (Some(track_id), None),
+        OwnedPlannerScope::Session(session_id) => (None, Some(session_id)),
     };
     let ids: Vec<String> = sqlx::query_scalar(
         r#"SELECT id FROM worker_sessions
-            WHERE provider = 'claude' AND contract = 'planner'
-              AND (?1 IS NULL OR track_id = ?1)
+            WHERE provider = ?1 AND contract = 'planner'
+              AND (?2 IS NULL OR track_id = ?2)
+              AND (?3 IS NULL OR id = ?3)
             ORDER BY id"#,
     )
+    .bind(provider.as_db_str())
     .bind(track)
+    .bind(session)
     .fetch_all(&mut **tx)
     .await?;
     sqlx::query(
         r#"UPDATE worker_sessions SET mcp_token_hash = NULL
-            WHERE provider = 'claude' AND contract = 'planner'
-              AND (?1 IS NULL OR track_id = ?1)"#,
+            WHERE provider = ?1 AND contract = 'planner'
+              AND (?2 IS NULL OR track_id = ?2)"#,
     )
+    .bind(provider.as_db_str())
     .bind(track)
+    .bind(session)
     .execute(&mut **tx)
     .await?;
     Ok(ids)
+}
+
+pub async fn claude_planner_revoke_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope: ClaudePlannerScope<'_>,
+) -> Result<Vec<String>> {
+    owned_planner_revoke_tx(tx, OwnedPlannerProvider::Claude, scope).await
+}
+
+pub async fn opencode_planner_revoke_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope: OpenCodePlannerScope<'_>,
+) -> Result<Vec<String>> {
+    owned_planner_revoke_tx(tx, OwnedPlannerProvider::OpenCode, scope).await
 }
 
 pub async fn session_mark_track_root_tx(
@@ -204,6 +244,7 @@ pub(super) fn agent_provider_to_db(provider: &AgentProvider) -> &'static str {
     match provider {
         AgentProvider::Codex => "codex",
         AgentProvider::Claude => "claude",
+        AgentProvider::OpenCode => "opencode",
     }
 }
 
@@ -220,7 +261,7 @@ pub(crate) fn derive_session_identity(
         WorkerSessionKind::ClaudeCard => WorkerProviderKind::Claude,
     };
     let mode = match provider {
-        WorkerProviderKind::Codex => SessionMode::Resumable,
+        WorkerProviderKind::Codex | WorkerProviderKind::OpenCode => SessionMode::Resumable,
         WorkerProviderKind::Claude | WorkerProviderKind::Terminal => SessionMode::Ephemeral,
     };
     let contract = match kind {
@@ -482,6 +523,13 @@ pub async fn session_insert_tx(
     tx: &mut SessionTx<'_>,
     session: WorkerSession,
 ) -> Result<WorkerSession> {
+    if session.provider == WorkerProviderKind::OpenCode
+        && session.contract != WorkerContract::Planner
+    {
+        return Err(CalmError::Conflict(
+            "OpenCode requires the planner contract",
+        ));
+    }
     let handle_state_json = session
         .handle_state_json
         .as_ref()

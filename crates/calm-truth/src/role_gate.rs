@@ -44,6 +44,9 @@ pub enum RoleViolation {
     #[error("error reading authority for session {session}; denied fail-closed (#770).")]
     SessionResolutionError { session: WorkerSessionId },
 
+    #[error("session {session} provider or contract does not match its actor identity")]
+    SessionProviderContractMismatch { session: WorkerSessionId },
+
     #[error(
         "session {session} claims planner authority but its resolved card {card} is not Planner-roled (or unknown); denied fail-closed (#770)."
     )]
@@ -141,8 +144,10 @@ pub fn enforce_role(
     {
         return Err(RoleViolation::EmptyAiCardId);
     }
-    if let ActorId::AiPlannerSession(s) | ActorId::AiCodexSession(s) | ActorId::AiClaudeSession(s) =
-        actor
+    if let ActorId::AiPlannerSession(s)
+    | ActorId::AiCodexSession(s)
+    | ActorId::AiClaudeSession(s)
+    | ActorId::AiOpenCodeSession(s) = actor
         && s.as_str().is_empty()
     {
         return Err(RoleViolation::SessionActorUnresolved { session: s.clone() });
@@ -172,7 +177,8 @@ pub fn enforce_role(
             }
             ActorId::AiPlannerSession(session)
             | ActorId::AiCodexSession(session)
-            | ActorId::AiClaudeSession(session) => {
+            | ActorId::AiClaudeSession(session)
+            | ActorId::AiOpenCodeSession(session) => {
                 return Err(RoleViolation::SessionActorUnresolved {
                     session: session.clone(),
                 });
@@ -206,7 +212,8 @@ pub fn enforce_role(
             }
             ActorId::AiPlannerSession(session)
             | ActorId::AiCodexSession(session)
-            | ActorId::AiClaudeSession(session) => {
+            | ActorId::AiClaudeSession(session)
+            | ActorId::AiOpenCodeSession(session) => {
                 return Err(RoleViolation::SessionActorUnresolved {
                     session: session.clone(),
                 });
@@ -236,7 +243,8 @@ pub fn enforce_role(
             }
             ActorId::AiPlannerSession(session)
             | ActorId::AiCodexSession(session)
-            | ActorId::AiClaudeSession(session) => {
+            | ActorId::AiClaudeSession(session)
+            | ActorId::AiOpenCodeSession(session) => {
                 return Err(RoleViolation::SessionActorUnresolved {
                     session: session.clone(),
                 });
@@ -271,7 +279,8 @@ pub fn enforce_role(
             }
             ActorId::AiPlannerSession(session)
             | ActorId::AiCodexSession(session)
-            | ActorId::AiClaudeSession(session) => {
+            | ActorId::AiClaudeSession(session)
+            | ActorId::AiOpenCodeSession(session) => {
                 return Err(RoleViolation::SessionActorUnresolved {
                     session: session.clone(),
                 });
@@ -312,7 +321,8 @@ pub fn enforce_role(
             }
             ActorId::AiPlannerSession(session)
             | ActorId::AiCodexSession(session)
-            | ActorId::AiClaudeSession(session) => {
+            | ActorId::AiClaudeSession(session)
+            | ActorId::AiOpenCodeSession(session) => {
                 return Err(RoleViolation::SessionActorUnresolved {
                     session: session.clone(),
                 });
@@ -341,7 +351,8 @@ pub fn enforce_role(
             }
             ActorId::AiPlannerSession(session)
             | ActorId::AiCodexSession(session)
-            | ActorId::AiClaudeSession(session) => {
+            | ActorId::AiClaudeSession(session)
+            | ActorId::AiOpenCodeSession(session) => {
                 return Err(RoleViolation::SessionActorUnresolved {
                     session: session.clone(),
                 });
@@ -432,8 +443,10 @@ pub fn enforce_role(
     // (3) Worker/ReportCard self-scope + (5) unknown-card deny. The scope's card,
     // track AND area must all match the card's home: a forged `track` or `area`
     // would fan the event out to another track's or area's subscribers.
-    if let ActorId::AiPlannerSession(s) | ActorId::AiCodexSession(s) | ActorId::AiClaudeSession(s) =
-        actor
+    if let ActorId::AiPlannerSession(s)
+    | ActorId::AiCodexSession(s)
+    | ActorId::AiClaudeSession(s)
+    | ActorId::AiOpenCodeSession(s) = actor
     {
         return Err(RoleViolation::SessionActorUnresolved { session: s.clone() });
     }

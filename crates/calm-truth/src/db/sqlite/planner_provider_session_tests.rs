@@ -24,6 +24,7 @@ async fn a_planner_mint_persists_the_provider_it_names() {
     for (label, provider, stored) in [
         ("planner-claude", AgentProvider::Claude, "claude"),
         ("planner-codex", AgentProvider::Codex, "codex"),
+        ("planner-opencode", AgentProvider::OpenCode, "opencode"),
     ] {
         let mut tx = repo.pool().begin().await.expect("begin");
         let card_id = create_card_in_tx(&repo, &mut tx, label, "codex").await;
@@ -64,7 +65,14 @@ async fn a_planner_mint_persists_the_provider_it_names() {
             .map(|runtime| runtime.id)
             .collect();
     planners.sort();
-    assert_eq!(planners, ["rt-planner-claude", "rt-planner-codex"]);
+    assert_eq!(
+        planners,
+        [
+            "rt-planner-claude",
+            "rt-planner-codex",
+            "rt-planner-opencode"
+        ]
+    );
 }
 
 #[tokio::test]
