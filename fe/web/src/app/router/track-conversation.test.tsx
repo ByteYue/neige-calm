@@ -950,6 +950,24 @@ describe('track conversations', () => {
     expect(inputBodies(requests)[1]).toEqual({ text: '', attachments: [ATTACHMENT_ID] });
   });
 
+  it('shows the unconfirmed stop reason once and blocks further sends', async () => {
+    const reason = 'The stop request timed out before the model confirmed that this turn had stopped.';
+    const { requests } = setup((request) => request.path.endsWith('/planner/run')
+      ? ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'wedged', model: null,
+        reasoning_effort: null, blocked_reason: reason }) : undefined);
+    fireEvent.click(await screen.findByRole('button', { name: /Conversation Assistant/ }));
+    const disclosure = await screen.findByRole('button', { name: 'Conversation paused', expanded: false });
+    fireEvent.click(disclosure);
+    expect(screen.getAllByText(reason, { exact: true })).toHaveLength(1);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('separator')).toBeTruthy();
+    expect(messageField().getAttribute('contenteditable')).toBe('false');
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull();
+    fireEvent.keyDown(messageField(), { key: 'Enter' });
+    expect(requests.filter((request) => request.path.endsWith('/planner/input'))).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'Start a new conversation' })).toBeNull();
+  });
+
   it('[F6] replaces stale Working with a stuck explanation and preserves the unsent draft', async () => {
     let phase = 'turn_running';
     const { client, requests } = setup((request) => {
@@ -962,7 +980,8 @@ describe('track conversations', () => {
     await typeInto(messageField(), 'Draft written before the stall');
     phase = 'wedged';
     await act(async () => { await client.invalidateQueries({ queryKey: ['planner-run', ASSISTANT_CARD.id] }); });
-    expect((await screen.findByRole('alert')).textContent).toContain('This conversation is stuck');
+    expect(await screen.findByRole('button', { name: 'Conversation paused', expanded: false })).toBeTruthy();
+    expect(screen.getByText('This conversation is stuck.', { exact: true })).toBeTruthy();
     expect(drawerWorkingMark()).toBeNull();
     expect(messageField().textContent).toBe('Draft written before the stall');
     expect(messageField().getAttribute('contenteditable')).toBe('false');
@@ -970,10 +989,7 @@ describe('track conversations', () => {
     fireEvent.keyDown(messageField(), { key: 'Enter' });
     expect(messageField().textContent).toBe('Draft written before the stall');
     expect(requests.filter((request) => request.path.endsWith('/planner/input'))).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Start a new conversation' }));
-    expect(await screen.findByRole('complementary', { name: 'Untitled' })).toBeTruthy();
-    expect(messageField().textContent).toBe('Draft written before the stall');
-    expect(messageField().getAttribute('contenteditable')).toBe('true');
+    expect(screen.queryByRole('button', { name: 'Start a new conversation' })).toBeNull();
   });
 
   it('[F6] stops promising queued delivery after the harness becomes wedged', async () => {
@@ -987,7 +1003,8 @@ describe('track conversations', () => {
     await screen.findByText('Queued · sends when this turn ends');
     phase = 'wedged';
     await act(async () => { await client.invalidateQueries({ queryKey: ['planner-run', ASSISTANT_CARD.id] }); });
-    expect((await screen.findByRole('alert')).textContent).toContain('This conversation is stuck');
+    expect(await screen.findByRole('button', { name: 'Conversation paused', expanded: false })).toBeTruthy();
+    expect(screen.getByText('This conversation is stuck.', { exact: true })).toBeTruthy();
     expect(within(drawerElement()).getByText('Queued before the stall')).toBeTruthy();
     expect(document.querySelector('[data-nc-queued-note]')).toBeNull();
     expect(messageField().getAttribute('contenteditable')).toBe('false');
@@ -1009,7 +1026,8 @@ describe('track conversations', () => {
     expect(drawerWorkingMark()).not.toBeNull();
     phase = 'wedged';
     await act(async () => { await client.invalidateQueries({ queryKey: ['planner-run', ASSISTANT_CARD.id] }); });
-    expect((await screen.findByRole('alert')).textContent).toContain('This conversation is stuck');
+    expect(await screen.findByRole('button', { name: 'Conversation paused', expanded: false })).toBeTruthy();
+    expect(screen.getByText('This conversation is stuck.', { exact: true })).toBeTruthy();
     expect(drawerWorkingMark()).toBeNull();
     expect(within(drawerElement()).getByText('Keep the pending message')).toBeTruthy();
     await act(async () => { release(inputAccepted()); await held; });
