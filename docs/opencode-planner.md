@@ -76,6 +76,12 @@ successful turn completion. Pending native permission/question requests are
 rejected and shown as failed activity; this increment does not add interactive
 request forms.
 
+Managed sessions disable native automatic compaction and pruning to preserve the
+original submission's message correlation and tool evidence. Context overflow
+fails visibly; reset or create a session explicitly when more context is needed.
+This first increment supports text input. Its attachment controls are disabled;
+historical image attachments remain readable.
+
 A durable submission record is written before one native prompt POST. A lost
 response retains the original request and blocks retransmission while Neige
 queries its native evidence. A confirmed never-sent record is distinguished from
