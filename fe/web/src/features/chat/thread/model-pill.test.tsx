@@ -150,6 +150,21 @@ describe('ModelPill', () => {
     expect(within(menu).queryByRole('group', { name: 'OpenCode' })).toBeNull();
   });
 
+  it.each(['separate', 'in-menu'] as const)('offers a sole optional OpenCode variant beside the native default (%s)', (effortControl) => {
+    const onChange = vi.fn();
+    const entry = model({ id: 'openai/gpt-5', model: 'openai/gpt-5', default_reasoning_effort: null,
+      supported_reasoning_efforts: [{ reasoning_effort: 'deep', description: null }] });
+    render(<ModelPill groups={[{ provider: 'opencode', catalog: catalog({ models: [entry], default_source: 'opencode_config' }), availability: null }]}
+      provider="opencode" selection={{ model: entry.model, reasoning_effort: null }} effortControl={effortControl} onChange={onChange} />);
+    if (effortControl === 'separate') fireEvent.click(screen.getByRole('button', { name: 'Variant: Default' }));
+    else openMenu(/^Model:/);
+    const menu = screen.getByRole('menu');
+    const choices = effortControl === 'separate' ? menu : within(menu).getByRole('group', { name: 'Variant' });
+    expect(within(choices).getByRole('menuitem', { name: /^Default/ })).toBeTruthy();
+    fireEvent.click(within(choices).getByRole('menuitem', { name: 'deep' }));
+    expect(onChange).toHaveBeenCalledWith({ model: entry.model, reasoning_effort: 'deep' }, 'opencode');
+  });
+
   it('names the default it is actually following, and only the name', () => {
     render(
       <ModelPill provider="codex" groups={[{ provider: 'codex', availability: null, catalog: catalog() }]} selection={FOLLOW_INSTALLATION_DEFAULT} onChange={vi.fn()} />,

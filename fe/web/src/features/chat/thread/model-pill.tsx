@@ -33,18 +33,19 @@ const SWITCH_NOTE = 'Switching to a model with a smaller context window can make
  * one per-provider flag Settings reads too.
  */
 const PROVIDERS: Readonly<Record<AgentProvider, Readonly<{
-  unavailable: string; hiddenUntilKnown: boolean; switchNote: boolean; effortLabel: string;
+  unavailable: string; hiddenUntilKnown: boolean; switchNote: boolean; effortLabel: string; minimumEfforts: number;
 }>>> = Object.freeze({
   codex: Object.freeze({
-    unavailable: 'codex is not running', hiddenUntilKnown: false, switchNote: true, effortLabel: 'Reasoning effort',
+    unavailable: 'codex is not running', hiddenUntilKnown: false, switchNote: true, effortLabel: 'Reasoning effort', minimumEfforts: 2,
   }),
   claude: Object.freeze({
     unavailable: 'Claude cannot run on this server right now', hiddenUntilKnown: true,
-    switchNote: false, effortLabel: 'Reasoning effort',
+    switchNote: false, effortLabel: 'Reasoning effort', minimumEfforts: 2,
   }),
   opencode: Object.freeze({
     unavailable: 'OpenCode cannot run on this server right now', hiddenUntilKnown: true,
-    switchNote: false, effortLabel: 'Variant',
+    /* A single optional variant still differs from following the native default. */
+    switchNote: false, effortLabel: 'Variant', minimumEfforts: 1,
   }),
 });
 
@@ -135,6 +136,7 @@ export function ModelPill({
     : chosen?.default_reasoning_effort ?? null;
   const switchNote = shown.some((group) => PROVIDERS[group.provider].switchNote);
   const effortLabel = PROVIDERS[provider].effortLabel;
+  const hasEffortChoice = efforts.length >= PROVIDERS[provider].minimumEfforts;
   const closeOnEscape = (event: KeyboardEvent<HTMLSpanElement>) => {
     if (event.key !== 'Escape' || !open) return;
     // A host Dialog's document listener would otherwise take Escape first and the trigger would not get its focus back.
@@ -182,7 +184,7 @@ export function ModelPill({
               </Fragment>
             ) : <Fragment key={group.provider}>{choices}</Fragment>;
           })}
-          {effortControl === 'in-menu' && efforts.length > 1 && (
+          {effortControl === 'in-menu' && hasEffortChoice && (
             <>
               <Divider />
               <div role="group" aria-label={effortLabel}>
@@ -202,7 +204,7 @@ export function ModelPill({
           )}
         </DropdownMenu>
       </span>
-      {effortControl === 'separate' && efforts.length > 1 && (
+      {effortControl === 'separate' && hasEffortChoice && (
         <EffortPill
           controlLabel={effortLabel}
           efforts={efforts}
