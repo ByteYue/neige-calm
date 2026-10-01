@@ -27,7 +27,9 @@ mode=open('mode').read().strip() if os.path.exists('mode') else 'complete'
 def load():
     return json.load(open(store)) if os.path.exists(store) else {'messages':[],'posts':[]}
 def save(state):
-    with open(store,'w') as file: json.dump(state,file)
+    temporary=store+'.'+str(threading.get_ident())+'.tmp'
+    with open(temporary,'w') as file: json.dump(state,file)
+    os.replace(temporary,store)
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def answer(self,value,status=200,headers={}):

@@ -73,6 +73,10 @@ async fn opencode_managed_serve_auth_config_and_stop_are_scope_isolated() {
     let first = one.client.get("/fixture").await.unwrap();
     let second = two.client.get("/fixture").await.unwrap();
     assert_eq!(
+        first["settings"]["compaction"],
+        serde_json::json!({"auto":false,"prune":false})
+    );
+    assert_eq!(
         first
             .pointer("/settings/mcp/calm/environment/NEIGE_MCP_TOKEN")
             .and_then(Value::as_str),

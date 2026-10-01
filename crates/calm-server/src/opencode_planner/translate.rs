@@ -236,6 +236,19 @@ impl TurnProjection {
                     .into(),
             ));
         }
+        // Pinned prompt.loop continues after any local tool call, including a provider's
+        // stop finish, so its settled tool output must reach the next model request first.
+        // Provider-executed tools and cleanup-marked interrupted orphans do not continue.
+        if latest["parts"].as_array().is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part["type"].as_str() == Some("tool")
+                    && part["metadata"]["providerExecuted"].as_bool() != Some(true)
+                    && !(part["state"]["status"].as_str() == Some("error")
+                        && part["state"]["metadata"]["interrupted"].as_bool() == Some(true))
+            })
+        }) {
+            return None;
+        }
         match info["finish"].as_str() {
             Some("stop") => Some(Outcome::Completed),
             Some("tool-calls" | "unknown") | None => None,

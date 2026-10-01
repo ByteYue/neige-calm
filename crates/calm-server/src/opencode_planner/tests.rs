@@ -40,12 +40,49 @@ fn opencode_completion_requires_correlated_final_message_and_settled_tools() {
             "stop",
             vec![json!({"id":"prt_tool","type":"tool","state":{"status":"completed"}})]
         )]),
+        None
+    );
+    assert_eq!(
+        p.outcome(&[assistant(
+            "stop",
+            vec![json!({"id":"prt_text","type":"text","text":"final reply"})]
+        )]),
         Some(Outcome::Completed)
     );
     assert!(matches!(
         p.outcome(&[assistant("length", vec![])]),
         Some(Outcome::Failed(_))
     ));
+}
+
+#[test]
+fn opencode_stop_with_provider_executed_or_orphaned_tool_needs_no_local_continuation() {
+    let p = projection();
+    let provider = json!({"id":"prt_provider","type":"tool","metadata":{"providerExecuted":true},"state":{"status":"completed"}});
+    assert_eq!(
+        p.outcome(&[assistant("stop", vec![provider])]),
+        Some(Outcome::Completed)
+    );
+    let orphan = json!({"id":"prt_orphan","type":"tool","state":{"status":"error","metadata":{"interrupted":true}}});
+    assert_eq!(
+        p.outcome(&[assistant("stop", vec![orphan])]),
+        Some(Outcome::Completed)
+    );
+    let local = json!({"id":"prt_local","type":"tool","state":{"status":"error","metadata":{"interrupted":false}}});
+    assert_eq!(p.outcome(&[assistant("stop", vec![local.clone()])]), None);
+    assert_eq!(p.outcome(&[assistant("length", vec![local])]), None);
+}
+
+#[test]
+fn opencode_context_overflow_is_a_native_failed_outcome_without_compaction() {
+    let p = projection();
+    let mut overflow = assistant("error", vec![]);
+    overflow["info"]["error"] =
+        json!({"name":"ContextOverflowError","data":{"message":"context exceeded"}});
+    assert_eq!(
+        p.outcome(&[overflow]),
+        Some(Outcome::Failed("context exceeded".into()))
+    );
 }
 
 #[test]

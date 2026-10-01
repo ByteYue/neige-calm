@@ -31,8 +31,10 @@ impl ServerProcess {
         config.verify_version(&env).await?;
         stop::stop(&host.instance, id).await?;
         let password = uuid::Uuid::new_v4().simple().to_string();
-        let mut settings =
-            json!({"autoupdate": false, "share":"disabled", "permission":{"question":"deny"}});
+        // Automatic compaction creates synthetic user identities. This first adapter keeps
+        // exact parent correlation and reports native context overflow instead of inventing lineage.
+        let mut settings = json!({"autoupdate": false, "share":"disabled", "permission":{"question":"deny"},
+            "compaction":{"auto":false,"prune":false}});
         if let Some(token) = token {
             settings["mcp"] = json!({"calm": {"type":"local", "command":[host.mcp_shim], "environment": {
                 "NEIGE_MCP_SOCKET":host.mcp_socket, "NEIGE_MCP_TOKEN":token,
