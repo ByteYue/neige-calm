@@ -8164,7 +8164,7 @@
           "config_read",
           "config_toml",
           "claude_cli",
-          "open_code_config",
+          "opencode_config",
           "unknown"
         ]
       },

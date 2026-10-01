@@ -135,6 +135,7 @@ pub enum DefaultSource {
     /// it resolves to. Only for a Claude Planner.
     ClaudeCli,
     /// The dedicated OpenCode profile configuration and connected native providers.
+    #[serde(rename = "opencode_config")]
     OpenCodeConfig,
     /// No default could be established: the read failed, no `card_id` was supplied, or a Claude
     /// Planner's CLI is not ready.
