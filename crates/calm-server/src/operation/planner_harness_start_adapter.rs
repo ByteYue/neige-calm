@@ -1041,18 +1041,14 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
                     "planner harness reset: the Claude Planner predecessor's stop did not confirm"
                 );
             }
-        }
-        if provider == AgentProvider::OpenCode
-            && let Some(old_id) =
-                output.output_optional_string("old_runtime_id", "planner harness")?
-            && old_id != worker_session_id
-        {
-            crate::opencode_planner::lifecycle::stop_session(
-                self.repo.as_ref(),
-                &self.opencode_host,
-                &old_id,
-            )
-            .await?;
+            if provider == AgentProvider::OpenCode {
+                crate::opencode_planner::lifecycle::stop_session(
+                    self.repo.as_ref(),
+                    &self.opencode_host,
+                    &old_worker_session_id,
+                )
+                .await?;
+            }
         }
         if let Some(existing) = output_existing_thread_id(output)? {
             return Ok(AppServerInteractOutcome::MintedAndAwaited {
