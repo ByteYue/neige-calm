@@ -99,6 +99,7 @@ fn provider_session_actor(provider: &AgentProvider, session_id: WorkerSessionId)
     match provider {
         AgentProvider::Codex => ActorId::AiCodexSession(session_id),
         AgentProvider::Claude => ActorId::AiClaudeSession(session_id),
+        AgentProvider::OpenCode => ActorId::AiOpenCodeSession(session_id),
     }
 }
 

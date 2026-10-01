@@ -695,6 +695,7 @@ mod tests {
             WorkerProviderKind::Terminal,
         ] {
             match kind {
+                WorkerProviderKind::OpenCode => continue,
                 WorkerProviderKind::Codex
                 | WorkerProviderKind::Claude
                 | WorkerProviderKind::Terminal => {}

@@ -75,6 +75,7 @@ fn parse_provider(provider: Option<&str>) -> Result<AgentProvider> {
     match provider {
         None | Some("codex") => Ok(AgentProvider::Codex),
         Some("claude") => Ok(AgentProvider::Claude),
+        Some("opencode") => Ok(AgentProvider::OpenCode),
         Some(other) => Err(CalmError::BadRequest(format!(
             "invalid provider {other:?}; expected codex or claude"
         ))),

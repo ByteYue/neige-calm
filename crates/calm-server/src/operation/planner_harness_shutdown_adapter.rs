@@ -9,6 +9,7 @@ use crate::db::Repo;
 use crate::db::sqlite::{session_mark_superseded_runtime_tx, session_projection_by_id_tx};
 use crate::error::{CalmError, Result};
 use crate::harness::HarnessRegistry;
+use crate::opencode_planner::config::OpenCodePlannerHost;
 use crate::session_projection_repo::{AgentProvider, WorkerSessionKind};
 use crate::shared_codex_appserver::SharedCodexAppServer;
 
@@ -29,6 +30,7 @@ pub struct PlannerHarnessShutdownAdapter {
     daemon: Arc<SharedCodexAppServer>,
     repo: Arc<dyn Repo>,
     claude_host: Arc<ClaudePlannerHost>,
+    opencode_host: Arc<OpenCodePlannerHost>,
 }
 
 impl PlannerHarnessShutdownAdapter {
@@ -37,12 +39,14 @@ impl PlannerHarnessShutdownAdapter {
         daemon: Arc<SharedCodexAppServer>,
         repo: Arc<dyn Repo>,
         claude_host: Arc<ClaudePlannerHost>,
+        opencode_host: Arc<OpenCodePlannerHost>,
     ) -> Self {
         Self {
             harness_registry,
             daemon,
             repo,
             claude_host,
+            opencode_host,
         }
     }
 }
@@ -128,9 +132,16 @@ impl ProviderAdapter for PlannerHarnessShutdownAdapter {
         let worker_session_id = output.output_string("runtime_id", "planner harness")?;
         // A registered harness is shut down first, whatever a row read would say; its backend names its provider.
         if let Some(harness) = self.harness_registry.remove(&worker_session_id) {
-            let claude = harness.provider() == AgentProvider::Claude;
+            let provider = harness.provider();
             harness.shutdown().await?;
-            if claude {
+            if provider == AgentProvider::OpenCode {
+                crate::opencode_planner::lifecycle::stop_session(
+                    self.repo.as_ref(),
+                    &self.opencode_host,
+                    &worker_session_id,
+                )
+                .await?;
+            } else if provider == AgentProvider::Claude {
                 self.stop_claude_planner(&worker_session_id).await;
             }
             return Ok(SpawnOutcome::Ready(SpawnHandle::NoOp));
@@ -140,6 +151,17 @@ impl ProviderAdapter for PlannerHarnessShutdownAdapter {
             .session_projection_by_id(&worker_session_id)
             .await?
         {
+            if runtime.kind == WorkerSessionKind::SharedPlanner
+                && runtime.agent_provider == Some(AgentProvider::OpenCode)
+            {
+                crate::opencode_planner::lifecycle::stop_session(
+                    self.repo.as_ref(),
+                    &self.opencode_host,
+                    &worker_session_id,
+                )
+                .await?;
+                return Ok(SpawnOutcome::Ready(SpawnHandle::NoOp));
+            }
             if runtime.kind == WorkerSessionKind::SharedPlanner
                 && runtime.agent_provider == Some(AgentProvider::Claude)
             {
@@ -244,6 +266,10 @@ mod tests {
             repo_dyn.clone(),
             Arc::new(
                 crate::claude_planner::config::ClaudePlannerHost::unconfigured_scratch().unwrap(),
+            ),
+            Arc::new(
+                crate::opencode_planner::config::OpenCodePlannerHost::unconfigured_scratch()
+                    .unwrap(),
             ),
         );
         let route_repo: Arc<dyn crate::db::RouteRepo> = repo.clone();

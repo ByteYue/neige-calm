@@ -427,6 +427,12 @@ impl PreparedAreaDeletion {
                 track.id.as_str(),
             )
             .await?;
+            crate::opencode_planner::lifecycle::sweep_track(
+                route.repo.as_ref(),
+                &route.opencode_planner,
+                track.id.as_str(),
+            )
+            .await?;
             for thread_id in worker
                 .harness
                 .shutdown_track(&track.id, codex.shared_codex_appserver.clone())
@@ -725,6 +731,7 @@ async fn finish_prepared_area_deletion_owned(
             route.write.area_cache().clone(),
             codex.shared_codex_appserver.clone(),
             route.claude_planner_wiring(),
+            route.opencode_planner_wiring(),
             worker.harness.clone(),
             route.track_delete_locks.clone(),
         );

@@ -25,6 +25,7 @@ use crate::event::Event;
 use crate::event::EventBus;
 use crate::ids::{CardId, TrackId};
 use crate::model::CardRole;
+use crate::opencode_planner::wiring::{OpenCodePlannerRow, OpenCodePlannerWiring};
 use crate::per_card_lock::{KeyedLocks, lock_key};
 use crate::session_projection_repo::{
     AgentProvider, WorkerSessionKind, WorkerSessionProjection, WorkerSessionState,
@@ -125,6 +126,7 @@ pub async fn spawn_recovered_harness(
     track_area_cache: TrackAreaCache,
     daemon: Arc<SharedCodexAppServer>,
     claude: &ClaudePlannerWiring,
+    opencode: &OpenCodePlannerWiring,
     registry: &HarnessRegistry,
     track_delete_locks: &KeyedLocks,
     runtime: WorkerSessionProjection,
@@ -256,6 +258,23 @@ pub async fn spawn_recovered_harness(
     };
     let backend: PlannerBackend = match provider {
         AgentProvider::Codex => daemon.into(),
+        AgentProvider::OpenCode => PlannerBackend::OpenCode(
+            opencode
+                .open_session(
+                    repo.clone(),
+                    daemon,
+                    OpenCodePlannerRow {
+                        worker_session_id: &runtime.id,
+                        card_id: &runtime.card_id,
+                        track_id: card.track_id.as_str(),
+                        prior_total_tokens: snapshot
+                            .token_usage
+                            .as_ref()
+                            .map_or(0, |usage| usage.total_tokens),
+                    },
+                )
+                .await?,
+        ),
         AgentProvider::Claude => {
             record_interrupted_claude_turn(
                 repo.as_ref(),
@@ -430,13 +449,16 @@ pub enum BootRows {
     All,
     /// The shared Codex daemon did not start: only Claude Planner rows, which do not need it; the
     /// deferred pass takes the rest once the daemon heals.
-    ClaudePlannersOnly,
+    IndependentPlannersOnly,
 }
 
 /// A Claude Planner row: recovered at boot whatever the Codex daemon does, never by the deferred pass.
-fn is_claude_planner_row(runtime: &WorkerSessionProjection) -> bool {
+fn is_independent_planner_row(runtime: &WorkerSessionProjection) -> bool {
     runtime.kind == WorkerSessionKind::SharedPlanner
-        && runtime.agent_provider == Some(AgentProvider::Claude)
+        && matches!(
+            runtime.agent_provider,
+            Some(AgentProvider::Claude | AgentProvider::OpenCode)
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,6 +469,7 @@ pub async fn recover_harnesses_on_boot(
     track_area_cache: TrackAreaCache,
     daemon: Arc<SharedCodexAppServer>,
     claude: &ClaudePlannerWiring,
+    opencode: &OpenCodePlannerWiring,
     registry: &HarnessRegistry,
     track_delete_locks: &KeyedLocks,
     rows: BootRows,
@@ -454,7 +477,7 @@ pub async fn recover_harnesses_on_boot(
     let runtimes = repo.session_projection_recover_harnesses_on_boot().await?;
     let mut recovered = 0usize;
     for runtime in runtimes {
-        if rows == BootRows::ClaudePlannersOnly && !is_claude_planner_row(&runtime) {
+        if rows == BootRows::IndependentPlannersOnly && !is_independent_planner_row(&runtime) {
             continue;
         }
         let runtime_id = runtime.id.clone();
@@ -465,6 +488,7 @@ pub async fn recover_harnesses_on_boot(
             track_area_cache.clone(),
             daemon.clone(),
             claude,
+            opencode,
             registry,
             track_delete_locks,
             runtime,
@@ -492,6 +516,7 @@ pub struct HarnessRecoveryContext {
     track_area_cache: TrackAreaCache,
     daemon: Arc<SharedCodexAppServer>,
     claude: ClaudePlannerWiring,
+    opencode: OpenCodePlannerWiring,
     registry: HarnessRegistry,
     track_delete_locks: KeyedLocks,
 }
@@ -505,6 +530,7 @@ impl HarnessRecoveryContext {
         track_area_cache: TrackAreaCache,
         daemon: Arc<SharedCodexAppServer>,
         claude: ClaudePlannerWiring,
+        opencode: OpenCodePlannerWiring,
         registry: HarnessRegistry,
         track_delete_locks: KeyedLocks,
     ) -> Self {
@@ -515,6 +541,7 @@ impl HarnessRecoveryContext {
             track_area_cache,
             daemon,
             claude,
+            opencode,
             registry,
             track_delete_locks,
         }
@@ -551,6 +578,7 @@ pub async fn recover_harnesses_for_tracks(
             context.track_area_cache.clone(),
             context.daemon.clone(),
             &context.claude,
+            &context.opencode,
             &context.registry,
             &context.track_delete_locks,
             runtime,
@@ -582,6 +610,7 @@ pub struct DeferredRecoveryParams {
     pub track_area_cache: TrackAreaCache,
     pub daemon: Arc<SharedCodexAppServer>,
     pub claude: ClaudePlannerWiring,
+    pub opencode: OpenCodePlannerWiring,
     pub registry: HarnessRegistry,
     pub track_delete_locks: KeyedLocks,
     /// Fixtures-only race hook: fired once per runtime AFTER the eligibility check and BEFORE
@@ -630,7 +659,7 @@ pub async fn recover_harnesses_deferred(params: DeferredRecoveryParams) {
         let mut recovered = 0usize;
         for runtime in runtimes {
             // Boot already recovered these: they never waited for the daemon.
-            if is_claude_planner_row(&runtime) {
+            if is_independent_planner_row(&runtime) {
                 continue;
             }
             // Per-runtime eligibility: still running, same generation as the readiness we acted on.
@@ -655,6 +684,7 @@ pub async fn recover_harnesses_deferred(params: DeferredRecoveryParams) {
                 params.track_area_cache.clone(),
                 params.daemon.clone(),
                 &params.claude,
+                &params.opencode,
                 &params.registry,
                 &params.track_delete_locks,
                 runtime,
@@ -1119,6 +1149,7 @@ mod tests {
             track_area_cache,
             daemon.clone(),
             &ClaudePlannerWiring::unconfigured_for_test(repo.clone()),
+            &OpenCodePlannerWiring::unconfigured_for_test(repo.clone()),
             &registry,
             &crate::per_card_lock::new_keyed_locks(),
             runtime,

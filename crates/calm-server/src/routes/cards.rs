@@ -1293,6 +1293,10 @@ async fn ensure_live_planner_harness(
         && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::Claude)
     {
         s.claude_planner.check_ready().await?;
+    } else if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
+        && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::OpenCode)
+    {
+        s.opencode_planner.check_ready().await?;
     } else if !cs.shared_codex_appserver.is_running() {
         return Err(CalmError::ServiceUnavailable(
             cs.shared_codex_appserver.not_running_message(),
@@ -1306,6 +1310,7 @@ async fn ensure_live_planner_harness(
         s.write.area_cache().clone(),
         cs.shared_codex_appserver.clone(),
         &s.claude_planner_wiring(),
+        &s.opencode_planner_wiring(),
         &s.harness,
         &s.track_delete_locks,
         runtime.clone(),

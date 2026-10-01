@@ -270,7 +270,7 @@ impl<'a> IssueTurnHandle<'a> {
         input: Vec<InputItem>,
         selection: &TurnModelSelection,
         client_user_message_id: &str,
-    ) -> Result<String> {
+    ) -> Result<crate::planner_submission::TurnAdmission> {
         self.backend
             .turn_start(thread_id, input, selection, client_user_message_id)
             .await
@@ -692,14 +692,14 @@ impl PlannerHarness {
         let _issuance_guard = self.inner.issuance.lock().await;
         self.persist_snapshot().await?;
         let mut interrupt_error = None;
-        if let PlannerBackend::Claude(session) = &self.inner.backend {
+        if !matches!(self.inner.backend, PlannerBackend::Codex(_)) {
             // #1791 §5.1: the running turn is recorded `Interrupted` and this waits for `stop`,
             // whether or not a turn runs or a thread is known.
-            if let Err(e) = session.shutdown().await {
+            if let Err(e) = self.inner.backend.shutdown_managed().await {
                 tracing::warn!(
                     worker_session_id = %self.inner.worker_session_id,
                     error = %e,
-                    "planner harness shutdown: the Claude Planner stop did not confirm"
+                    "planner harness shutdown: managed backend stop did not confirm"
                 );
                 interrupt_error = Some(e);
             }
@@ -767,7 +767,7 @@ impl PlannerHarness {
     ) -> Option<Arc<crate::claude_planner::session::ClaudePlannerSession>> {
         match &self.inner.backend {
             PlannerBackend::Claude(session) => Some(Arc::clone(session)),
-            PlannerBackend::Codex(_) => None,
+            PlannerBackend::Codex(_) | PlannerBackend::OpenCode(_) => None,
         }
     }
 
@@ -1826,6 +1826,26 @@ async fn on_notification(inner: &Arc<Inner>, notif: Notification) -> Result<()> 
         return Ok(());
     }
 
+    if let Notification::Other { method, params } = &notif
+        && method == "opencode/submission/unknown"
+        && inner.backend.provider() == crate::session_projection_repo::AgentProvider::OpenCode
+    {
+        let turn_id = params["turnId"].as_str().ok_or_else(|| {
+            CalmError::Internal("OpenCode unknown admission lacks a turn identity".into())
+        })?;
+        let reason = params["message"]
+            .as_str()
+            .unwrap_or("OpenCode submission outcome is unknown");
+        *inner.issuance_block.lock().await = Some(reason.into());
+        *inner.issued_turn_id.lock().await = Some(turn_id.into());
+        *inner.state.lock().await = HarnessState::TurnRunning {
+            turn_id: turn_id.into(),
+            started_at: Instant::now(),
+        };
+        persist_snapshot(inner).await?;
+        return Ok(());
+    }
+
     match notif {
         Notification::ThreadStarted { params } => {
             if let Some(thread_id) = crate::shared_codex_appserver::thread_id_from_started(&params)
@@ -2434,6 +2454,16 @@ async fn resolve_model_selection_for_issue(
                 ));
             }
         },
+        PlannerBackend::OpenCode(session) => {
+            session.host().configured().map_err(|error| {
+                IssuanceRefusal::needs_a_choice(
+                    error.to_string(),
+                    "OpenCode Planner needs a server configuration; your message remains queued."
+                        .into(),
+                )
+            })?;
+            true
+        }
         PlannerBackend::Codex(_) => false,
     };
     let card = match inner.repo.card_get(inner.card_id.as_str()).await {
@@ -2454,8 +2484,13 @@ async fn resolve_model_selection_for_issue(
     };
     if claude {
         // #1822 6′: no catalog is consulted at issue; the CLI judges the model it is given.
-        return crate::claude_planner::models::turn_selection(&card.payload)
-            .map_err(|(log, reader)| IssuanceRefusal::needs_a_choice(log, reader));
+        let selection = match &inner.backend {
+            PlannerBackend::OpenCode(_) => {
+                crate::opencode_planner::models::turn_selection(&card.payload)
+            }
+            _ => crate::claude_planner::models::turn_selection(&card.payload),
+        };
+        return selection.map_err(|(log, reader)| IssuanceRefusal::needs_a_choice(log, reader));
     }
     resolve_model_selection(inner, &card.payload).await
 }
@@ -2479,7 +2514,10 @@ fn classify_codex_failure(
     log: String,
     refused: impl FnOnce(String) -> IssuanceRefusal,
 ) -> IssuanceRefusal {
-    if matches!(e, CalmError::CodexRefused(_)) {
+    if matches!(
+        e,
+        CalmError::CodexRefused(_) | CalmError::PlannerProviderRefused(_)
+    ) {
         refused(log)
     } else {
         IssuanceRefusal::retryable(log)
@@ -2495,15 +2533,16 @@ impl IssuanceRefusal {
         }
     }
 
-    /// Codex answered and refused. Says so, and promises nothing.
+    /// The provider answered and refused. No external operation was admitted.
     fn rejected(log: String) -> Self {
         Self {
             kind: FailureKind::Rejected,
             log,
-            reader: "codex refused to start a turn for this conversation, so your message has \
+            reader:
+                "the provider refused to start a turn for this conversation, so your message has \
                      not been sent. If you changed the model recently, it may not be one this \
                      account can run — try another."
-                .into(),
+                    .into(),
         }
     }
 
@@ -2620,6 +2659,7 @@ async fn transient_notice(inner: &Arc<Inner>) -> Option<String> {
     let provider = match inner.backend.provider() {
         crate::session_projection_repo::AgentProvider::Codex => "codex",
         crate::session_projection_repo::AgentProvider::Claude => "claude",
+        crate::session_projection_repo::AgentProvider::OpenCode => "opencode",
     };
     (now.duration_since(began) >= inner.config.transient_silence_budget).then(|| {
         format!(
@@ -3236,6 +3276,20 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
         Ok::<_, IssueFailure>(turn)
     }
     .await;
+    // An unknown external attempt is an admitted local turn, never a retryable batch.
+    let (issued, unknown_reason) = match issued {
+        Ok(crate::planner_submission::TurnAdmission::Accepted { turn_id }) => (Ok(turn_id), None),
+        Ok(crate::planner_submission::TurnAdmission::Unknown { turn_id, reason }) => {
+            (Ok(turn_id), Some(reason))
+        }
+        Ok(crate::planner_submission::TurnAdmission::Rejected { reason }) => (
+            Err(IssueFailure::TurnStart(CalmError::PlannerProviderRefused(
+                reason,
+            ))),
+            None,
+        ),
+        Err(error) => (Err(error), None),
+    };
     match issued {
         Ok(turn_id) => {
             tracing::debug!(
@@ -3249,13 +3303,20 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
             );
             // A turn that went out ends the run of refusals, so the notice and
             // the clock behind it both go with it.
-            *inner.issuance_block.lock().await = None;
+            *inner.issuance_block.lock().await = unknown_reason.clone();
             *inner.refusing_since.lock().await = None;
             *inner.last_turn_id.lock().await = Some(turn_id.clone());
             *inner.issued_turn_id.lock().await = Some(turn_id.clone());
             *inner.issued_turn_head.lock().await = diff.current_head.clone();
             // Cleared in the same snapshot that empties the queue, so no restart can pair this key with a later batch.
-            *inner.projection_client_id.lock().await = None;
+            if unknown_reason.is_none() {
+                *inner.projection_client_id.lock().await = None;
+            } else {
+                *inner.state.lock().await = HarnessState::TurnRunning {
+                    turn_id: turn_id.clone(),
+                    started_at: Instant::now(),
+                };
+            }
             persist_issuance_outcome(inner).await?;
         }
         Err(failure) => {
@@ -3518,7 +3579,7 @@ async fn watchdog_tick(inner: &Arc<Inner>) -> Result<()> {
             _ => false,
         }
     };
-    if resume_elapsed {
+    if resume_elapsed && !inner.backend.has_unresolved_submission().await? {
         let mut state = inner.state.lock().await;
         if let HarnessState::Resumed { resumed_at } = &*state
             && Instant::now().duration_since(*resumed_at) >= inner.config.resumed_reconcile_budget
