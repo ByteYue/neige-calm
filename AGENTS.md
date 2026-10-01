@@ -44,6 +44,27 @@ worktree with destructive commands such as `git checkout` or `git reset --hard`.
 - Convergence means no unresolved blocking finding, no unexplained test failure,
   all required checks actually green, and no unrelated or generated-file drift.
 
+## Architecture review priorities
+
+Both review channels must explicitly check these three points for implementation
+changes, using the real call paths and ownership layers:
+
+- **Abstraction boundaries:** keep domain rules in their owning component,
+  template, or feature. The kernel owns generic lifecycle and authorization;
+  adapters and UI consume declared contracts rather than infer domain policy.
+- **Duplicate logic:** look for parallel implementations of the same behavior
+  across callers, backends, and sibling branches. Reuse one authoritative entry
+  point in the appropriate owner layer instead of copying policy into adapters
+  or test fixtures.
+- **Hardcoded application assumptions:** use registration, metadata, and typed
+  configuration for extensible relationships. Do not special-case application,
+  template, or plugin identities in generic layers. Fixed protocol identifiers
+  and intentional closed sets remain valid when defined in their owning layer
+  and checked against their contract; do not make them configurable needlessly.
+
+Record actionable findings with source evidence. Explain intentional exceptions
+in the pull request so reviewers can assess the boundary and maintenance cost.
+
 ## Contracts and code
 
 - Model required fields as required types. Do not hide missing values with
