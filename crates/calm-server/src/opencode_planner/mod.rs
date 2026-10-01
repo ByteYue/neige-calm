@@ -17,3 +17,6 @@ pub mod wiring;
 mod process_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod session_tests;

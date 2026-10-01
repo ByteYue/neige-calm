@@ -146,11 +146,13 @@ impl ServerProcess {
     }
 
     pub(crate) async fn shutdown(&mut self, host: &OpenCodePlannerHost, id: &str) -> Result<()> {
-        stop::stop(&host.instance, id).await?;
+        let sweep = stop::stop(&host.instance, id).await;
         let _ = self.child.start_kill();
-        tokio::time::timeout(Duration::from_secs(3), self.child.wait())
+        let reap = tokio::time::timeout(Duration::from_secs(3), self.child.wait())
             .await
-            .map_err(|_| CalmError::Conflict("OpenCode direct child did not reap".into()))??;
+            .map_err(|_| CalmError::Conflict("OpenCode direct child did not reap".into()));
+        sweep?;
+        reap??;
         self.stopped = true;
         Ok(())
     }

@@ -299,7 +299,7 @@ async fn reject_pending(
     Ok(())
 }
 
-async fn snapshot(
+pub(crate) async fn snapshot(
     client: &Client,
     native: &str,
     submission: &OpenCodeSubmission,
