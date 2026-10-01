@@ -573,3 +573,6 @@ async fn card_delete_succeeds_when_card_has_no_terminal() {
             .is_none()
     );
 }
+
+#[path = "terminal_lifecycle_task_delete.rs"]
+mod task_delete;
