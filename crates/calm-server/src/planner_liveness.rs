@@ -16,7 +16,7 @@ impl WorkerProvider for OpenCodePlannerProvider {
         "opencode"
     }
     fn session_mode(&self) -> SessionMode {
-        SessionMode::Ephemeral
+        SessionMode::Resumable
     }
     async fn probe_liveness(
         &self,

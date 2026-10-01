@@ -423,10 +423,10 @@ async fn opencode_production_recovery_identity_error_cleans_up_and_keeps_unknown
     session.mark_installed();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Notification::Other { method, .. } = notifications.recv().await.unwrap() {
-                if method == "opencode/submission/unknown" {
-                    break;
-                }
+            if let Notification::Other { method, .. } = notifications.recv().await.unwrap()
+                && method == "opencode/submission/unknown"
+            {
+                break;
             }
         }
     })

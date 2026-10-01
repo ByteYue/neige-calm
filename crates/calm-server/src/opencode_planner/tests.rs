@@ -258,12 +258,17 @@ fn opencode_denied_loop_return_requires_matching_response_and_settled_tool_evide
         vec![json!({"id":"prt_denied","type":"tool","state":{"status":"error","error":"denied"}})],
     );
     assert!(matches!(
-        p.denied_loop_return(&[denied.clone()], &denied, "ses_owned", "rejected"),
+        p.denied_loop_return(
+            std::slice::from_ref(&denied),
+            &denied,
+            "ses_owned",
+            "rejected"
+        ),
         Some(Outcome::Failed(_))
     ));
     assert_eq!(
         p.denied_loop_return(
-            &[denied.clone()],
+            std::slice::from_ref(&denied),
             &json!({"status":"idle"}),
             "ses_owned",
             "rejected"
@@ -273,7 +278,12 @@ fn opencode_denied_loop_return_requires_matching_response_and_settled_tool_evide
     let mut foreign = denied.clone();
     foreign["info"]["parentID"] = json!("msg_foreign");
     assert_eq!(
-        p.denied_loop_return(&[denied.clone()], &foreign, "ses_owned", "rejected"),
+        p.denied_loop_return(
+            std::slice::from_ref(&denied),
+            &foreign,
+            "ses_owned",
+            "rejected"
+        ),
         None
     );
     let mut pending = denied.clone();
