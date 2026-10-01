@@ -102,6 +102,7 @@ pub(crate) async fn adopt(
     let Some(receipt) = receipt else {
         return Ok(None);
     };
+    session.adopt_recovery_binding(&receipt).await?;
     // IssuingTurn is the pre-drain checkpoint. Later phases already committed the drain;
     // their pending queue belongs to later input, even when its text happens to match.
     if snapshot.phase == HarnessPhaseTag::IssuingTurn && !snapshot.pending_entries().is_empty() {

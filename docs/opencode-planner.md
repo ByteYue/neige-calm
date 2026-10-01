@@ -52,6 +52,12 @@ A selected model is the full native `providerID/modelID`; **Variant** shows the
 variants declared by that model. Clearing the model follows the configured
 profile default. Select an explicit model when that default is unavailable.
 
+The dedicated profile's credentials, model and native permission rules are read
+when a managed server starts. Allow the specific external directories needed by
+your operational commands in that profile. For example, a read-only memory
+check that reads `/proc/meminfo` needs an `external_directory` rule for `/proc/*`.
+Requests requiring an interactive approval are rejected by this first increment.
+
 ## Behavior and boundaries
 
 Neige creates a private, authenticated loopback OpenCode server for a Planner's
@@ -59,6 +65,8 @@ native session. Each instance receives that Planner's MCP credential. Workspace
 instruction files are included explicitly; workspace OpenCode configuration is
 disabled so it cannot replace the managed credential or process configuration.
 Ordinary operating-system tools remain available. This is not an OS sandbox.
+The serve process and its MCP shim receive only the current Planner's scoped
+Neige credential; its shell can use `neige state`, `neige ls` and `neige cat`.
 
 The existing Harness owns pending input and transcript storage. Native message
 and part identities reconcile assistant text, command execution and tool output
@@ -76,6 +84,11 @@ than moving its observer to a new thread. Stop requests cancellation and cleans
 up owned processes; an uncertain outcome remains uncertain. Boot, reset, deletion
 and workspace repoint revoke the relevant Planner credentials and stop owned
 processes. Deletion retains the submission journal.
+
+Submission generation `0` identifies this first adapter configuration format;
+it is not a profile-content digest or a credential revocation epoch. The recorded
+submission freezes its resolved model, variant, instructions and input. Reloading
+the private profile never authorizes resending an uncertain submission.
 
 ## Why HTTP first
 

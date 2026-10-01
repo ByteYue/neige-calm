@@ -4258,7 +4258,7 @@
           {
             "name": "provider",
             "in": "query",
-            "description": "Agent provider: codex or claude; defaults to codex",
+            "description": "Agent provider: codex, claude or opencode; defaults to codex",
             "required": false,
             "schema": {
               "type": "string"
