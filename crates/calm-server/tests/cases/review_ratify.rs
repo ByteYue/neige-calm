@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use calm_server::builtin_plugins::dev::review::TOOL_REVIEW_ROUND;
 use calm_server::card_role_cache::CardRoleCache;
 use calm_server::db::RepoEventWrite;
 use calm_server::db::prelude::*;
@@ -15,7 +16,7 @@ use calm_server::event::{
 };
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
 use calm_server::mcp_server::registry::AppContext;
-use calm_server::mcp_server::tools::review::{TOOL_RATIFY_REQUEST, TOOL_REVIEW_ROUND};
+use calm_server::mcp_server::tools::review::TOOL_RATIFY_REQUEST;
 use calm_server::mcp_server::{ToolCallIdentity, ToolRegistry};
 use calm_server::model::{CardRole, NewArea, NewCard, NewTrack, TrackPatch};
 use calm_server::plugin_host::{PluginHost, PluginRegistry};
@@ -117,7 +118,7 @@ async fn boot() -> Boot {
             sort: None,
             cwd: String::new(),
             template_id: None,
-            plugin_scope: None,
+            plugin_scope: Some("dev.neige.git-forge".into()),
             attach_folder: false,
             theme: calm_server::routes::theme::RequestTheme::default_dark(),
         })
@@ -153,22 +154,22 @@ async fn boot() -> Boot {
     let track_area_cache = calm_server::track_area_cache::TrackAreaCache::new();
     repo.seed_track_area_cache(&track_area_cache).await.unwrap();
 
+    let host = Arc::new(PluginHost::new_full(
+        Arc::new(PluginRegistry::empty().with_builtins()),
+        repo.clone(),
+        PathBuf::new(),
+        std::env::temp_dir().join("calm-plugins-data-review-ratify"),
+        Vec::new(),
+        EventBus::new(),
+        calm_server::state::WriteContext::new(card_role_cache.clone(), track_area_cache.clone()),
+    ));
+    host.reconcile_builtins().await.unwrap();
+    host.enable("dev.neige.git-forge").await.unwrap();
     let state = AppState::from_parts(
         repo.clone(),
         events.clone(),
         Arc::new(DaemonClient::new_stub()),
-        Arc::new(PluginHost::new_full(
-            Arc::new(PluginRegistry::empty()),
-            repo.clone(),
-            PathBuf::new(),
-            std::env::temp_dir().join("calm-plugins-data-review-ratify"),
-            Vec::new(),
-            EventBus::new(),
-            calm_server::state::WriteContext::new(
-                card_role_cache.clone(),
-                track_area_cache.clone(),
-            ),
-        )),
+        host.clone(),
         Arc::new(CodexClient::new_stub()),
         Some(card_role_cache.clone()),
         Some(track_area_cache.clone()),
@@ -204,6 +205,7 @@ async fn boot() -> Boot {
         preview: Arc::new(calm_server::preview::PreviewRegistry::disabled()),
         sqlite_pool: repo.sqlite_pool(),
     });
+    assert!(ctx.plugin_host.set(host).is_ok());
     let mut registry = ToolRegistry::new();
     calm_server::mcp_server::tools::register_default_tools(&mut registry);
 

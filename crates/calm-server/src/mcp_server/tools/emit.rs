@@ -20,7 +20,6 @@ use std::sync::Arc;
 const TOOL_DISPATCH_REQUEST: &str = "calm.dispatch_request";
 pub const TOOL_TASK_COMPLETE: &str = "calm.task.complete";
 pub const TOOL_TASK_FAIL: &str = "calm.task.fail";
-pub(crate) const GIT_FORGE_PLUGIN_ID: &str = "dev.neige.git-forge";
 
 pub fn register_into(registry: &mut ToolRegistry) {
     registry.register(dispatch_request_descriptor(), wrap(dispatch_request));

@@ -3791,7 +3791,21 @@ async fn every_connector_kind_spawns_through_the_shared_config_gate() {
     write_connector(&b.plugins_dir, &stub.url(), 5_000, 0o600);
     write_configured_cli_connector(&b.plugins_dir, &script.display().to_string(), false);
 
-    let host = b.host();
+    let (registry, report) = PluginRegistry::load_from_dir(&b.plugins_dir).unwrap();
+    assert!(report.skipped.is_empty());
+    let host = Arc::new(PluginHost::new_full(
+        Arc::new(registry.with_builtins()),
+        b.repo.clone(),
+        b.plugins_dir.clone(),
+        b.plugins_data_dir.clone(),
+        Vec::new(),
+        b.events.clone(),
+        calm_server::state::WriteContext::new(
+            calm_server::card_role_cache::CardRoleCache::new(),
+            calm_server::track_area_cache::TrackAreaCache::new(),
+        ),
+    ));
+    host.reconcile_builtins().await.unwrap();
     let kinds = all_connector_kinds();
     assert!(
         kinds.len() >= 3 && kinds.iter().any(|k| k == "app"),
@@ -3804,13 +3818,18 @@ async fn every_connector_kind_spawns_through_the_shared_config_gate() {
             "app" => APP_ID,
             "mcp-http" => CONNECTOR_ID,
             "cli-query" => CLI_CONFIG_ID,
+            "builtin" => "dev.neige.git-forge",
             other => panic!(
                 "#1284 §4.7: no spawn fixture for `kind: {other}`. Every kind's spawn \
                  path must go through `config_for_spawn_or_unavailable`; add a fixture \
                  here rather than trusting the kinds that existed when this was written"
             ),
         };
-        seed_row(&b, id).await;
+        if kind == "builtin" {
+            b.repo.plugin_update_enabled(id, true).await.unwrap();
+        } else {
+            seed_row(&b, id).await;
+        }
         host.spawn(id)
             .await
             .unwrap_or_else(|e| panic!("`{kind}` fixture must spawn: {e}"));
@@ -3867,3 +3886,98 @@ async fn a_config_gate_breach_is_counted_not_only_logged() {
 
 #[path = "connector_mcp_setup.rs"]
 mod mcp_setup;
+
+#[tokio::test]
+async fn compiled_dev_starts_after_remote_boot_budget_is_exhausted() {
+    let stub = StubServer::start(StubMode::Hang).await;
+    let b = boot().await;
+    // 6 connectors × (2 × 900ms per-request + slack) would be well over 10s
+    // serially; the overall budget must cut it far shorter than that.
+    const N: usize = 6;
+    let timeout_ms = 900;
+    for i in 0..N {
+        let id = format!("dead-connector-{i}");
+        let dir = b.plugins_dir.join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest = connector_manifest_json(&stub.url(), Budgets::uniform(timeout_ms));
+        manifest["id"] = json!(id);
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let secrets = dir.join("secrets.json");
+        std::fs::write(&secrets, json!({ SECRET_NAME: SECRET_VALUE }).to_string()).unwrap();
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+        seed_row(&b, &id).await;
+    }
+    let (registry, report) = PluginRegistry::load_from_dir(&b.plugins_dir).unwrap();
+    assert!(report.skipped.is_empty());
+    let host = Arc::new(PluginHost::new_full(
+        Arc::new(registry.with_builtins()),
+        b.repo.clone(),
+        b.plugins_dir.clone(),
+        b.plugins_data_dir.clone(),
+        Vec::new(),
+        b.events.clone(),
+        calm_server::state::WriteContext::new(
+            calm_server::card_role_cache::CardRoleCache::new(),
+            calm_server::track_area_cache::TrackAreaCache::new(),
+        ),
+    ));
+    host.reconcile_builtins().await.unwrap();
+    b.repo
+        .plugin_update_enabled("dev.neige.git-forge", true)
+        .await
+        .unwrap();
+
+    // Drive the real loop with a budget small enough to observe it firing; production supplies 30 s.
+    let budget = Duration::from_secs(2);
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        host.autospawn_enabled_within(budget),
+    )
+    .await
+    .expect("boot autospawn never returned");
+    let elapsed = started.elapsed();
+
+    // 8 s fails loudly if the loop bound is removed and still passes with the per-connector bound doing its job.
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "boot autospawn took {elapsed:?} for {N} unreachable connectors with a \
+         {budget:?} connector budget — the loop is not bounded as a whole"
+    );
+    // Every one of them is observable as a failure, not silently skipped —
+    // including the ones that never got their turn.
+    let mut budget_refusals = 0;
+    for i in 0..N {
+        let id = format!("dead-connector-{i}");
+        let status = host
+            .status(&id)
+            .await
+            .unwrap_or_else(|| panic!("{id} must leave an observable entry"));
+        let PluginRuntimeStatus::Unavailable { reason } = &status.status else {
+            panic!("{id}: {:?}", status.status);
+        };
+        if reason.contains("budget") {
+            budget_refusals += 1;
+        }
+    }
+    assert!(
+        budget_refusals > 0,
+        "with a {budget:?} budget and {N} hung connectors at least one must be \
+         refused BY the budget — otherwise this test never exercised it"
+    );
+    let dev = host.status("dev.neige.git-forge").await.unwrap();
+    assert_eq!(dev.status, PluginRuntimeStatus::Running, "{dev:?}");
+    assert_eq!(dev.pid, None);
+    assert!(
+        b.repo
+            .plugin_get_by_id("dev.neige.git-forge")
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+}

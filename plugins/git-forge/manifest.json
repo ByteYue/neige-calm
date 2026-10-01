@@ -1,12 +1,10 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 4,
   "id": "dev.neige.git-forge",
   "version": "0.1.0",
   "min_kernel_version": "0.0.1",
-  "display_name": "Git/Forge actions",
-  "entrypoint": {
-    "command": "bin/git-forge"
-  },
+  "display_name": "development",
+  "description": "Develop GitHub issues using Git worktrees, validation and pull requests. Use calm.track.publish to publish and calm.review.round to review; kernel permissions and plugin enablement still apply.",
   "exposes_tools": [
     {
       "name": "git.worktree.add",
@@ -24,7 +22,9 @@
             "description": "Optional branch name to create for the worktree"
           }
         },
-        "required": ["target"]
+        "required": [
+          "target"
+        ]
       },
       "annotations": {
         "title": "Git Worktree Add",
@@ -53,7 +53,10 @@
             "description": "Optional branch name expected after committing"
           }
         },
-        "required": ["message", "idem"]
+        "required": [
+          "message",
+          "idem"
+        ]
       },
       "annotations": {
         "title": "Git Commit",
@@ -90,7 +93,13 @@
             "description": "Pull request body"
           }
         },
-        "required": ["repo", "head", "base", "title", "body"]
+        "required": [
+          "repo",
+          "head",
+          "base",
+          "title",
+          "body"
+        ]
       },
       "annotations": {
         "title": "Create Pull Request",
@@ -119,7 +128,11 @@
             "description": "Head branch to filter pull requests"
           }
         },
-        "required": ["repo", "base", "head"]
+        "required": [
+          "repo",
+          "base",
+          "head"
+        ]
       },
       "annotations": {
         "title": "List Pull Requests",
@@ -150,7 +163,12 @@
             "description": "Head commit SHA for the diff"
           }
         },
-        "required": ["repo", "pr", "base_sha", "head_sha"]
+        "required": [
+          "repo",
+          "pr",
+          "base_sha",
+          "head_sha"
+        ]
       },
       "annotations": {
         "title": "Read Pull Request Diff",
@@ -173,11 +191,17 @@
             "description": "Pull request number"
           },
           "attempt": {
-            "type": ["string", "integer"],
+            "type": [
+              "string",
+              "integer"
+            ],
             "description": "Optional check attempt identifier"
           }
         },
-        "required": ["repo", "pr"]
+        "required": [
+          "repo",
+          "pr"
+        ]
       },
       "annotations": {
         "title": "Read Pull Request Checks",
@@ -212,7 +236,12 @@
             "description": "Optional expected head commit SHA for merge fencing"
           }
         },
-        "required": ["repo", "pr", "phase", "slice_id"]
+        "required": [
+          "repo",
+          "pr",
+          "phase",
+          "slice_id"
+        ]
       },
       "annotations": {
         "title": "Merge Pull Request",
@@ -237,7 +266,10 @@
             "description": "Issue number"
           }
         },
-        "required": ["repo", "issue"]
+        "required": [
+          "repo",
+          "issue"
+        ]
       },
       "annotations": {
         "title": "View Issue",
@@ -260,7 +292,10 @@
             "description": "Issue number"
           }
         },
-        "required": ["repo", "issue"]
+        "required": [
+          "repo",
+          "issue"
+        ]
       },
       "annotations": {
         "title": "Close Issue",
@@ -287,7 +322,10 @@
       },
       "merge_policy": {
         "type": "string",
-        "enum": ["hold-for-ratify", "auto-merge"],
+        "enum": [
+          "hold-for-ratify",
+          "auto-merge"
+        ],
         "default": "hold-for-ratify",
         "description": "hold-for-ratify (default when absent): ratify.request before gh.pr.merge; auto-merge: merge once fence F4 converges"
       },
@@ -296,7 +334,11 @@
         "description": "Optional free-form context from the requester"
       }
     },
-    "required": ["issue_url", "repo", "issue_number"],
+    "required": [
+      "issue_url",
+      "repo",
+      "issue_number"
+    ],
     "additionalProperties": false
   },
   "templates": [
@@ -304,5 +346,7 @@
       "id": "issue-development"
     }
   ],
-  "permissions": {}
+  "permissions": {},
+  "kind": "builtin",
+  "agent_tools_scope": "bound-track"
 }

@@ -30,6 +30,7 @@ diagnoses, proposed changes, or explicitly deferred work.
 | Claude Planner backend and configuration decisions | [Claude Planner](architecture/1791-claude-planner-backend.md) |
 | Track checkout, serial workers, and PR publication | [Track worktree](architecture/1830-track-worktree.md), [worker checkout](architecture/1830-s2-worker-in-track-worktree.md), [publication](architecture/1830-s3-push-pr-reclaim.md) |
 | Track open/closed state | [Track state](architecture/1876-track-open-closed.md) |
+| Built-in capabilities, fixed template ownership, and additional Track tools | [Built-in Development](architecture/1897-builtin-dev.md) |
 | Kernel-served agent CLI | [CLI architecture](architecture/1801-kernel-served-cli.md) |
 | Reports as executable plans | [Doc-as-plan design](architecture/985-doc-as-plan.md) |
 | Worker evidence, verification directories, and deferred recovery work | [Long task reliability](architecture/long-task-reliability.md) |

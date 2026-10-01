@@ -57,6 +57,8 @@ export type NewTrackDraft = Readonly<{
 export type NewTrackFormProps = Readonly<{
   /** App-composed model controls beside the send button. */
   modelControls?: ReactNode;
+  /** App-composed, read-only documentation included by the selected template. */
+  templatePluginGuides?: (templateId: string) => ReactNode;
   /** The `@` menu over this Area's reports, composed by the app: the sentence is the new track's Planner's first message. Kept stable by the caller. */
   mentionTrigger?: ChatComposerTrigger;
   submitting: boolean;
@@ -115,7 +117,7 @@ function needsInput(template: TrackTemplate | undefined): boolean {
 }
 
 export function NewTrackForm({
-  modelControls, submitting, error, templates, templatesLoaded, templatesError = null,
+  modelControls, templatePluginGuides, submitting, error, templates, templatesLoaded, templatesError = null,
   initialTemplateId, initialCwd, loadTemplate, recipes = [], onManageRecipes, listDirectory, onSubmit,
   errorAction, initialDraft, onDraftChange, submitBlocked = false, locked = false, mentionTrigger,
 }: NewTrackFormProps) {
@@ -289,9 +291,12 @@ export function NewTrackForm({
             isDisabled={submitting}
             onSubmit={submit}
             status={status}
-            input={<ChatComposerInput className={styles.input} label={TASK_LABEL} placeholder={TASK_PLACEHOLDER} isDisabled={submitting || locked}
-              /* The `@` source delays its own requests; Astryx's delay would let its per-keystroke probe search fire. */
-              {...(triggers === undefined ? {} : { triggers, debounceMs: 0 })} />}
+            input={<div className={styles.editor}>
+              {chosen !== undefined && templatePluginGuides?.(chosen.id)}
+              <ChatComposerInput className={styles.input} label={TASK_LABEL} placeholder={TASK_PLACEHOLDER} isDisabled={submitting || locked}
+                /* The `@` source delays its own requests; Astryx's delay would let its per-keystroke probe search fire. */
+                {...(triggers === undefined ? {} : { triggers, debounceMs: 0 })} />
+            </div>}
             footerActions={<ComposerPreferences browsing={browsing}
               startingPoint={{ templates, templatesLoaded, recipes, value: effectiveSelection,
                 onChange: selectStartingPoint, onManageRecipes, placement: 'above', triggerId,

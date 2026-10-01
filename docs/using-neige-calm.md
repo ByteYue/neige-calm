@@ -113,7 +113,13 @@ uncommitted changes before starting a worker; a dirty checkout is refused.
 Older attached Tracks without a Track worktree need a new Track to run these
 workers. Managed Tracks use their provisioned workspace.
 
-For an attached Track with its own worktree and an upstream, the Planner can
+Enable **development** in **Settings → Plugins** before creating an Issue development Track.
+The Issue template automatically includes its development guide. Use `@` in the
+chat input to attach a plugin's brief description; disabled installed plugins
+can also be referenced. A reference supplies context and does not enable the
+plugin or change its permissions.
+
+For a development-bound Track with its own worktree and an upstream, the Planner can
 publish through `calm.track.publish`: the kernel pushes the branch without
 forcing and opens or reuses its PR. The branch tip must be the candidate of a
 **done** task attempt. A later unverified commit cannot be published through

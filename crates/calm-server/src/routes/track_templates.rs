@@ -20,6 +20,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/track-templates", get(list_track_templates))
         .route("/api/track-templates/{id}", get(get_track_template))
+        .route(
+            "/api/track-templates/{id}/plugin-guides",
+            get(get_template_plugin_guides),
+        )
 }
 
 /// One selectable starting point for a new track. "Blank" is not in this list: it is
@@ -143,4 +147,32 @@ pub(crate) async fn get_track_template(
         instructions: template.instructions().map(str::to_string),
         body: template.recipe().body,
     }))
+}
+
+/// Documentation included by a template, independently of plugin enablement.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemplatePluginGuide {
+    pub id: String,
+    pub name: String,
+}
+
+#[utoipa::path(get, path="/api/track-templates/{id}/plugin-guides", tag="tracks",
+    params(("id"=String, Path, description="Template id")),
+    responses((status=200, description="Default plugin documentation references", body=Vec<TemplatePluginGuide>),
+        (status=404, description="Template not found", body=ErrorBody)))]
+pub(crate) async fn get_template_plugin_guides(
+    State(s): State<RouteState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<TemplatePluginGuide>>> {
+    let template = s
+        .templates
+        .get(&id)
+        .ok_or_else(|| crate::error::CalmError::NotFound(format!("template {id}")))?;
+    let guide = crate::builtin_plugins::required_owner(template.key())
+        .and_then(crate::builtin_plugins::get)
+        .map(|component| TemplatePluginGuide {
+            id: component.manifest().id.clone(),
+            name: component.manifest().display_name.clone(),
+        });
+    Ok(Json(guide.into_iter().collect()))
 }

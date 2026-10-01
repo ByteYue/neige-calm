@@ -208,6 +208,7 @@ function harness(options: {
           ? Promise.resolve({ status: 500, statusText: 'Server Error', body: { message: 'boom' } })
           : Promise.resolve({ status: 200, statusText: 'OK', body: templates });
       }
+      if (request.method === 'GET' && request.path.endsWith('/plugin-guides')) return Promise.resolve({ status: 200, statusText: 'OK', body: [] });
       if (request.method === 'GET' && request.path.startsWith('/api/track-templates/')) {
         const id = decodeURIComponent(request.path.slice('/api/track-templates/'.length));
         if (id !== 'issue-development' && id !== 'small-change') return Promise.resolve({ status: 404, statusText: 'Not Found', body: {} });

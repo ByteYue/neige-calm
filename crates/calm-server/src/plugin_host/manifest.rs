@@ -38,6 +38,10 @@ pub struct Manifest {
     #[serde(default)]
     pub kind: ConnectorKind,
 
+    /// Agent discovery/call scope, independent of the execution backend.
+    #[serde(default, skip_serializing_if = "AgentToolsScope::is_enabled")]
+    pub agent_tools_scope: AgentToolsScope,
+
     /// Remote streamable-HTTP MCP server config. Present iff `kind == McpHttp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_http: Option<McpHttpBlock>,
@@ -101,6 +105,8 @@ pub enum ConnectorKind {
     McpHttp,
     /// Read-only local query CLI.
     CliQuery,
+    /// A trusted component compiled into the kernel. Never installed from disk.
+    Builtin,
 }
 
 impl ConnectorKind {
@@ -110,12 +116,27 @@ impl ConnectorKind {
             Self::App => "app",
             Self::McpHttp => "mcp-http",
             Self::CliQuery => "cli-query",
+            Self::Builtin => "builtin",
         }
     }
 
     /// `true` for the process-backed plugin.
     pub fn is_app(self) -> bool {
         matches!(self, Self::App)
+    }
+}
+
+/// Version 4 adds opt-in Track-bound agent tools; older manifests keep their existing visibility.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentToolsScope {
+    #[default]
+    Enabled,
+    BoundTrack,
+}
+impl AgentToolsScope {
+    fn is_enabled(&self) -> bool {
+        *self == Self::Enabled
     }
 }
 
@@ -558,13 +579,20 @@ impl Manifest {
 
     /// Validate an already-deserialized manifest.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if !(1..=3).contains(&self.manifest_version) {
+        if !(1..=4).contains(&self.manifest_version) {
             return Err(ManifestError::invalid(
                 "manifest_version",
                 format!(
-                    "only manifest_version 1, 2 or 3 is accepted, got {}",
+                    "only manifest_version 1, 2, 3 or 4 is accepted, got {}",
                     self.manifest_version
                 ),
+            ));
+        }
+
+        if self.agent_tools_scope == AgentToolsScope::BoundTrack && self.manifest_version < 4 {
+            return Err(ManifestError::invalid(
+                "manifest_version",
+                "Track-bound agent tools require manifest_version 4",
             ));
         }
 
@@ -707,7 +735,7 @@ impl Manifest {
             ));
         }
         match self.kind {
-            ConnectorKind::App => {
+            ConnectorKind::App | ConnectorKind::Builtin => {
                 if self.mcp_http.is_some() {
                     return Err(ManifestError::invalid(
                         "mcp_http",
@@ -742,6 +770,18 @@ impl Manifest {
     /// Parse-time refusal of every `app`-only surface on a connector manifest. `Manifest::parse` is
     /// the single door every manifest enters through, so downstream readers never see one.
     fn reject_app_only_surfaces(&self) -> Result<(), ManifestError> {
+        if self.kind == ConnectorKind::Builtin {
+            if self.entrypoint.is_some()
+                || !self.views.is_empty()
+                || !self.permissions.grants_nothing()
+            {
+                return Err(ManifestError::invalid(
+                    "builtin",
+                    "built-in components have no executable, UI resources, or callback permissions",
+                ));
+            }
+            return Ok(());
+        }
         if self.kind.is_app() {
             return Ok(());
         }
@@ -1776,10 +1816,10 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_git_forge_manifest_declares_version_2() {
+    fn the_shipped_dev_manifest_declares_version_4() {
         let m = Manifest::parse(include_str!("../../../../plugins/git-forge/manifest.json"))
             .expect("shipped git-forge manifest");
-        assert_eq!(m.manifest_version, 2);
+        assert_eq!(m.manifest_version, 4);
         assert!(!m.templates.is_empty());
     }
 
@@ -2231,7 +2271,7 @@ mod tests {
     #[test]
     fn bad_manifest_version_fails() {
         // Probed on both sides of the accepted range: a single sample above it would stay green under `>= 1`.
-        for version in ["0", "4", "99"] {
+        for version in ["0", "5", "99"] {
             let json = format!(
                 r#"{{
             "manifest_version": {version},
@@ -2703,11 +2743,11 @@ mod connector_kind_tests {
     }
 
     #[test]
-    fn shipped_git_forge_manifest_still_parses_as_app() {
+    fn shipped_dev_manifest_parses_without_a_child_process() {
         let text = include_str!("../../../../plugins/git-forge/manifest.json");
         let m = Manifest::parse(text).expect("shipped manifest must keep parsing");
-        assert_eq!(m.kind, ConnectorKind::App);
-        assert!(m.entrypoint.is_some());
+        assert_eq!(m.kind, ConnectorKind::Builtin);
+        assert!(m.entrypoint.is_none());
     }
 
     #[test]
@@ -3834,5 +3874,38 @@ mod connector_kind_tests {
         assert!(validate_connector_tool_name("  ", "f").is_err());
         assert!(validate_connector_tool_name("two words", "f").is_err());
         assert!(validate_connector_tool_name(" pad ", "f").is_err());
+    }
+}
+
+#[cfg(test)]
+mod builtin_backend_contract {
+    #[test]
+    fn builtin_manifest_has_no_process_entrypoint() {
+        let parsed = super::Manifest::parse(
+            r#"{
+            "manifest_version": 3, "id": "dev.neige.git-forge", "version": "0.1.0",
+            "min_kernel_version": "0.1.0", "display_name": "Development", "kind": "builtin"
+        }"#,
+        );
+        assert!(
+            parsed.is_ok(),
+            "a compiled backend needs no executable: {parsed:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_scope_contract {
+    #[test]
+    fn bound_agent_tools_require_a_version_that_older_kernels_refuse() {
+        let mut value = serde_json::json!({"manifest_version":3,"id":"scope.plugin","version":"0.1.0","min_kernel_version":"0.1.0","display_name":"Scope","entrypoint":{"command":"bin/tool"},"agent_tools_scope":"bound-track"});
+        assert!(super::Manifest::parse(&value.to_string()).is_err());
+        value["manifest_version"] = serde_json::json!(4);
+        assert!(super::Manifest::parse(&value.to_string()).is_ok());
+        value["manifest_version"] = serde_json::json!(1);
+        value.as_object_mut().unwrap().remove("agent_tools_scope");
+        let legacy = super::Manifest::parse(&value.to_string()).unwrap();
+        assert_eq!(legacy.agent_tools_scope, super::AgentToolsScope::Enabled);
+        assert!(legacy.to_json().get("agent_tools_scope").is_none());
     }
 }

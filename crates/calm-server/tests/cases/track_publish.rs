@@ -17,7 +17,9 @@ use crate::git_delivery::{Fx, git, git_output, ref_target, write_executable};
 use crate::mcp_track_report::{call_tool, planner_identity};
 use crate::support::forge_env::{EnvGuard, FORGE_ENV_LOCK};
 use crate::support::gh_shim::{run_gh, write_gh_shim};
-use crate::track_worker_cwd::{candidate_commit, declare_task, wait_running, wait_task, world};
+use crate::track_worker_cwd::{
+    candidate_commit, declare_task, development_world, wait_running, wait_task,
+};
 
 const TOOL: &str = "calm.track.publish";
 
@@ -156,7 +158,7 @@ fn token_probe_hook(out: &Path) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_pushes_the_candidate_and_opens_its_pr() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c = done_candidate(fx, "a").await;
     let clone_refs = git(&fx.track_root, &["for-each-ref"]);
@@ -184,7 +186,7 @@ async fn publish_pushes_the_candidate_and_opens_its_pr() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_refuses_a_commit_made_after_the_last_attempt() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c = done_candidate(fx, "a").await;
     // The Planner's `git.commit` (`git add -A` + commit in its cwd, the track worktree).
@@ -208,7 +210,7 @@ async fn publish_refuses_a_commit_made_after_the_last_attempt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_refuses_a_failed_attempts_candidate() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     declare_task(fx, "a", json!({})).await;
     let a = wait_running(fx, "a").await;
@@ -235,7 +237,7 @@ async fn publish_refuses_a_failed_attempts_candidate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_git_never_sees_a_github_token() {
     let _env = publish_env(Some("sentinel")).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c = done_candidate(fx, "a").await;
     let seen = fx.track_root.parent().unwrap().join("pre-push-token");
@@ -258,7 +260,7 @@ async fn publish_git_never_sees_a_github_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delivery_commit_hook_never_sees_a_github_token() {
     let _env = publish_env(Some("sentinel")).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let seen = fx.track_root.parent().unwrap().join("pre-commit-token");
     hook(fx, "pre-commit", &token_probe_hook(&seen));
@@ -273,7 +275,7 @@ async fn a_delivery_commit_hook_never_sees_a_github_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_refuses_without_a_worktree_or_an_upstream() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     done_candidate(fx, "a").await;
 
@@ -306,7 +308,7 @@ async fn publish_refuses_without_a_worktree_or_an_upstream() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_candidate_is_pushed_and_reuses_the_pr() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c1 = done_candidate(fx, "a").await;
     publish(fx, "first").await.unwrap();
@@ -328,7 +330,7 @@ async fn a_second_candidate_is_pushed_and_reuses_the_pr() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_same_key_replays_and_refuses_a_moved_tip() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c1 = done_candidate(fx, "a").await;
     let first = publish(fx, "k").await.unwrap();
@@ -357,7 +359,7 @@ async fn the_same_key_replays_and_refuses_a_moved_tip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_non_fast_forward_publish_fails_and_leaves_the_remote() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     done_candidate(fx, "a").await;
     let other = fx.track_root.parent().unwrap().join("other-clone");
@@ -387,7 +389,7 @@ async fn a_non_fast_forward_publish_fails_and_leaves_the_remote() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_publish_is_retried_under_a_new_key() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c = done_candidate(fx, "a").await;
     hook(fx, "pre-push", "#!/bin/sh\nexit 1\n");
@@ -411,7 +413,7 @@ async fn a_failed_publish_is_retried_under_a_new_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_publish_result_url_is_the_pr_url() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     done_candidate(fx, "a").await;
 
@@ -429,7 +431,7 @@ async fn the_publish_result_url_is_the_pr_url() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_push_goes_to_the_upstream_url_not_the_pushurl() {
     let _env = publish_env(None).await;
-    let w = world().await;
+    let w = development_world().await;
     let fx = &w.fx;
     let c = done_candidate(fx, "a").await;
     let elsewhere = fx.track_root.parent().unwrap().join("elsewhere.git");

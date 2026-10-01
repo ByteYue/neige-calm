@@ -35,7 +35,6 @@ use support::mcp::{call_tool_via_socket, send_tool_call_without_reply};
 use tempfile::TempDir;
 use tokio::time::{Instant, sleep};
 
-const FORGE_BIN: &str = env!("CARGO_BIN_EXE_git-forge");
 const PLUGIN_ID: &str = "dev.neige.git-forge";
 const PR_CREATE_TOOL: &str = "plugin.dev.neige.git-forge_gh.pr.create";
 const PR_MERGE_TOOL: &str = "plugin.dev.neige.git-forge_gh.pr.merge";
@@ -536,7 +535,7 @@ async fn seed_world(repo: &Arc<SqlxRepo>, track_cwd: &Path) -> Seeded {
             sort: None,
             cwd: track_cwd.display().to_string(),
             template_id: None,
-            plugin_scope: None,
+            plugin_scope: Some(PLUGIN_ID.into()),
             attach_folder: false,
             theme: calm_server::routes::theme::RequestTheme::default_dark(),
         })
@@ -661,19 +660,12 @@ async fn seed_runtime_thread(repo: &SqlxRepo, card_id: &str, thread_id: &str) {
     tx.commit().await.expect("commit runtime tx");
 }
 
-/// Install the git-forge plugin the way the REAL boot loads it: an install dir under
-/// `CALM_PLUGINS_DIR` plus an enabled `plugins` DB row. The plugin binary exits on stdin EOF.
+/// The compiled catalog is loaded by real boot; only its plugin root must exist.
 fn install_git_forge_plugin_files(tmp: &Path) {
-    let install_dir = tmp.join("plugins").join(PLUGIN_ID);
-    let bin_dir = install_dir.join("bin");
-    std::fs::create_dir_all(&bin_dir).expect("create plugin bin dir");
-    std::fs::copy(manifest_path(), install_dir.join("manifest.json"))
-        .expect("copy git-forge manifest");
-    std::os::unix::fs::symlink(Path::new(FORGE_BIN), bin_dir.join("git-forge"))
-        .expect("symlink git-forge plugin");
+    std::fs::create_dir_all(tmp.join("plugins")).expect("create plugin root");
 }
 
-async fn seed_plugin_row(repo: &Arc<SqlxRepo>, tmp: &Path) {
+async fn seed_plugin_row(repo: &Arc<SqlxRepo>, _tmp: &Path) {
     let raw = std::fs::read_to_string(manifest_path()).expect("read git-forge manifest");
     let manifest = Manifest::parse(&raw).expect("git-forge manifest parses");
     let as_repo: Arc<dyn Repo> = repo.clone();
@@ -681,7 +673,7 @@ async fn seed_plugin_row(repo: &Arc<SqlxRepo>, tmp: &Path) {
         .plugin_install(NewPlugin {
             id: PLUGIN_ID.into(),
             version: "0.1.0".into(),
-            install_path: tmp.join("plugins").join(PLUGIN_ID).display().to_string(),
+            install_path: format!("builtin:{PLUGIN_ID}"),
             manifest: manifest.to_json(),
             enabled: true,
             user_config: json!({}),

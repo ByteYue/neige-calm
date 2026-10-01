@@ -995,6 +995,7 @@ impl AppState {
             std::fs::create_dir_all(&plugins_dir)?;
         }
         let (registry, report) = PluginRegistry::load_from_dir(&plugins_dir)?;
+        let registry = registry.with_builtins();
         tracing::info!(
             loaded = report.loaded.len(),
             skipped = report.skipped.len(),
@@ -1236,6 +1237,7 @@ impl AppState {
             .set(Arc::new(dispatcher.scheduler()));
 
         // Per-plugin errors are logged inside `autospawn_enabled`; one broken plugin never blocks boot.
+        plugin.reconcile_builtins().await?;
         plugin.autospawn_enabled().await;
 
         let running_plugin_ids = plugin.running_plugin_ids().await;

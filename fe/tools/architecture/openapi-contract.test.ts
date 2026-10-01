@@ -23,6 +23,7 @@ const RESPONSE_WIRE_EXCEPTIONS = new Set([
   'TrackReportReadResponse', 'TrackTemplate',
   // Read-only server DTO, decoded by core/domain/template.ts; its shape is pinned below.
   'TrackTemplateDetail',
+  'TemplatePluginGuide',
   'ReportSeriesResolved', 'ReportSeriesRevConflict', 'TrackPreviews',
 ]);
 

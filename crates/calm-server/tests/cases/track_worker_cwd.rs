@@ -42,7 +42,14 @@ pub(super) struct World {
 
 /// The attached world (module docs). `.gitignore` names `ignored.log`.
 pub(super) async fn world() -> World {
-    let boot = boot().await;
+    world_with_boot(boot().await).await
+}
+
+pub(super) async fn development_world() -> World {
+    world_with_boot(crate::mcp_track_report::boot_development().await).await
+}
+
+async fn world_with_boot(boot: crate::mcp_track_report::Boot) -> World {
     let shared = SharedCodexAppServer::new_fake_running_with_pending(boot.repo.clone(), None);
     let socket_dir = tempfile::Builder::new()
         .prefix("s2-mcp-")

@@ -70,6 +70,8 @@ pub struct PluginListItem {
     /// Does this plugin declare a `config_schema`? Read from the registry, the same source
     /// the write path validates against; `false` when the manifest is not loaded.
     pub has_config: bool,
+    /// False for compiled components; they can be disabled but not removed.
+    pub can_uninstall: bool,
 }
 
 /// Single-plugin detail; the full manifest blob rides along.
@@ -220,6 +222,7 @@ pub(crate) async fn list_plugins(
             id: plug.id.clone(),
             version: plug.version.clone(),
             enabled: plug.enabled,
+            can_uninstall: !crate::builtin_plugins::is_reserved(&plug.id),
             state,
             manifest_name: manifest
                 .get("display_name")
@@ -513,6 +516,7 @@ pub(crate) async fn patch_plugin_config(
     params(("id" = String, Path, description = "Plugin id")),
     responses(
         (status = 204, description = "Plugin uninstalled"),
+        (status = 400, description = "A compiled component can be disabled, not uninstalled", body = ErrorBody),
         (status = 404, description = "Plugin not found", body = ErrorBody),
         (status = 409, description = "Another lifecycle operation holds this plugin (`plugin_busy`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),

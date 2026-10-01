@@ -29,12 +29,13 @@ function schema(): unknown {
 }
 
 describe('plugin list rows', () => {
-  it('requires has_config rather than inventing it', () => {
+  it('requires plugin configuration and removal capabilities', () => {
     const row = {
       id: 'git-forge', version: '0.1.0', enabled: true, state: 'running', manifest_name: 'Git forge',
     };
     expect(pluginListItemSchema.safeParse(row).success).toBe(false);
-    expect(pluginListItemSchema.safeParse({ ...row, has_config: false }).success).toBe(true);
+    expect(pluginListItemSchema.safeParse({ ...row, has_config: false }).success).toBe(false);
+    expect(pluginListItemSchema.safeParse({ ...row, has_config: false, can_uninstall: true }).success).toBe(true);
   });
 });
 

@@ -1,3 +1,4 @@
+import { TemplatePluginGuides } from './template-plugin-guides.tsx';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef } from 'react';
 import type { ApiTransportPort } from '../../../../core/api/types.ts';
@@ -158,6 +159,7 @@ function NewTrackEditor({ transport, unauthorized, workspace, session, store }: 
 
   return <NewTrackForm
     mentionTrigger={mentionTrigger}
+    templatePluginGuides={id => <TemplatePluginGuides key={id} templateId={id} transport={transport} unauthorized={unauthorized} />}
     modelControls={
       <ModelPill
         groups={[

@@ -56,6 +56,17 @@ async fn boot() -> Boot {
     let card_role_cache = CardRoleCache::new();
     let track_area_cache = TrackAreaCache::new();
     repo.seed_track_area_cache(&track_area_cache).await.unwrap();
+    let plugin_host = Arc::new(PluginHost::new_full(
+        Arc::new(PluginRegistry::empty().with_builtins()),
+        repo.clone(),
+        PathBuf::new(),
+        tmp.path().join("plugins-data"),
+        Vec::new(),
+        EventBus::new(),
+        calm_server::state::WriteContext::new(card_role_cache.clone(), track_area_cache.clone()),
+    ));
+    plugin_host.reconcile_builtins().await.unwrap();
+    plugin_host.enable("dev.neige.git-forge").await.unwrap();
     let state = AppState::from_parts(
         repo.clone(),
         EventBus::new(),
@@ -63,18 +74,7 @@ async fn boot() -> Boot {
             data_dir: tmp.path().to_path_buf(),
             proc_supervisor_sock: None,
         }),
-        Arc::new(PluginHost::new_full(
-            Arc::new(PluginRegistry::empty()),
-            repo.clone(),
-            PathBuf::new(),
-            std::env::temp_dir().join("calm-plugins-data-1110-s6"),
-            Vec::new(),
-            EventBus::new(),
-            calm_server::state::WriteContext::new(
-                card_role_cache.clone(),
-                track_area_cache.clone(),
-            ),
-        )),
+        plugin_host,
         Arc::new(common::fake_codex_client()),
         Some(card_role_cache),
         Some(track_area_cache),
@@ -93,6 +93,10 @@ async fn boot() -> Boot {
         repo,
         _tmp: tmp,
     }
+}
+
+fn issue_input() -> Value {
+    json!({"issue_url":"https://github.com/example/repo/issues/1","repo":"example/repo","issue_number":1})
 }
 
 fn theme() -> Value {
@@ -271,7 +275,7 @@ async fn creating_from_a_template_mints_no_hidden_track() {
         create_body(
             &boot.area_id,
             "template only",
-            json!({ "template_id": ISSUE_DEVELOPMENT }),
+            json!({ "template_id": ISSUE_DEVELOPMENT, "template_input": issue_input() }),
         ),
     )
     .await;
@@ -589,16 +593,13 @@ async fn issue_development_create_captures_method_without_tasks() {
         create_body(
             &boot.area_id,
             "forked-issue-dev",
-            json!({ "template_id": ISSUE_DEVELOPMENT }),
+            json!({ "template_id": ISSUE_DEVELOPMENT, "template_input": issue_input() }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "body={body}");
     assert_eq!(body["template_id"], ISSUE_DEVELOPMENT);
-    assert!(
-        body["plugin_scope"].is_null(),
-        "empty plugin registry leaves plugin_scope null, body={body}"
-    );
+    assert_eq!(body["plugin_scope"], "dev.neige.git-forge");
     let track_id = body["id"].as_str().expect("track id");
     assert!(
         planner_harness_ops_for_track(&boot.repo, track_id).await >= 1,
@@ -842,7 +843,7 @@ async fn a_forged_template_key_cannot_influence_what_a_template_creates() {
         create_body(
             &boot.area_id,
             "after-forged-key",
-            json!({ "template_id": ISSUE_DEVELOPMENT }),
+            json!({ "template_id": ISSUE_DEVELOPMENT, "template_input": issue_input() }),
         ),
     )
     .await;
@@ -871,7 +872,7 @@ async fn create_stores_the_roster_key_as_template_id() {
         let (status, body) = post(
             boot.app.clone(),
             "/api/tracks",
-            create_body(&boot.area_id, key, json!({ "template_id": key })),
+            create_body(&boot.area_id, key, json!({ "template_id": key, "template_input": if key == ISSUE_DEVELOPMENT { issue_input() } else { Value::Null } })),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{key}: body={body}");
@@ -950,18 +951,7 @@ async fn boot_with_trusted_plugin(declared_template_ids: &[&str]) -> Boot {
     let track_area_cache = TrackAreaCache::new();
     repo.seed_track_area_cache(&track_area_cache).await.unwrap();
 
-    // Mirrors `forge_trust::trusted_forge_plugin`'s default so the stub is
-    // trusted without mutating process env.
-    let plugin_id = std::env::var("NEIGE_TRUSTED_FORGE_PLUGINS")
-        .ok()
-        .and_then(|configured| {
-            configured
-                .split(',')
-                .map(str::trim)
-                .find(|id| !id.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "dev.neige.git-forge".to_string());
+    let plugin_id = "test.template-owner".to_string();
     let plugins_dir = tmp.path().join("plugins");
     let plugins_data_dir = tmp.path().join("plugins-data");
     let install_dir = plugins_dir.join(&plugin_id);
@@ -1060,7 +1050,15 @@ async fn boot_with_trusted_plugin(declared_template_ids: &[&str]) -> Boot {
 #[tokio::test]
 async fn plugin_declared_non_template_id_is_rejected() {
     const NOT_A_TEMPLATE: &str = "not-a-template";
-    let boot = boot_with_trusted_plugin(&[NOT_A_TEMPLATE, ISSUE_DEVELOPMENT]).await;
+    let _lock = crate::support::forge_env::FORGE_ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let _trust = crate::support::forge_env::EnvGuard::set(
+        "NEIGE_TRUSTED_FORGE_PLUGINS",
+        "test.template-owner,dev.neige.git-forge",
+    );
+    let boot = boot_with_trusted_plugin(&[NOT_A_TEMPLATE, SMALL_CHANGE]).await;
 
     // Liveness control: proves the plugin really binds on this app, so the rejection below is not for an unbound id.
     let (status, body) = post(
@@ -1069,7 +1067,7 @@ async fn plugin_declared_non_template_id_is_rejected() {
         create_body(
             &boot.area_id,
             "bound-control",
-            json!({ "template_id": ISSUE_DEVELOPMENT }),
+            json!({ "template_id": SMALL_CHANGE }),
         ),
     )
     .await;
@@ -1426,7 +1424,7 @@ fn instantiated_recipe(key: &str) -> (String, String, Vec<Value>) {
     (recipe.summary, body, tasks)
 }
 
-/// `boot()` deliberately starts no plugins, so plugin input validation cannot turn a listed template into an unrelated 400.
+/// Listed templates use the production Dev binding and explicit Issue inputs.
 #[tokio::test]
 async fn listed_template_keys_create_their_exact_recipes() {
     // key, roster title, ordered task keys. Hand-written on purpose — this is
@@ -1469,7 +1467,7 @@ async fn listed_template_keys_create_their_exact_recipes() {
         let (status, body) = post(
             boot.app.clone(),
             "/api/tracks",
-            create_body(&boot.area_id, key, json!({ "template_id": key })),
+            create_body(&boot.area_id, key, json!({ "template_id": key, "template_input": if key == ISSUE_DEVELOPMENT { issue_input() } else { Value::Null } })),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{key}: body={body}");

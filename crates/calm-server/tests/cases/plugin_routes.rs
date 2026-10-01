@@ -1944,3 +1944,40 @@ async fn reinstalling_without_a_credential_does_not_inherit_the_previous_secret(
         "and its manifest must not claim a secret it does not have"
     );
 }
+
+#[tokio::test]
+async fn disabled_install_and_uninstall_publish_completed_catalog_changes() {
+    let (state, _tmp, _plugins_dir, repo) = boot_state_with_repo().await;
+    let source = tempfile::tempdir().unwrap();
+    let dir = write_stub_plugin(source.path(), "test.catalog-change");
+    let installed = post_json(
+        app(state.clone()),
+        "/api/plugins/install",
+        json!({
+            "source": { "kind": "local_path", "path": dir.to_string_lossy() }
+        }),
+    )
+    .await;
+    assert_eq!(installed.status(), StatusCode::CREATED);
+    let events = repo.events_since(0, i64::MAX).await.unwrap();
+    let installed_event = events.iter().rfind(|(_,_,_,event)| matches!(event,
+        calm_server::event::Event::PluginState { id, state, .. } if id == "test.catalog-change" && state == "disabled")).expect("a disabled install must notify other clients").0;
+    assert!(
+        repo.plugin_get_by_id("test.catalog-change")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let removed = delete_path(app(state), "/api/plugins/test.catalog-change").await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(
+        repo.plugin_get_by_id("test.catalog-change")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let events = repo.events_since(installed_event, i64::MAX).await.unwrap();
+    assert!(events.iter().any(|(_,_,_,event)| matches!(event,
+        calm_server::event::Event::PluginState { id, state, .. } if id == "test.catalog-change" && state == "disabled")),
+        "an already-disabled uninstall must notify clients after removing the row");
+}

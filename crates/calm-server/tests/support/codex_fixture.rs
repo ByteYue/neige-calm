@@ -256,7 +256,7 @@ pub async fn boot_forge_e2e_fixture(
             sort: None,
             cwd: track_cwd.display().to_string(),
             template_id: fixture.template_id.clone(),
-            plugin_scope: None,
+            plugin_scope: Some(PLUGIN_ID.into()),
             attach_folder: false,
             theme: calm_server::routes::theme::RequestTheme::default_dark(),
         })

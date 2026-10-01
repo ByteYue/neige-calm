@@ -110,3 +110,23 @@ requires a separate installation and OS-isolation design.
 
 See the [architecture decision](architecture/1413-local-plugin-trust.md) for the
 scope and verification of this boundary.
+
+## Compiled capabilities
+
+A `builtin` backend is trusted code compiled into the kernel. It shares the
+plugin registry, configuration and enable/disable lifecycle without a child
+process, plugin token or supervisor. New code arrives through a release;
+runtime enablement remains dynamic. Disk and remote
+installation cannot replace a compiled identity. Development preserves the
+`dev.neige.git-forge` identity for existing Track bindings and configuration.
+
+`agent_tools_scope` declares agent visibility separately from the backend.
+Version 4 is required for `bound-track`; older manifests keep existing enabled
+tool visibility. A required template owner is fixed. `@` references carry a
+plugin's brief description as ordinary message text, including for disabled
+installed plugins. References do not enable plugins, change role permissions or
+modify ownership. Issue templates include the Dev guide independently of
+runtime enablement. Disabling a component rejects new tool calls; already admitted
+operations follow their existing settlement rules. The selected template's
+saved working method remains intact, but cannot grant access to unavailable
+tools.

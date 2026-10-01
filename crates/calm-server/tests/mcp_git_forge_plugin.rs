@@ -19,7 +19,7 @@ use calm_server::db::sqlite::{
 };
 use calm_server::event::EventBus;
 use calm_server::mcp_server::{McpServer, build_default_registry};
-use calm_server::model::{CardRole, NewArea, NewPlugin, NewTrack, TrackId, now_ms};
+use calm_server::model::{CardRole, NewArea, NewTrack, TrackId, now_ms};
 use calm_server::operation::forge_action_adapter::{FORGE_ACTION_KIND, ForgeActionAdapter};
 use calm_server::operation::{
     OperationCompletionBus, OperationRuntime, ProviderAdapter, SpawnCtx, SqlxOperationRepo,
@@ -38,7 +38,6 @@ use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, sleep};
 
-const FORGE_BIN: &str = env!("CARGO_BIN_EXE_git-forge");
 const PLUGIN_ID: &str = "dev.neige.git-forge";
 const WORKTREE_TOOL: &str = "plugin.dev.neige.git-forge_git.worktree.add";
 const COMMIT_TOOL: &str = "plugin.dev.neige.git-forge_git.commit";
@@ -254,7 +253,7 @@ async fn boot_fixture() -> Fixture {
             sort: None,
             cwd: track_cwd.display().to_string(),
             template_id: None,
-            plugin_scope: None,
+            plugin_scope: Some(PLUGIN_ID.into()),
             attach_folder: false,
             theme: calm_server::routes::theme::RequestTheme::default_dark(),
         })
@@ -413,36 +412,23 @@ async fn boot_plugin_host(
     events: EventBus,
     write: calm_server::state::WriteContext,
 ) -> Arc<PluginHost> {
-    let install_dir = plugins_dir.join(PLUGIN_ID);
-    let bin_dir = install_dir.join("bin");
-    std::fs::create_dir_all(&bin_dir).expect("create plugin bin dir");
     std::fs::create_dir_all(&plugins_data_dir).expect("create plugin data dir");
-    std::os::unix::fs::symlink(Path::new(FORGE_BIN), bin_dir.join("git-forge"))
-        .expect("symlink git-forge plugin");
-
-    let manifest = read_manifest();
-    let manifest_json = manifest.to_json();
-    let registry = PluginRegistry::from_manifests([(manifest, Some(install_dir.clone()))]);
-    repo.plugin_install(NewPlugin {
-        id: PLUGIN_ID.into(),
-        version: "0.1.0".into(),
-        install_path: install_dir.display().to_string(),
-        manifest: manifest_json,
-        enabled: true,
-        user_config: json!({}),
-    })
-    .await
-    .expect("seed plugin row");
-
-    Arc::new(PluginHost::new_full(
-        Arc::new(registry),
-        repo,
+    let host = Arc::new(PluginHost::new_full(
+        Arc::new(PluginRegistry::empty().with_builtins()),
+        repo.clone(),
         plugins_dir,
         plugins_data_dir,
         Vec::new(),
         events,
         write,
-    ))
+    ));
+    host.reconcile_builtins()
+        .await
+        .expect("reconcile compiled Dev");
+    repo.plugin_update_enabled(PLUGIN_ID, true)
+        .await
+        .expect("enable Dev");
+    host
 }
 
 async fn insert_workspace_lease(

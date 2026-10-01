@@ -22,6 +22,7 @@ it('costs a plugin row no height while it is empty', async () => {
         manifest_name: 'Todo',
         manifest_description: 'Tracks what is left to do.',
         has_config: false,
+        can_uninstall: true,
       }]}
       loadError={null}
       onRetryLoad={vi.fn()}
@@ -66,4 +67,20 @@ it('costs a plugin row no height while it is empty', async () => {
   expect(asShipped).toBe(withoutRegion);
   /* In flow the same region costs exactly one `row-gap`, which proves the measurement can see a gap at all. */
   expect(inFlow - asShipped).toBeCloseTo(gap, 1);
+});
+
+
+it('shows an enabled built-in capability without a removal action', async () => {
+  await page.viewport(1180, 720);
+  const onSetEnabled = vi.fn();
+  const { container } = render(<PluginsPane
+    plugins={[{ id: 'development', version: '0.1.0', enabled: true, state: 'running',
+      manifest_name: 'Development', has_config: false, can_uninstall: false }]}
+    loadError={null} onRetryLoad={vi.fn()} pendingIds={new Set()} errors={new Map()}
+    effectBoundaryIds={new Set()} onSetEnabled={onSetEnabled} onOpenConfig={vi.fn()}
+    onAdd={vi.fn()} onUninstall={vi.fn()}
+  />);
+  expect(container.querySelector('[aria-label="Remove Development"]')).toBeNull();
+  await page.getByRole('switch', { name: 'Enable Development' }).click();
+  expect(onSetEnabled).toHaveBeenCalledWith('development', false);
 });

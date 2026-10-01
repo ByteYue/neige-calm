@@ -113,7 +113,7 @@
     remains recovery evidence rather than an acknowledged queue entry.
     The new front end's counterpart to the legacy `E2E-CAP-SPECCHAT-012` (`You · queued`), which
     stays `migration: pending` against `web/e2e`.
-  source: fe/web/src/app/router/public.tsx:403-416,478-485,496-499,607-614
+  source: fe/web/src/app/router/public.tsx:403-418,483-513,628-639
   # A table over the whole phase enum: for each of the eight, whether the marker appears, whether
   # the composer stays open, and whether a second message can be sent. The predicate itself is
   # tabulated a second time at the platform-independent tier
@@ -140,8 +140,8 @@
     no-op when this area already covers the path (same-area arm), so a second track in one
     repository does not conflict. The legacy resolve round trip only ever chose false in that
     same-area case, which the kernel's in-transaction scan already reaches atomically.
-  source: fe/web/src/app/router/new-track-route.tsx:81-91
-  authoritative_test: fe/web/src/app/router/new-track-route.test.tsx:739-756
+  source: fe/web/src/app/router/new-track-route.tsx:82-92
+  authoritative_test: fe/web/src/app/router/new-track-route.test.tsx:837-857
   owner_slice: features/track/create
   intentional_omission: false
   runtime_layer: features

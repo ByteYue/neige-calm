@@ -44,6 +44,8 @@ const TRUSTED_TOOL_NAME: &str = "wf.tool";
 const DAEMON_TOKEN: &str = "mcp-plugin-tools-daemon-token";
 
 struct Fixture {
+    repo: Arc<SqlxRepo>,
+    card_role_cache: CardRoleCache,
     _server: Arc<McpServer>,
     plugin_host: Arc<PluginHost>,
     socket_path: PathBuf,
@@ -211,6 +213,47 @@ async fn worker_mcp_discovers_and_routes_colliding_dotted_plugin_tools() {
         .stop(&fx.trusted_plugin_id)
         .await
         .expect("stop trusted template plugin");
+}
+
+#[tokio::test]
+async fn disabled_plugin_hints_require_an_eligible_planner_and_exact_tool() {
+    let fx = boot_fixture().await;
+    let (token, thread) = mint_card_with_thread(
+        &fx.repo,
+        &fx.card_role_cache,
+        fx.track_id.clone().into(),
+        CardRole::Planner,
+    )
+    .await;
+    fx.plugin_host.disable(PLUGIN_ID).await.unwrap();
+    let (mut rd, mut wr) = connect(&fx.socket_path).await;
+    handshake(&mut rd, &mut wr, &token).await;
+    let error = call_expect_error(&mut rd, &mut wr, 10, EXPOSED_NAME, Some(&thread)).await;
+    assert_eq!(error["code"], -32002);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("enable it in Settings")
+    );
+    let unknown = call_expect_error(&mut rd, &mut wr, 11, SECRET_NAME, Some(&thread)).await;
+    assert_eq!(unknown["code"], -32601, "undeclared tools remain unknown");
+    let (mut rd, mut wr) = connect(&fx.socket_path).await;
+    handshake(&mut rd, &mut wr, &fx.assistant_raw_token).await;
+    let denied = call_expect_error(
+        &mut rd,
+        &mut wr,
+        12,
+        EXPOSED_NAME,
+        Some(&fx.assistant_thread_id),
+    )
+    .await;
+    assert_eq!(
+        denied["code"], -32601,
+        "references cannot authorize Assistant calls"
+    );
+    fx.plugin_host.stop(COLLIDING_PLUGIN_ID).await.unwrap();
+    fx.plugin_host.stop(&fx.trusted_plugin_id).await.unwrap();
 }
 
 /// Dynamic `plugin.<id>_<tool>` names are not in the kernel registry, so the allow/deny
@@ -770,7 +813,7 @@ async fn boot_fixture() -> Fixture {
     let server = McpServer::spawn(
         repo,
         events,
-        calm_server::state::WriteContext::new(card_role_cache, track_area_cache),
+        calm_server::state::WriteContext::new(card_role_cache.clone(), track_area_cache),
         socket_path.clone(),
         PathBuf::from("/nonexistent-shim-bin"),
         build_default_registry(),
@@ -783,6 +826,8 @@ async fn boot_fixture() -> Fixture {
     .expect("spawn McpServer");
 
     Fixture {
+        repo: sqlx_repo,
+        card_role_cache,
         _server: server,
         plugin_host,
         socket_path,
