@@ -93,17 +93,23 @@ describe('createMentionSource', () => {
     expect(calls.map((call) => call.query)).toEqual(['de']);
   });
 
-  it('asks the server with an empty query for bare `@`, and answers with its recommendations', async () => {
+  it('shows headings with at most two ranked examples of each type for bare @', async () => {
     vi.useFakeTimers();
     const { calls, search } = controlledSearch();
     const source = createMentionSource(search, 100);
     const answer = Promise.resolve(source.search(''));
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.map((call) => call.query)).toEqual(['']);
-    calls[0].resolve([TAG, TRACK, BLOCK]);
-    expect((await answer).map((item) => [item.id, (item.auxiliaryData as { group: string }).group])).toEqual([
-      [TAG.id, 'Tags'], [TRACK.id, 'Tracks'], [BLOCK.id, 'Blocks'],
-    ]);
+    calls[0].resolve([TAG, TRACK, BLOCK, { ...TAG, id: 'tag:two', label: '#two' }, { ...TAG, id: 'tag:three' }]);
+    const items = await answer;
+    expect(items.map((item) => item.label).toSorted()).toEqual(
+      ['Plugins', 'Tags', TAG.label, '#two', 'More Tags', 'Tracks', TRACK.label, 'More Tracks', 'Blocks', BLOCK.label, 'More Blocks'].toSorted(),
+    );
+    const tagExamples = items.filter((item) => {
+      const data = item.auxiliaryData!;
+      return 'suggestion' in data && data.suggestion.kind === 'tag';
+    });
+    expect(tagExamples.map((item) => item.label)).toEqual([TAG.label, '#two']);
   });
 
   it('answers a failed search with an empty list instead of throwing', async () => {
@@ -145,6 +151,79 @@ describe('the @ menu in the real composer', () => {
   afterEach(() => {
     if (original === undefined) Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
     else Object.defineProperty(Element.prototype, 'scrollIntoView', original);
+  });
+
+  it('enters Tags with a plain @# prefix and searches only tags, then sends the selected mention', async () => {
+    const search = vi.fn<MentionSearch>(() => Promise.resolve([TAG]));
+    const onSend = vi.fn();
+    render(<MentionComposer search={search} onSend={onSend} />);
+    await userEvent.type(field(), 'see @');
+    await screen.findByRole('option', { name: /^Tags/ });
+    expect(screen.getAllByRole('option')).toHaveLength(6);
+    const tagIndex = screen.getAllByRole('option').indexOf(screen.getByRole('option', { name: /^Tags/ }));
+    await userEvent.keyboard('{ArrowDown}'.repeat(tagIndex) + '{Enter}');
+    await screen.findByRole('option', { name: /部署/ });
+    expect(field().textContent).toBe('see @#');
+    expect(field().querySelector('[data-astryx-token]')).toBeNull();
+    expect(search).toHaveBeenLastCalledWith('#', expect.anything());
+    expect(onSend).not.toHaveBeenCalled();
+    await userEvent.keyboard('{Enter}{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith(`see ${TAG.insert}`);
+  });
+
+  it('inserts a heading’s example directly without entering its category', async () => {
+    const onSend = vi.fn();
+    render(<MentionComposer search={() => Promise.resolve([TAG, TRACK, BLOCK])} onSend={onSend} />);
+    await userEvent.type(field(), 'see @');
+    const example = await screen.findByRole('option', { name: /部署/ });
+    await userEvent.click(example);
+    expect(field().querySelector('[data-astryx-token]')?.textContent).toBe(TAG.chip);
+    expect(onSend).not.toHaveBeenCalled();
+    await userEvent.keyboard('{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith(`see ${TAG.insert}`);
+  });
+
+  it('opens the complete category from its ellipsis without inserting or sending a mention', async () => {
+    const search = vi.fn<MentionSearch>(() => Promise.resolve([TAG]));
+    const onSend = vi.fn();
+    render(<MentionComposer search={search} onSend={onSend} />);
+    await userEvent.type(field(), 'see @');
+    await userEvent.click(await screen.findByRole('option', { name: 'More Tags' }));
+    await screen.findByRole('option', { name: /部署/ });
+    expect(field().textContent).toBe('see @#');
+    expect(field().querySelector('[data-astryx-token]')).toBeNull();
+    expect(search).toHaveBeenLastCalledWith('#', expect.anything());
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('selects plugin guides through @+ and sends their documentation verbatim', async () => {
+    const plugin: MentionSuggestion = {
+      id: 'plugin:dev.example', kind: 'plugin', label: 'Development', detail: 'Issue workflow',
+      chip: 'Development', insert: 'Plugin reference (documentation only; kernel permissions still apply): ' + JSON.stringify({ id: 'dev.example', name: 'Development', description: 'Issue workflow' }),
+    };
+    const search = vi.fn<MentionSearch>((query) => Promise.resolve(query.startsWith('+') ? [plugin] : [TAG, plugin]));
+    const onSend = vi.fn();
+    render(<MentionComposer search={search} onSend={onSend} />);
+    await userEvent.type(field(), 'see @');
+    await userEvent.click(await screen.findByRole('option', { name: 'More Plugins' }));
+    await screen.findByRole('option', { name: /Development/ });
+    expect(field().textContent).toBe('see @+');
+    expect(search).toHaveBeenLastCalledWith('+', expect.anything());
+    await userEvent.keyboard('{Enter}{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith(`see ${plugin.insert}`);
+  });
+
+  it('opens an empty Plugins category without querying other mention types', async () => {
+    const search = vi.fn<MentionSearch>((query) => Promise.resolve(query === '+' ? [] : [TAG, TRACK, BLOCK]));
+    render(<MentionComposer search={search} onSend={vi.fn()} />);
+    await userEvent.type(field(), '@');
+    const plugins = await screen.findByRole('option', { name: /^Plugins/ });
+    const pluginIndex = screen.getAllByRole('option').indexOf(plugins);
+    await userEvent.keyboard('{ArrowDown}'.repeat(pluginIndex) + '{Enter}');
+    await screen.findByText('No matches');
+    expect(field().textContent).toBe('@+');
+    expect(search.mock.calls.map(([query]) => query)).toEqual(['', '+']);
+    expect(screen.queryByRole('option')).toBeNull();
   });
 
   it('groups the answer under Tags, Tracks and Blocks and sends exactly the picked insert', async () => {
