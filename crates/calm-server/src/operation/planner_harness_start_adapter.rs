@@ -663,6 +663,18 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
                 )));
             }
         }
+        if defer_runtime_start {
+            // The old prompt may already have changed this workspace. A new thread cannot
+            // retire its durable evidence or attach its observer to a different thread.
+            let unresolved: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM opencode_submissions WHERE card_id = ?1 AND state IN ('prepared','sending','unknown'))",
+            ).bind(card_id.as_str()).fetch_one(&mut **tx).await?;
+            if unresolved {
+                return Err(CalmError::Conflict(
+                    "OpenCode still has an unresolved submission. Stop and reconcile it before resetting this Planner.".into(),
+                ));
+            }
+        }
         // Mint the chat card in this very transaction, so the card and its session row commit together and compensation can undo both.
         let mut post_commit_events = Vec::new();
         if let Some(seed) = payload.create_card.as_ref() {

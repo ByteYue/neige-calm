@@ -290,6 +290,7 @@ export const actorIdSchema = z.union([
   z.object({ kind: z.literal('AiPlannerSession'), id: z.string() }),
   z.object({ kind: z.literal('AiCodexSession'), id: z.string() }),
   z.object({ kind: z.literal('AiClaudeSession'), id: z.string() }),
+  z.object({ kind: z.literal('AiOpenCodeSession'), id: z.string() }),
 ]);
 
 /**

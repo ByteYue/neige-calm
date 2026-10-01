@@ -7166,7 +7166,8 @@
         "type": "string",
         "enum": [
           "codex",
-          "claude"
+          "claude",
+          "opencode"
         ]
       },
       "Area": {
@@ -8163,6 +8164,7 @@
           "config_read",
           "config_toml",
           "claude_cli",
+          "open_code_config",
           "unknown"
         ]
       },
