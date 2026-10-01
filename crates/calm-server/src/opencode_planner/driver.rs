@@ -236,6 +236,13 @@ async fn reject_pending(
                 .request("POST", &path, Some(&payload), Duration::from_secs(3))
                 .await?;
             shared.send(crate::codex_appserver::Notification::Other {method:"opencode/request/denied".into(),params:serde_json::json!({"threadId":submission.thread_id,"turnId":submission.id,"message":format!("OpenCode {kind} request was rejected: this Planner has no interactive approval channel")})});
+            shared.send(crate::codex_appserver::Notification::Item {
+                method:"item/completed".into(),
+                params:serde_json::json!({"threadId":submission.thread_id,"turnId":submission.id,"completedAtMs":chrono::Utc::now().timestamp_millis(),"item":{
+                    "id":format!("opencode-denied-{id}"),"type":"dynamicToolCall","tool":format!("opencode.{kind}"),"arguments":request,"status":"failed",
+                    "error":{"message":format!("OpenCode {kind} request was rejected: this Planner has no interactive approval channel")},
+                }}),
+            });
         }
     }
     Ok(())
