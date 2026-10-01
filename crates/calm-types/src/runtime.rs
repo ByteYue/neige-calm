@@ -29,6 +29,8 @@ pub enum AgentProvider {
     Codex,
     #[serde(rename = "claude")]
     Claude,
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

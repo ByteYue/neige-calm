@@ -3,9 +3,9 @@
 /**
  * Semantic identity of an event producer.
  */
-export type ActorId = { "kind": "User" } | { "kind": "Kernel" } | { "kind": "KernelDispatcher" } | { "kind": "Plugin", "id": string } | { "kind": "AiPlanner", "id": CardId } | { "kind": "AiCodex", "id": CardId } | { "kind": "AiClaude", "id": CardId } | { "kind": "AiPlannerSession", "id": WorkerSessionId } | { "kind": "AiCodexSession", "id": WorkerSessionId } | { "kind": "AiClaudeSession", "id": WorkerSessionId };
+export type ActorId = { "kind": "User" } | { "kind": "Kernel" } | { "kind": "KernelDispatcher" } | { "kind": "Plugin", "id": string } | { "kind": "AiPlanner", "id": CardId } | { "kind": "AiCodex", "id": CardId } | { "kind": "AiClaude", "id": CardId } | { "kind": "AiPlannerSession", "id": WorkerSessionId } | { "kind": "AiCodexSession", "id": WorkerSessionId } | { "kind": "AiClaudeSession", "id": WorkerSessionId } | { "kind": "AiOpenCodeSession", "id": WorkerSessionId };
 
-export type AgentProvider = "codex" | "claude";
+export type AgentProvider = "codex" | "claude" | "opencode";
 
 export type Area = { id: AreaId, name: string, color: string, sort: number, kind: AreaKind, 
 /**

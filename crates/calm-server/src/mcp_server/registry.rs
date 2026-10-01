@@ -33,12 +33,7 @@ impl CardIdentity {
     /// `ReportCard` is mapped by provider as a total-function fallback — the role gate refuses it.
     pub fn to_actor_id(&self) -> ActorId {
         let session_id = WorkerSessionId::from(self.session_id.clone());
-        match self.role {
-            CardRole::Planner => ActorId::AiPlannerSession(session_id),
-            CardRole::Worker | CardRole::ReportCard | CardRole::Assistant => {
-                provider_session_actor(&self.provider, session_id)
-            }
-        }
+        session_actor(self.role, &self.provider, session_id)
     }
 
     pub fn to_principal(&self) -> Option<Principal> {
@@ -77,12 +72,7 @@ impl ToolCallIdentity {
     /// The `ActorId` the role gate will see; MCP writes are keyed by worker session, not card id.
     pub fn to_actor_id(&self) -> ActorId {
         let session_id = WorkerSessionId::from(self.session_id.clone());
-        match self.role {
-            CardRole::Planner => ActorId::AiPlannerSession(session_id),
-            CardRole::Worker | CardRole::ReportCard | CardRole::Assistant => {
-                provider_session_actor(&self.provider, session_id)
-            }
-        }
+        session_actor(self.role, &self.provider, session_id)
     }
 
     pub fn to_principal(&self) -> Option<Principal> {
@@ -95,10 +85,23 @@ impl ToolCallIdentity {
     }
 }
 
+fn session_actor(role: CardRole, provider: &AgentProvider, session_id: WorkerSessionId) -> ActorId {
+    match role {
+        CardRole::Planner if *provider == AgentProvider::OpenCode => {
+            ActorId::AiOpenCodeSession(session_id)
+        }
+        CardRole::Planner => ActorId::AiPlannerSession(session_id),
+        CardRole::Worker | CardRole::ReportCard | CardRole::Assistant => {
+            provider_session_actor(provider, session_id)
+        }
+    }
+}
+
 fn provider_session_actor(provider: &AgentProvider, session_id: WorkerSessionId) -> ActorId {
     match provider {
         AgentProvider::Codex => ActorId::AiCodexSession(session_id),
         AgentProvider::Claude => ActorId::AiClaudeSession(session_id),
+        AgentProvider::OpenCode => ActorId::AiOpenCodeSession(session_id),
     }
 }
 
@@ -469,6 +472,34 @@ mod tests {
                 .to_actor_id(),
             ActorId::AiClaudeSession(WorkerSessionId::from("session-1"))
         );
+    }
+
+    #[test]
+    fn opencode_planner_identities_reach_the_provider_session_gate() {
+        for (provider, actor) in [
+            (
+                AgentProvider::Codex,
+                ActorId::AiPlannerSession(WorkerSessionId::from("session-1")),
+            ),
+            (
+                AgentProvider::Claude,
+                ActorId::AiPlannerSession(WorkerSessionId::from("session-1")),
+            ),
+            (
+                AgentProvider::OpenCode,
+                ActorId::AiOpenCodeSession(WorkerSessionId::from("session-1")),
+            ),
+        ] {
+            assert_eq!(
+                card_identity_with_role_and_provider(CardRole::Planner, provider.clone())
+                    .to_actor_id(),
+                actor
+            );
+            assert_eq!(
+                identity_with_role_and_provider(CardRole::Planner, provider).to_actor_id(),
+                actor
+            );
+        }
     }
 
     #[test]

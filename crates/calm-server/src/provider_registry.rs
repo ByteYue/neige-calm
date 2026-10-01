@@ -17,10 +17,16 @@ impl WorkerProviderRegistry {
     pub fn new(
         supervisor_sock: impl Into<PathBuf>,
         shared_codex_appserver: Arc<SharedCodexAppServer>,
+        harness: crate::harness::HarnessRegistry,
     ) -> Self {
         let supervisor_sock = supervisor_sock.into();
         let codex_daemon: Arc<dyn CodexDaemonProbe> = shared_codex_appserver;
         Self::from_entries([
+            (
+                WorkerProviderKind::OpenCode,
+                Arc::new(crate::planner_liveness::OpenCodePlannerProvider(harness))
+                    as Arc<dyn WorkerProvider>,
+            ),
             (
                 WorkerProviderKind::Codex,
                 Arc::new(CodexProvider::new(supervisor_sock.clone(), codex_daemon))

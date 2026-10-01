@@ -27,6 +27,9 @@ pub enum CalmError {
     #[error("codex refused: {0}")]
     CodexRefused(String),
 
+    #[error("planner provider refused: {0}")]
+    PlannerProviderRefused(String),
+
     #[error("not found: {0}")]
     NotFound(String),
 
@@ -159,6 +162,7 @@ impl CalmError {
             CalmError::Io(_) => "io_error",
             CalmError::Serde(_) => "serde_error",
             CalmError::CodexAppServer(_) => "codex_app_server",
+            CalmError::PlannerProviderRefused(_) => "planner_provider_refused",
             CalmError::CodexRefused(_) => "codex_refused",
             CalmError::ServiceUnavailable(_) => "service_unavailable",
             CalmError::PayloadTooLarge(_) => "payload_too_large",
@@ -192,6 +196,7 @@ impl CalmError {
             | CalmError::Io(_)
             | CalmError::Serde(_)
             | CalmError::CodexAppServer(_)
+            | CalmError::PlannerProviderRefused(_)
             | CalmError::CodexRefused(_)
             | CalmError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -291,6 +296,7 @@ impl From<CalmError> for calm_truth::TruthError {
             | CalmError::PlannerHarnessDormant(m)
             | CalmError::PlannerHarnessRuntimeSuperseded(m)
             | CalmError::TodaySummaryNoActivity(m)
+            | CalmError::PlannerProviderRefused(m)
             | CalmError::CodexRefused(m)
             | CalmError::CodexAppServer(m)
             | CalmError::PayloadTooLarge(m)

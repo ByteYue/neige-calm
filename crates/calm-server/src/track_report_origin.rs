@@ -141,6 +141,7 @@ fn agent_actor(agent: &AgentOrigin) -> ActorId {
         CardRole::Assistant | CardRole::Worker | CardRole::ReportCard => match agent.provider {
             AgentProvider::Codex => ActorId::AiCodexSession(session_id),
             AgentProvider::Claude => ActorId::AiClaudeSession(session_id),
+            AgentProvider::OpenCode => ActorId::AiOpenCodeSession(session_id),
         },
     }
 }
@@ -269,6 +270,7 @@ mod tests {
             ActorId::AiPlannerSession(_) => "AiPlannerSession",
             ActorId::AiCodexSession(_) => "AiCodexSession",
             ActorId::AiClaudeSession(_) => "AiClaudeSession",
+            ActorId::AiOpenCodeSession(_) => "AiOpenCodeSession",
         }
     }
 
@@ -284,6 +286,7 @@ mod tests {
             ActorId::AiPlannerSession(WorkerSessionId::from("sess_fork".to_string())),
             ActorId::AiCodexSession(WorkerSessionId::from("sess_fork".to_string())),
             ActorId::AiClaudeSession(WorkerSessionId::from("sess_fork".to_string())),
+            ActorId::AiOpenCodeSession(WorkerSessionId::from("sess_fork".to_string())),
         ];
         let mut labels: Vec<&'static str> = samples.iter().map(actor_variant_label).collect();
         labels.sort_unstable();

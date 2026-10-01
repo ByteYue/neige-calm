@@ -32,6 +32,14 @@ mod card_composite;
 mod database_identity;
 mod events;
 mod infra;
+mod opencode_submission;
+#[cfg(test)]
+mod opencode_submission_tests;
+pub use opencode_submission::{
+    opencode_submission_claim_prepared, opencode_submission_get_by_client,
+    opencode_submission_get_unresolved, opencode_submission_get_unresolved_by_card,
+    opencode_submission_mark_unknown, opencode_submission_prepare, opencode_submission_settle,
+};
 mod out_of_domain;
 mod overlay;
 mod read;
@@ -101,11 +109,12 @@ pub use session_projection::{
     session_set_status_tx,
 };
 pub use session_row::{
-    ClaudePlannerScope, claude_planner_revoke_tx, session_commit_exit_tx,
-    session_get_by_active_token_hash, session_get_by_id, session_get_tx, session_insert_tx,
-    session_mark_track_root_tx, session_mcp_token_set_if_active_tx, session_mcp_token_set_tx,
-    session_record_activity_by_thread_tx, session_record_activity_tx, session_set_liveness_tx,
-    session_state_transition_tx, worker_session_status_transition_allowed,
+    ClaudePlannerScope, OpenCodePlannerScope, OwnedPlannerProvider, OwnedPlannerScope,
+    claude_planner_revoke_tx, opencode_planner_revoke_tx, owned_planner_revoke_tx,
+    session_commit_exit_tx, session_get_by_active_token_hash, session_get_by_id, session_get_tx,
+    session_insert_tx, session_mark_track_root_tx, session_mcp_token_set_if_active_tx,
+    session_mcp_token_set_tx, session_record_activity_by_thread_tx, session_record_activity_tx,
+    session_set_liveness_tx, session_state_transition_tx, worker_session_status_transition_allowed,
 };
 pub(crate) use session_row::{derive_session_identity, worker_session_from_row};
 pub use task::{

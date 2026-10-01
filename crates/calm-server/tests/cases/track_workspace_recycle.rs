@@ -1400,6 +1400,10 @@ async fn failed_area_workspace_restore_keeps_the_surviving_thread_sealed() {
         calm_server::claude_planner::wiring::ClaudePlannerWiring::unconfigured_for_test(
             repo.clone(),
         );
+    let opencode_wiring =
+        calm_server::opencode_planner::wiring::OpenCodePlannerWiring::unconfigured_for_test(
+            repo.clone(),
+        );
     let outcome = calm_server::harness::spawn_recovered_harness(
         repo,
         EventBus::new(),
@@ -1407,6 +1411,7 @@ async fn failed_area_workspace_restore_keeps_the_surviving_thread_sealed() {
         b.tracks.clone(),
         reboot_daemon,
         &claude_wiring,
+        &opencode_wiring,
         &reboot_registry,
         &calm_server::harness::new_track_delete_locks(),
         runtime,

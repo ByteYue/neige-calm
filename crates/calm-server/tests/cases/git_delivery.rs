@@ -2441,6 +2441,10 @@ async fn settlement_wake_is_replay_stable() {
         calm_server::claude_planner::wiring::ClaudePlannerWiring::unconfigured_for_test(
             fx.boot.repo.clone(),
         );
+    let opencode_wiring =
+        calm_server::opencode_planner::wiring::OpenCodePlannerWiring::unconfigured_for_test(
+            fx.boot.repo.clone(),
+        );
     let recovered = recover_harnesses_on_boot(
         fx.boot.repo.clone(),
         EventBus::new(),
@@ -2448,6 +2452,7 @@ async fn settlement_wake_is_replay_stable() {
         areas,
         SharedCodexAppServer::new_fake_running_with_pending(fx.boot.repo.clone(), None),
         &claude_wiring,
+        &opencode_wiring,
         &registry,
         &calm_server::harness::new_track_delete_locks(),
         calm_server::harness::BootRows::All,

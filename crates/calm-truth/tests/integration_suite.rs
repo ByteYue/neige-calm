@@ -48,3 +48,6 @@ mod file_delivery_migration;
 
 #[path = "planner_provider_card_key_migration.rs"]
 mod planner_provider_card_key_migration;
+
+#[path = "opencode_planner_migration.rs"]
+mod opencode_planner_migration;

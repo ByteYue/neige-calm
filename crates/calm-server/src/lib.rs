@@ -537,6 +537,7 @@ pub(crate) mod claude_code_env;
 pub mod claude_planner;
 pub mod codex_appserver;
 pub mod config;
+pub mod opencode_planner;
 /// Area folder claim rules, re-exported at the old crate path.
 pub use calm_truth::area_folder_claim;
 pub mod conversation_keys;
@@ -559,7 +560,9 @@ pub(crate) mod per_card_lock;
 pub mod planner_appserver;
 pub mod planner_attachments;
 pub mod planner_card;
+mod planner_liveness;
 pub mod planner_model;
+pub mod planner_submission;
 pub mod plugin_host;
 pub mod plugin_results;
 pub mod preview;
@@ -645,7 +648,7 @@ pub async fn recover_harnesses_after_daemon_boot(
             state.arm_deferred_harness_recovery();
             // A Claude Planner does not need the daemon: its rows are recovered now.
             state
-                .recover_harnesses_on_boot(harness::BootRows::ClaudePlannersOnly)
+                .recover_harnesses_on_boot(harness::BootRows::IndependentPlannersOnly)
                 .await
         }
     }

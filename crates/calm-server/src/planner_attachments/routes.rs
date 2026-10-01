@@ -12,7 +12,7 @@ use calm_types::planner_attachment::{AttachmentId, UploadAttachmentResponse};
 use crate::actor::Actor;
 use crate::error::{CalmError, ErrorBody, Result};
 use crate::ids::CardId;
-use crate::model::Card;
+use crate::model::{Card, CardRole};
 use crate::routes::cards::card_runs_headless_harness;
 use crate::routes::track_report_blocks::require_rest_user_actor_for;
 use crate::state::{AppState, RouteState};
@@ -33,6 +33,7 @@ pub fn router() -> Router<AppState> {
 
 struct AttachmentContext {
     card: Card,
+    role: CardRole,
     root: std::path::PathBuf,
     repo_root: std::path::PathBuf,
 }
@@ -61,6 +62,7 @@ async fn attachment_context(s: &RouteState, id: &str) -> Result<AttachmentContex
     let root = attachment_root(&track.workspace, &s.workspace_root)?;
     Ok(AttachmentContext {
         card,
+        role,
         root,
         repo_root: std::path::PathBuf::from(&track.workspace.path),
     })
@@ -78,7 +80,7 @@ async fn attachment_context(s: &RouteState, id: &str) -> Result<AttachmentContex
     ),
     responses(
         (status = 201, description = "Attachment stored", body = UploadAttachmentResponse),
-        (status = 400, description = "Not one of PNG/JPEG/GIF/WebP, the track has an attached workspace, or the card's attachment budget is exhausted", body = ErrorBody),
+        (status = 400, description = "Unsupported image format, text-only provider, attached workspace, or exhausted attachment budget", body = ErrorBody),
         (status = 403, description = "Card is not a planner codex card, or the actor is not `user`", body = ErrorBody),
         (status = 404, description = "Card or track not found", body = ErrorBody),
         (status = 413, description = "File exceeds the per-file size limit", body = ErrorBody),
@@ -97,6 +99,7 @@ pub(crate) async fn upload_planner_attachment(
         "An agent already reads this workspace directly and has no upload channel.",
     )?;
     let context = attachment_context(&s, &id).await?;
+    super::require_image_input(&context.card, context.role)?;
     let card_id = context.card.id.clone();
     let stored = store::store_upload(
         &context.root,

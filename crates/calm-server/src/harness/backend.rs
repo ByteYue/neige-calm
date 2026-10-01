@@ -14,7 +14,9 @@ use tokio::sync::broadcast;
 use crate::claude_planner::session::ClaudePlannerSession;
 use crate::codex_appserver::{InputItem, Notification};
 use crate::error::{CalmError, Result};
+use crate::opencode_planner::session::OpenCodePlannerSession;
 use crate::planner_model::TurnModelSelection;
+use crate::planner_submission::TurnAdmission;
 use crate::session_projection_repo::AgentProvider;
 use crate::shared_codex_appserver::{SharedCodexAppServer, TurnId};
 
@@ -24,6 +26,7 @@ pub enum PlannerBackend {
     /// One Claude Planner session (design #1791 §5); it holds the Codex daemon only for the
     /// thread-keyed deletion seals.
     Claude(Arc<ClaudePlannerSession>),
+    OpenCode(Arc<OpenCodePlannerSession>),
 }
 
 impl From<Arc<SharedCodexAppServer>> for PlannerBackend {
@@ -37,6 +40,7 @@ impl PlannerBackend {
         match self {
             Self::Codex(daemon) => daemon.subscribe_notifications(),
             Self::Claude(session) => session.subscribe_notifications(),
+            Self::OpenCode(session) => session.subscribe_notifications(),
         }
     }
 
@@ -48,14 +52,17 @@ impl PlannerBackend {
         items: Vec<InputItem>,
         selection: &TurnModelSelection,
         client_id: &str,
-    ) -> Result<TurnId> {
+    ) -> Result<TurnAdmission> {
         match self {
-            Self::Codex(daemon) => {
-                daemon
-                    .turn_start(thread_id, items, selection, Some(client_id))
-                    .await
-            }
-            Self::Claude(session) => {
+            Self::Codex(daemon) => daemon
+                .turn_start(thread_id, items, selection, Some(client_id))
+                .await
+                .map(|turn_id| TurnAdmission::Accepted { turn_id }),
+            Self::Claude(session) => session
+                .turn_start(thread_id, items, selection, client_id)
+                .await
+                .map(|turn_id| TurnAdmission::Accepted { turn_id }),
+            Self::OpenCode(session) => {
                 session
                     .turn_start(thread_id, items, selection, client_id)
                     .await
@@ -68,7 +75,7 @@ impl PlannerBackend {
     pub fn supports_steer(&self) -> bool {
         match self {
             Self::Codex(_) => true,
-            Self::Claude(_) => false,
+            Self::Claude(_) | Self::OpenCode(_) => false,
         }
     }
 
@@ -85,8 +92,9 @@ impl PlannerBackend {
                     .turn_steer(thread_id, expected_turn_id, items, Some(client_id))
                     .await
             }
-            Self::Claude(_) => Err(CalmError::Internal(
-                "a Claude Planner cannot steer; the run loop checks supports_steer first".into(),
+            Self::Claude(_) | Self::OpenCode(_) => Err(CalmError::Internal(
+                "this Planner backend cannot steer; the run loop checks supports_steer first"
+                    .into(),
             )),
         }
     }
@@ -95,6 +103,7 @@ impl PlannerBackend {
         match self {
             Self::Codex(daemon) => daemon.turn_interrupt(thread_id, turn_id).await,
             Self::Claude(session) => session.turn_interrupt(thread_id, turn_id).await,
+            Self::OpenCode(session) => session.turn_interrupt(thread_id, turn_id).await,
         }
     }
 
@@ -102,6 +111,7 @@ impl PlannerBackend {
         match self {
             Self::Codex(daemon) => daemon.interrupt_active_turn(thread_id).await,
             Self::Claude(session) => session.interrupt_active_turn(thread_id).await,
+            Self::OpenCode(session) => session.interrupt_active_turn(thread_id).await,
         }
     }
 
@@ -109,6 +119,14 @@ impl PlannerBackend {
         match self {
             Self::Codex(daemon) => daemon.active_turn_id_for_thread(thread_id),
             Self::Claude(session) => session.active_turn_id_for_thread(thread_id),
+            Self::OpenCode(session) => session.active_turn_id_for_thread(thread_id),
+        }
+    }
+
+    pub async fn has_unresolved_submission(&self) -> Result<bool> {
+        match self {
+            Self::OpenCode(session) => session.has_unresolved_submission().await,
+            Self::Codex(_) | Self::Claude(_) => Ok(false),
         }
     }
 
@@ -116,6 +134,7 @@ impl PlannerBackend {
         match self {
             Self::Codex(_) => AgentProvider::Codex,
             Self::Claude(_) => AgentProvider::Claude,
+            Self::OpenCode(_) => AgentProvider::OpenCode,
         }
     }
 
@@ -124,6 +143,16 @@ impl PlannerBackend {
         match self {
             Self::Codex(_) => {}
             Self::Claude(session) => session.mark_installed(),
+            Self::OpenCode(session) => session.mark_installed(),
+        }
+    }
+
+    /// Stop and reap a backend-owned process before a destructive lifecycle step.
+    pub async fn shutdown_managed(&self) -> Result<()> {
+        match self {
+            Self::Codex(_) => Ok(()),
+            Self::Claude(session) => session.shutdown().await,
+            Self::OpenCode(session) => session.shutdown().await,
         }
     }
 
@@ -133,6 +162,7 @@ impl PlannerBackend {
         match self {
             Self::Codex(daemon) => daemon,
             Self::Claude(session) => session.codex(),
+            Self::OpenCode(session) => session.codex(),
         }
     }
 }

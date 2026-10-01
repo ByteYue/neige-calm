@@ -690,7 +690,7 @@ pub struct GetPlannerRunResponse {
     pub pending: Vec<PendingQueueEntry>,
     /// User-authored entries that exist in the queue but are NOT in `pending`: pre-id entries, plus anything past the page budget.
     pub pending_overflow: u32,
-    /// Whether this card can take image attachments at all: not when the track's workspace is an attached directory, since neige never writes into one. Answered by the same function the upload runs (`planner_attachments::attachment_root`).
+    /// Whether this card can take image attachments: its provider must support images and its workspace must be managed. Uses the upload and input admission predicates in `planner_attachments`.
     pub attachments_supported: bool,
 }
 
@@ -853,6 +853,10 @@ pub(crate) async fn send_planner_input(
         return Err(CalmError::Forbidden(format!(
             "card {id} is not a planner codex card",
         )));
+    }
+
+    if !attachments.is_empty() {
+        crate::planner_attachments::require_image_input(&card, role)?;
     }
 
     // `_recovery_guard` holds the per-card recovery lock until end of scope, so a concurrent `/planner/reset` can't supersede the just-recovered runtime before the observe/audit below.
@@ -1152,14 +1156,17 @@ pub(crate) async fn get_planner_run(
     // Unreadable model keys are reported as 'no selection' by this READ rather than as a 500; the turn-issuing path refuses on the same payload, so the conversation still stops but this surface can show why.
     let selection =
         crate::planner_model::CardModelSelection::from_payload(&card.payload).unwrap_or_default();
-    // The same predicate the upload endpoint enforces, so the answer cannot drift from the refusal.
-    let attachments_supported = match s.repo.track_get(card.track_id.as_str()).await? {
-        Some(track) => {
-            crate::planner_attachments::attachment_root(&track.workspace, &s.workspace_root).is_ok()
-        }
-        // No track means no workspace to write into; this field is not the place to raise it, and 'supported' would be the wrong guess.
-        None => false,
-    };
+    // The same input capability and workspace predicates the upload endpoint enforces.
+    let attachments_supported = crate::planner_attachments::require_image_input(&card, role)
+        .is_ok()
+        && match s.repo.track_get(card.track_id.as_str()).await? {
+            Some(track) => {
+                crate::planner_attachments::attachment_root(&track.workspace, &s.workspace_root)
+                    .is_ok()
+            }
+            // No track means no workspace to write into; this field is not the place to raise it, and 'supported' would be the wrong guess.
+            None => false,
+        };
     let mut dormant = GetPlannerRunResponse {
         card_id: card.id.clone(),
         worker_session_id: None,
@@ -1293,6 +1300,10 @@ async fn ensure_live_planner_harness(
         && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::Claude)
     {
         s.claude_planner.check_ready().await?;
+    } else if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
+        && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::OpenCode)
+    {
+        s.opencode_planner.check_ready().await?;
     } else if !cs.shared_codex_appserver.is_running() {
         return Err(CalmError::ServiceUnavailable(
             cs.shared_codex_appserver.not_running_message(),
@@ -1306,6 +1317,7 @@ async fn ensure_live_planner_harness(
         s.write.area_cache().clone(),
         cs.shared_codex_appserver.clone(),
         &s.claude_planner_wiring(),
+        &s.opencode_planner_wiring(),
         &s.harness,
         &s.track_delete_locks,
         runtime.clone(),
