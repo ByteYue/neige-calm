@@ -6,6 +6,10 @@ use calm_types::forge_git::{
 };
 use serde_json::{Value, json};
 
+use crate::plugin_host::forge_caller::ForgeCallerScope;
+
+mod issue;
+
 pub fn lower(tool: &str, args: &Value) -> Result<Value, String> {
     match tool {
         "git.worktree.add" => lower_git_worktree_add(args),
@@ -17,7 +21,25 @@ pub fn lower(tool: &str, args: &Value) -> Result<Value, String> {
         "gh.pr.merge" => lower_gh_pr_merge(args),
         "gh.issue.view" => lower_gh_issue_view(args),
         "gh.issue.close" => lower_gh_issue_close(args),
+        "gh.issue.comment" => Err("issue comments require trusted forge caller metadata".into()),
+        "gh.issue.comments" => issue::comments(args),
         _ => Err(format!("unknown git-forge tool `{tool}`")),
+    }
+}
+
+/// Caller-sensitive lowering stays in the owning plugin; the kernel only provides identity.
+pub fn lower_for_caller(
+    tool: &str,
+    args: &Value,
+    caller: &ForgeCallerScope,
+) -> Result<Value, String> {
+    caller.validate()?;
+    if caller.plugin_id != super::PLUGIN_ID {
+        return Err("forge caller plugin does not match development plugin".into());
+    }
+    match tool {
+        "gh.issue.comment" => issue::comment(args, caller),
+        _ => lower(tool, args),
     }
 }
 
@@ -415,7 +437,15 @@ fn lower_gh_issue_view(args: &Value) -> Result<Value, String> {
     // Idempotent read: intentionally probe-free.
     let repo = required_string(args, "repo")?;
     let issue = required_u64(args, "issue")?;
-    forge_payload(
+    let idem_key = match optional_attempt(args)? {
+        Some(attempt) => format!(
+            "gh.issue.view:v3:{}",
+            serde_json::to_string(&json!([repo, issue, attempt]))
+                .map_err(|e| format!("encode issue read identity: {e}"))?
+        ),
+        None => format!("gh.issue.view:v2:{repo}:{issue}"),
+    };
+    issue::read_payload(
         vec![
             "gh".into(),
             "issue".into(),
@@ -428,11 +458,8 @@ fn lower_gh_issue_view(args: &Value) -> Result<Value, String> {
             "--jq".into(),
             ".body".into(),
         ],
-        format!("gh.issue.view:v2:{repo}:{issue}"),
-        Some(event_spec("forge.issue.read", [])),
-        json!({"issue_number": issue}),
-        None,
-        false,
+        idem_key,
+        issue,
     )
 }
 
