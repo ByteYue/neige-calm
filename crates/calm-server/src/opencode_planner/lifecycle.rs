@@ -11,7 +11,8 @@ pub async fn boot(repo: &dyn RepoEventWrite, host: &OpenCodePlannerHost) -> Resu
         )
     })
     .await?;
-    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    ids.push("readiness");
     super::stop::sweep(&host.instance, &ids).await
 }
 pub async fn sweep_track(

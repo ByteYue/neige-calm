@@ -65,6 +65,7 @@ pub struct OpenCodePlannerHost {
     pub mcp_shim: PathBuf,
     pub mcp_socket: PathBuf,
     pub(crate) scope_id: String,
+    catalog_serial: tokio::sync::Mutex<()>,
     _scratch: Option<tempfile::TempDir>,
 }
 
@@ -106,6 +107,7 @@ impl OpenCodePlannerHost {
             mcp_shim,
             mcp_socket,
             scope_id,
+            catalog_serial: tokio::sync::Mutex::new(()),
             _scratch: None,
         })
     }
@@ -174,16 +176,17 @@ impl OpenCodePlannerHost {
         self.catalog().await.map(|_| ())
     }
     pub async fn catalog(&self) -> Result<Arc<OpenCodeCatalog>> {
-        let id = format!("readiness-{}", uuid::Uuid::new_v4());
+        let _check = self.catalog_serial.lock().await;
+        let id = "readiness";
         let mut process =
-            ServerProcess::start(self, &id, &self.configured()?.config_dir, &[], None).await?;
+            ServerProcess::start(self, id, &self.configured()?.config_dir, &[], None).await?;
         let result = async {
             let providers = process.client.get("/provider").await?;
             let config = process.client.get("/config").await?;
             OpenCodeCatalog::from_native(&providers, &config).map(Arc::new)
         }
         .await;
-        let stopped = process.shutdown(self, &id).await;
+        let stopped = process.shutdown(self, id).await;
         stopped?;
         result
     }
