@@ -39,6 +39,7 @@ pub(crate) struct State {
     pub(crate) active: Option<Active>,
     pub(crate) native_session: Option<String>,
     pub(crate) shutting_down: bool,
+    pub(crate) total_tokens: i64,
 }
 pub(crate) struct Shared {
     pub(crate) params: OpenCodePlannerSessionParams,
@@ -59,6 +60,11 @@ impl Shared {
     }
     pub(crate) async fn ensure_server(&self) -> Result<Client> {
         let mut slot = self.process.lock().await;
+        if self.state().shutting_down {
+            return Err(CalmError::Conflict(
+                "OpenCode Planner is closed; recovery cannot spawn a provider".into(),
+            ));
+        }
         if let Some(server) = slot.as_ref() {
             return Ok(server.client.clone());
         }
@@ -185,6 +191,7 @@ impl OpenCodePlannerSession {
             cancelled: watch::Sender::new(false),
         });
         let (notifications, _) = broadcast::channel(1024);
+        let total_tokens = params.prior_total_tokens;
         Ok(Self {
             shared: Arc::new(Shared {
                 params,
@@ -192,6 +199,7 @@ impl OpenCodePlannerSession {
                     active,
                     native_session,
                     shutting_down: false,
+                    total_tokens,
                 }),
                 process: tokio::sync::Mutex::new(None),
                 issue: tokio::sync::Mutex::new(()),
@@ -269,7 +277,22 @@ impl OpenCodePlannerSession {
         }
         if let Some(active) = shared.state().active.as_ref() {
             if active.submission.client_id == client_id && active.submission.thread_id == thread {
-                if active.submission.input_json["parts"] != json!(parts(&items)?) {
+                let explicit_model = selection
+                    .model
+                    .as_deref()
+                    .map(super::models::split_model)
+                    .transpose()?;
+                let mut expected = json!({"messageID":active.submission.native_message_id,"parts":parts(&items)?,"system":shared.params.instructions});
+                if let Some((provider, model)) = explicit_model {
+                    expected["model"] = json!({"providerID":provider,"modelID":model});
+                } else {
+                    // Preserve the already admitted effective default on exact receipt replay.
+                    expected["model"] = active.submission.input_json["model"].clone();
+                }
+                if let Some(effort) = &selection.effort {
+                    expected["variant"] = json!(effort);
+                }
+                if active.submission.input_json != expected {
                     return Err(CalmError::Conflict(
                         "OpenCode client receipt belongs to different input".into(),
                     ));
@@ -286,11 +309,23 @@ impl OpenCodePlannerSession {
             ));
         }
         let parts = parts(&items)?;
-        let model = selection
-            .model
-            .as_deref()
-            .map(super::models::split_model)
-            .transpose()?;
+        let effective_model = match &selection.model {
+            Some(model) => model.clone(),
+            None => shared
+                .params
+                .host
+                .catalog()
+                .await?
+                .default_model
+                .clone()
+                .ok_or_else(|| {
+                    CalmError::Conflict(
+                        "OpenCode requires an explicit model because its profile has no default"
+                            .into(),
+                    )
+                })?,
+        };
+        let (provider, model) = super::models::split_model(&effective_model)?;
         let client = shared.ensure_server().await?;
         let native = shared.native_session(&client, thread).await?;
         if shared.params.seals.turn_thread_is_sealed(thread) {
@@ -300,9 +335,7 @@ impl OpenCodePlannerSession {
         }
         let native_message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         let mut input = json!({"messageID":native_message_id,"parts":parts,"system":shared.params.instructions});
-        if let Some((provider, model)) = model {
-            input["model"] = json!({"providerID":provider,"modelID":model});
-        }
+        input["model"] = json!({"providerID":provider,"modelID":model});
         if let Some(effort) = &selection.effort {
             input["variant"] = json!(effort);
         }
@@ -345,9 +378,9 @@ impl OpenCodePlannerSession {
                 | OpenCodeSubmissionState::Failed
                 | OpenCodeSubmissionState::Interrupted
         ) {
-            return Err(CalmError::Conflict(
-                "this OpenCode client receipt already settled; it cannot be resent".into(),
-            ));
+            return Ok(TurnAdmission::Rejected {
+                reason: "this OpenCode client receipt already settled; it cannot be resent".into(),
+            });
         }
         let claimed = crate::db::sqlite::opencode_submission_claim_prepared(
             &pool,
@@ -426,7 +459,11 @@ impl OpenCodePlannerSession {
             .filter(|a| a.submission.thread_id == thread && a.submission.id == turn)
             .map(|a| a.cancelled.clone());
         if let Some(slot) = slot {
-            let _ = slot.send(true);
+            if slot.send(true).is_err() {
+                // A failed observer already stopped its process; repeat cleanup rather than
+                // treating a send to a closed watch channel as successful interruption.
+                self.shared.stop_process().await?;
+            }
         }
         Ok(())
     }
@@ -445,27 +482,51 @@ impl OpenCodePlannerSession {
         if let Some(active) = self.shared.state().active.as_ref() {
             let _ = active.cancelled.send(true);
         }
-        // Revocation precedes process quiescence. A boot/shutdown is not native completion.
-        super::lifecycle::revoke_session(
+        // Serialize revocation with ensure_server's mint/spawn critical section. A recovery
+        // task waiting for this lock observes closed before it can mint or start a child.
+        let mut process = self.shared.process.lock().await;
+        let revoke = super::lifecycle::revoke_session(
             self.shared.params.repo.as_ref(),
             &self.shared.params.worker_session_id,
         )
-        .await?;
+        .await;
         let active = self
             .shared
             .state()
             .active
             .as_ref()
-            .map(|a| a.submission.id.clone());
-        if let Some(id) = active {
-            crate::db::sqlite::opencode_submission_mark_unknown(
-                &self.shared.pool()?,
-                &id,
-                chrono::Utc::now().timestamp_millis(),
+            .map(|a| (a.submission.id.clone(), a.submission.state));
+        let journal = if let Some((id, state)) = active {
+            if state == OpenCodeSubmissionState::Prepared {
+                Ok(()) // Recovery abandons a proven unsent intent with visible local evidence.
+            } else {
+                crate::db::sqlite::opencode_submission_mark_unknown(
+                    &self.shared.pool()?,
+                    &id,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+            }
+        } else {
+            Ok(())
+        };
+        let stop = if let Some(mut owned) = process.take() {
+            owned
+                .shutdown(
+                    &self.shared.params.host,
+                    &self.shared.params.worker_session_id,
+                )
+                .await
+        } else {
+            super::stop::stop(
+                &self.shared.params.host.instance,
+                &self.shared.params.worker_session_id,
             )
-            .await?;
-        }
-        self.shared.stop_process().await
+            .await
+        };
+        revoke?;
+        journal?;
+        stop
     }
 }
 fn parts(items: &[InputItem]) -> Result<Vec<Value>> {

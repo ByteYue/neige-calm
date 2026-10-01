@@ -18,6 +18,11 @@ pub(crate) async fn drive(
     dispatch: Option<(Client, Value)>,
 ) {
     if let Err(error) = run(Arc::clone(&shared), &submission, &mut cancelled, dispatch).await {
+        // Every observer exit is fail-closed for its owned serve/tools, including initial
+        // identity queries, denied-control errors and SQLite errors. The durable fence stays.
+        if let Err(stop) = shared.stop_process().await {
+            tracing::error!(%stop, "OpenCode observer cleanup failed");
+        }
         if let Ok(pool) = shared.pool() {
             let _ = crate::db::sqlite::opencode_submission_mark_unknown(
                 &pool,
@@ -41,14 +46,25 @@ async fn run(
     dispatch: Option<(Client, Value)>,
 ) -> Result<()> {
     let pool = shared.pool()?;
+    let prior_tokens = shared.state().total_tokens;
     let mut projection = TurnProjection::new(
         submission.thread_id.clone(),
         submission.id.clone(),
         submission.native_message_id.clone(),
         submission.client_id.clone(),
         shared.params.cwd.to_string_lossy().into_owned(),
-        shared.params.prior_total_tokens,
-    );
+        prior_tokens,
+    )?;
+    if submission.state == OpenCodeSubmissionState::Prepared && dispatch.is_none() {
+        // Only Sending can have crossed the POST boundary: Prepared is durable proof that
+        // the CAS was never claimed. Do not resurrect an abandoned queued operational act.
+        let outcome = Outcome::Failed(
+            "OpenCode submission was never sent: recovery found a prepared intent before dispatch"
+                .into(),
+        );
+        shared.send(projection.started());
+        return settle(&shared, submission, &projection, &outcome, &[]).await;
+    }
     let recovered = dispatch.is_none();
     let client = shared.ensure_server().await?;
     // Validate the existing native identity under this directory before any observations
@@ -117,53 +133,31 @@ async fn run(
                 shared.unknown(&submission.thread_id,&submission.id,"OpenCode submission response was lost; reconciling the original native message");
             }
         }
-        reject_pending(&shared, &client, &native, submission).await?;
-        match snapshot(&client, &native, submission).await {
+        let observation = async {
+            reject_pending(&shared, &client, &native, submission).await?;
+            snapshot(&client, &native, submission).await
+        };
+        let observed = if let Some(until) = stop_until {
+            tokio::time::timeout_at(until, observation)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(CalmError::Conflict(
+                        "OpenCode stop observation budget expired".into(),
+                    ))
+                })
+        } else {
+            tokio::select! {
+                result = observation => result,
+                _ = cancelled.changed() => continue,
+            }
+        };
+        match observed {
             Ok(messages) => {
                 for frame in projection.snapshot(&messages) {
                     shared.send(frame);
                 }
                 if let Some(outcome) = projection.outcome(&messages) {
-                    // Persist evidence before broadcasting completion. A provider process may
-                    // remain for subsequent turns, but all associated native tools are settled.
-                    let value = projection.terminal_value(&outcome);
-                    let state = match outcome {
-                        Outcome::Completed => OpenCodeSubmissionState::Completed,
-                        Outcome::Failed(_) => OpenCodeSubmissionState::Failed,
-                        Outcome::Interrupted => OpenCodeSubmissionState::Interrupted,
-                    };
-                    shared.stop_process().await?;
-                    shared
-                        .params
-                        .repo
-                        .harness_turn_outcome_put(
-                            &shared.params.worker_session_id,
-                            &shared.params.card_id,
-                            &shared.params.track_id,
-                            &submission.thread_id,
-                            &submission.id,
-                            &serde_json::to_string(&value)?,
-                        )
-                        .await?;
-                    crate::db::sqlite::opencode_submission_settle(
-                        &pool,
-                        &submission.id,
-                        state,
-                        &value,
-                        chrono::Utc::now().timestamp_millis(),
-                    )
-                    .await?;
-                    let mut slot = shared.state();
-                    if slot
-                        .active
-                        .as_ref()
-                        .is_some_and(|a| a.submission.id == submission.id)
-                    {
-                        slot.active = None;
-                    }
-                    shared.send(projection.usage(&messages));
-                    shared.send(projection.completed(&outcome));
-                    return Ok(());
+                    return settle(&shared, submission, &projection, &outcome, &messages).await;
                 }
             }
             Err(error) => {
@@ -178,7 +172,7 @@ async fn run(
                     shared.unknown(
                         &submission.thread_id,
                         &submission.id,
-                        &format!("OpenCode snapshot is unavailable: {error}"),
+                        &format!("OpenCode observation is unavailable: {error}"),
                     );
                 }
             }
@@ -192,6 +186,63 @@ async fn run(
         }
         tokio::select! {_=tokio::time::sleep(Duration::from_millis(300))=>{},_=cancelled.changed()=>{}}
     }
+}
+
+async fn settle(
+    shared: &Shared,
+    submission: &OpenCodeSubmission,
+    projection: &TurnProjection,
+    outcome: &Outcome,
+    messages: &[Value],
+) -> Result<()> {
+    let value = projection.terminal_value(outcome);
+    let state = match outcome {
+        Outcome::Completed => OpenCodeSubmissionState::Completed,
+        Outcome::Failed(_) => OpenCodeSubmissionState::Failed,
+        Outcome::Interrupted => OpenCodeSubmissionState::Interrupted,
+    };
+    shared.stop_process().await?;
+    shared
+        .params
+        .repo
+        .harness_turn_outcome_put(
+            &shared.params.worker_session_id,
+            &shared.params.card_id,
+            &shared.params.track_id,
+            &submission.thread_id,
+            &submission.id,
+            &serde_json::to_string(&value)?,
+        )
+        .await?;
+    crate::db::sqlite::opencode_submission_settle(
+        &shared.pool()?,
+        &submission.id,
+        state,
+        &value,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await?;
+    let usage = projection.usage(messages);
+    {
+        let mut slot = shared.state();
+        if slot
+            .active
+            .as_ref()
+            .is_some_and(|a| a.submission.id == submission.id)
+        {
+            slot.active = None;
+            if let crate::codex_appserver::Notification::Other { params, .. } = &usage {
+                slot.total_tokens = params["tokenUsage"]["total"]["totalTokens"]
+                    .as_i64()
+                    .ok_or_else(|| {
+                        CalmError::Internal("OpenCode token projection has no total".into())
+                    })?;
+            }
+        }
+    }
+    shared.send(usage);
+    shared.send(projection.completed(outcome));
+    Ok(())
 }
 
 async fn reject_pending(
@@ -266,33 +317,67 @@ async fn snapshot(
             "OpenCode exact message evidence mismatched".into(),
         ));
     }
-    let messages = client
-        .get(&format!("/session/{native}/message?limit=256"))
-        .await?;
-    let mut messages = messages
-        .as_array()
-        .cloned()
-        .ok_or_else(|| CalmError::Conflict("OpenCode message snapshot is malformed".into()))?;
-    if messages.len() >= 256 {
-        return Err(CalmError::Conflict(
-            "OpenCode snapshot is truncated; terminal evidence cannot be established".into(),
-        ));
+    let mut messages = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    // Bound the current turn, rather than rejecting a long previous conversation. The
+    // pinned API serves newest pages first and supplies an opaque backward cursor header.
+    let mut bytes = 0usize;
+    loop {
+        let mut path = format!("/session/{native}/message?limit=256");
+        if let Some(before) = &cursor {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("before", before)
+                .finish();
+            path.push('&');
+            path.push_str(&query);
+        }
+        let page = client.page(&path).await?;
+        let page_messages = page
+            .value
+            .as_array()
+            .ok_or_else(|| CalmError::Conflict("OpenCode message snapshot is malformed".into()))?;
+        let original = page_messages
+            .iter()
+            .position(|m| m["info"]["id"] == user["info"]["id"]);
+        let relevant = &page_messages[original.unwrap_or(0)..];
+        if messages.len().saturating_add(relevant.len()) > 16_384 {
+            return Err(CalmError::Conflict(
+                "OpenCode current-turn tail exceeds the bounded reconciliation budget".into(),
+            ));
+        }
+        for message in relevant {
+            if message["info"]["sessionID"].as_str() != Some(native) {
+                return Err(CalmError::Conflict(
+                    "OpenCode snapshot contained another session".into(),
+                ));
+            }
+            bytes = bytes.saturating_add(serde_json::to_vec(message)?.len());
+            if bytes > 16 * 1024 * 1024 || messages.len() >= 16_384 {
+                return Err(CalmError::Conflict(
+                    "OpenCode current-turn tail exceeds the bounded reconciliation budget".into(),
+                ));
+            }
+        }
+        // Pages are ascending internally but retrieved newest first. Preserve native
+        // transcript order by prepending each older page; trim previous turns once found.
+        messages.splice(0..0, relevant.iter().cloned());
+        if original.is_some() {
+            return Ok(messages);
+        }
+        let Some(next) = page.next_cursor else {
+            return Err(CalmError::Conflict(
+                "OpenCode snapshot omitted the original native message; history is incomplete"
+                    .into(),
+            ));
+        };
+        if next.len() > 2048 || !seen_cursors.insert(next.clone()) {
+            return Err(CalmError::Conflict(
+                "OpenCode pagination cursor failed to advance".into(),
+            ));
+        }
+        cursor = Some(next);
     }
-    if messages
-        .iter()
-        .any(|m| m["info"]["sessionID"].as_str() != Some(native))
-    {
-        return Err(CalmError::Conflict(
-            "OpenCode snapshot contained another session".into(),
-        ));
-    }
-    if !messages
-        .iter()
-        .any(|m| m["info"]["id"] == user["info"]["id"])
-    {
-        messages.push(user);
-    }
-    Ok(messages)
 }
 
 struct AbortOnDrop(Option<tokio::task::JoinHandle<Result<Value>>>);

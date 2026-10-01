@@ -12,6 +12,11 @@ use std::time::Duration;
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(crate) struct Page {
+    pub(crate) value: Value,
+    pub(crate) next_cursor: Option<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Client {
     port: u16,
@@ -38,6 +43,18 @@ impl Client {
         payload: Option<&Value>,
         timeout: Duration,
     ) -> Result<Value> {
+        self.exchange(method, path, payload, timeout)
+            .await
+            .map(|page| page.value)
+    }
+
+    async fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        payload: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<Page> {
         if !path.starts_with('/') || path.contains('#') {
             return Err(CalmError::BadRequest(
                 "invalid OpenCode request path".into(),
@@ -53,7 +70,12 @@ impl Client {
             .unwrap_or_default();
         let request = Request::builder()
             .method(method)
-            .uri(url.as_str())
+            .uri(format!(
+                "{}{}",
+                url.path(),
+                url.query().map(|q| format!("?{q}")).unwrap_or_default()
+            ))
+            .header("host", format!("127.0.0.1:{}", self.port))
             .header("authorization", &self.authorization)
             .header("content-type", "application/json")
             .header("connection", "close")
@@ -77,6 +99,14 @@ impl Client {
                     .await
                     .map_err(|e| CalmError::Conflict(format!("OpenCode response was lost: {e}")))?;
                 let status = response.status();
+                let next_cursor = response
+                    .headers()
+                    .get("x-next-cursor")
+                    .map(|v| v.to_str().map(str::to_owned))
+                    .transpose()
+                    .map_err(|_| {
+                        CalmError::Conflict("invalid OpenCode pagination cursor header".into())
+                    })?;
                 let mut stream = response.into_body();
                 let mut bytes = Vec::new();
                 while let Some(frame) = stream.frame().await {
@@ -99,9 +129,10 @@ impl Client {
                         status.as_u16()
                     )));
                 }
-                serde_json::from_slice(&bytes).map_err(|e| {
+                let value = serde_json::from_slice(&bytes).map_err(|e| {
                     CalmError::Conflict(format!("OpenCode response is invalid JSON: {e}"))
-                })
+                })?;
+                Ok(Page { value, next_cursor })
             }
             .await;
             result
@@ -109,6 +140,10 @@ impl Client {
         tokio::time::timeout(timeout, exchange).await.map_err(|_| {
             CalmError::Conflict("OpenCode request outcome is unknown after timeout".into())
         })?
+    }
+
+    pub(crate) async fn page(&self, path: &str) -> Result<Page> {
+        self.exchange("GET", path, None, READ_TIMEOUT).await
     }
 
     pub(crate) async fn get(&self, path: &str) -> Result<Value> {

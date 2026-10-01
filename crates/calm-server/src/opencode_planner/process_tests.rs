@@ -27,7 +27,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path=='/config': answer={'model':'fixture/model'}
         else: self.send_response(404); self.end_headers(); return
         body=json.dumps(answer).encode();self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
-http.server.ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
+server=http.server.ThreadingHTTPServer(('127.0.0.1',port),Handler)
+print('opencode server listening on http://127.0.0.1:'+str(server.server_address[1]),flush=True)
+server.serve_forever()
 "#;
 
 fn host(root: &Path) -> OpenCodePlannerHost {

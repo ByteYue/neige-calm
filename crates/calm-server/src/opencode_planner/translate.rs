@@ -11,6 +11,7 @@ pub(crate) struct TurnProjection {
     cwd: String,
     seen: HashMap<String, Value>,
     prior_tokens: i64,
+    mcp_names: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +39,11 @@ impl TurnProjection {
         client_id: String,
         cwd: String,
         prior_tokens: i64,
-    ) -> Self {
-        Self {
+    ) -> crate::error::Result<Self> {
+        let registry = crate::mcp_server::build_default_registry();
+        let descriptors = registry.descriptors_for_role(calm_types::model::CardRole::Planner);
+        let mcp_names = mcp_name_map(descriptors.iter().map(|d| d.name.as_str()))?;
+        Ok(Self {
             thread,
             turn,
             message,
@@ -47,7 +51,8 @@ impl TurnProjection {
             cwd,
             seen: HashMap::new(),
             prior_tokens,
-        }
+            mcp_names,
+        })
     }
     pub(crate) fn started(&self) -> Notification {
         Notification::TurnStarted {
@@ -166,7 +171,7 @@ impl TurnProjection {
         let tool = part["tool"].as_str().unwrap_or("opencode.unknownTool");
         let mut item = if tool == "bash" {
             json!({"id":part["id"],"type":"commandExecution","command":state["input"]["command"],"cwd":self.cwd,"status":status,"aggregatedOutput":state["output"],"exitCode":state["metadata"]["exit"]})
-        } else if let Some(name) = tool.strip_prefix("calm_") {
+        } else if let Some(name) = self.mcp_names.get(tool) {
             json!({"id":part["id"],"type":"mcpToolCall","server":"calm","tool":name,"arguments":state["input"],"status":status,"result":{"content":[{"type":"text","text":state["output"]}]}})
         } else {
             json!({"id":part["id"],"type":"dynamicToolCall","tool":tool,"arguments":state["input"],"status":status,"result":{"content":[{"type":"text","text":state["output"]}]}})
@@ -247,4 +252,30 @@ impl TurnProjection {
             params: json!({"threadId":self.thread,"tokenUsage":{"total":{"totalTokens":self.prior_tokens.saturating_add(total)},"last":{"totalTokens":total},"modelContextWindow":null}}),
         }
     }
+}
+
+/// Pinned OpenCode sanitizes both MCP client/tool names. Reverse only the authoritative
+/// registered names and reject collisions rather than guessing which underscores were dots.
+pub(crate) fn mcp_name_map<'a>(
+    names: impl Iterator<Item = &'a str>,
+) -> crate::error::Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for name in names {
+        let sanitized: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if let Some(prior) = map.insert(format!("calm_{sanitized}"), name.to_owned()) {
+            return Err(crate::error::CalmError::Conflict(format!(
+                "OpenCode MCP name collision: {prior} and {name}"
+            )));
+        }
+    }
+    Ok(map)
 }

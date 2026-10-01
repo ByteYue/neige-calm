@@ -30,8 +30,6 @@ impl ServerProcess {
         let env = host.environment(id, proxy)?;
         config.verify_version(&env).await?;
         stop::stop(&host.instance, id).await?;
-        let socket = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        let port = socket.local_addr()?.port();
         let password = uuid::Uuid::new_v4().simple().to_string();
         let mut settings =
             json!({"autoupdate": false, "share":"disabled", "permission":{"question":"deny"}});
@@ -48,16 +46,15 @@ impl ServerProcess {
             .tempfile_in(&host.instructions_dir)?;
         serde_json::to_writer(file.as_file_mut(), &settings)?;
         file.as_file_mut().flush()?;
-        // The released port is authenticated by a per-spawn unpredictable password. A process
-        // that wins the bind race cannot satisfy our subsequent authenticated version check.
-        drop(socket);
+        // The owned child binds its listener before announcing its actual port. Never send
+        // credentials to a port reserved then released by the kernel: another process could bind it.
         let mut child = Command::new(&config.opencode_binary)
             .args([
                 "serve",
                 "--hostname",
                 "127.0.0.1",
                 "--port",
-                &port.to_string(),
+                "0",
                 "--mdns=false",
             ])
             .env_clear()
@@ -70,11 +67,25 @@ impl ServerProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CalmError::Internal("OpenCode serve has no stdout pipe".into()))?;
+        let announced =
+            tokio::time::timeout(Duration::from_secs(20), listener_port(&mut stdout)).await;
+        let port = match announced {
+            Ok(Ok(port)) => port,
+            failure => {
+                let _ = stop::stop(&host.instance, id).await;
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+                return Err(CalmError::Conflict(format!(
+                    "OpenCode did not announce its owned loopback listener: {failure:?}"
+                )));
+            }
+        };
         for output in [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::pin(s) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>),
+            Some(Box::pin(stdout) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>),
             child
                 .stderr
                 .take()
@@ -159,4 +170,46 @@ impl Drop for ServerProcess {
             });
         }
     }
+}
+
+async fn listener_port(stdout: &mut tokio::process::ChildStdout) -> Result<u16> {
+    let mut line = Vec::new();
+    for _ in 0..64 * 1024 {
+        let byte = stdout.read_u8().await?;
+        if byte != b'\n' {
+            line.push(byte);
+            continue;
+        }
+        let text = std::str::from_utf8(&line).map_err(|_| {
+            CalmError::Conflict("OpenCode listener announcement is not UTF-8".into())
+        })?;
+        if let Some(address) = text
+            .trim_end()
+            .strip_prefix("opencode server listening on ")
+        {
+            let url = url::Url::parse(address).map_err(|_| {
+                CalmError::Conflict("OpenCode listener announcement is malformed".into())
+            })?;
+            if url.scheme() != "http"
+                || url.host_str() != Some("127.0.0.1")
+                || url.path() != "/"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(CalmError::Conflict(
+                    "OpenCode did not announce the requested loopback listener".into(),
+                ));
+            }
+            return url
+                .port()
+                .filter(|p| *p != 0)
+                .ok_or_else(|| CalmError::Conflict("OpenCode announced no bound port".into()));
+        }
+        line.clear();
+    }
+    Err(CalmError::Conflict(
+        "OpenCode listener announcement exceeded its byte budget".into(),
+    ))
 }

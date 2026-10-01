@@ -11,6 +11,7 @@ fn projection() -> TurnProjection {
         "/workspace".into(),
         10,
     )
+    .unwrap()
 }
 fn assistant(finish: &str, parts: Vec<Value>) -> Value {
     json!({"info":{"id":"msg_assistant","sessionID":"ses_owned","role":"assistant","parentID":"msg_user","finish":finish,"time":{"created":2,"completed":3}},"parts":parts})
