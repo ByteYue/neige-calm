@@ -88,6 +88,19 @@ async fn opencode_managed_serve_auth_config_and_stop_are_scope_isolated() {
             .and_then(Value::as_str),
         Some("token-two")
     );
+    let mcp = &first["settings"]["mcp"]["calm"];
+    assert!(
+        mcp["environment"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(Value::is_string),
+        "native MCP configuration requires string environment values"
+    );
+    let kernel_path = crate::kernel_bin_path::kernel_led_path().unwrap();
+    assert_eq!(mcp["environment"]["PATH"], kernel_path.path_utf8().unwrap());
+    // This owned definition must override a disabled calm entry in the private profile.
+    assert_eq!(mcp["enabled"], true);
     assert_eq!(
         first["environment"]["HOME"].as_str(),
         host.configured().unwrap().config_dir.to_str()
