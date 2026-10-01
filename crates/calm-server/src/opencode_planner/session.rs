@@ -84,7 +84,8 @@ impl Shared {
         Ok(client)
     }
     pub(crate) async fn native_session(&self, client: &Client, thread: &str) -> Result<String> {
-        if let Some(id) = self.state().native_session.clone() {
+        let bound = self.state().native_session.clone();
+        if let Some(id) = bound {
             super::client::native_id(&id, "ses")?;
             let native = client.get(&format!("/session/{id}")).await?;
             validate_native_session(&native, &id, &self.params.cwd)?;
