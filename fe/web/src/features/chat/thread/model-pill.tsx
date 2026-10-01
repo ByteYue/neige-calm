@@ -22,7 +22,7 @@ import styles from './model-pill.module.css';
 const FOLLOW_DEFAULT_LABEL = 'Default';
 
 /** A standing note rather than a per-switch warning: the catalog carries no context window, so whether a switch compacts is unknowable here. */
-const SWITCH_NOTE = 'Switching to a model with a smaller context window can make codex compact the history first.';
+const SWITCH_NOTE = 'Switching to a model with a smaller context window can make the provider compact the history first.';
 
 /**
  * Total over `AgentProvider`, so a new backend is a compile error here rather than a missing group.

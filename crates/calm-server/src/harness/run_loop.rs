@@ -1398,6 +1398,7 @@ async fn handle_steer(
                 &thread_id,
                 entry_id.as_str(),
                 &segments,
+                None,
             )
             .await
             {
@@ -1833,6 +1834,14 @@ async fn on_notification(inner: &Arc<Inner>, notif: Notification) -> Result<()> 
         let turn_id = params["turnId"].as_str().ok_or_else(|| {
             CalmError::Internal("OpenCode unknown admission lacks a turn identity".into())
         })?;
+        if inner
+            .backend
+            .active_turn_id_for_thread(current_thread.as_deref().unwrap_or_default())
+            .as_deref()
+            != Some(turn_id)
+        {
+            return Ok(());
+        }
         let reason = params["message"]
             .as_str()
             .unwrap_or("OpenCode submission outcome is unknown");
@@ -1892,7 +1901,18 @@ async fn on_notification(inner: &Arc<Inner>, notif: Notification) -> Result<()> 
                     turn_id: active, ..
                 } => active == &turn_id,
                 HarnessState::Idle => last_seen.is_none(),
-                HarnessState::Resumed { .. } => last_seen.as_deref() == Some(turn_id.as_str()),
+                HarnessState::Resumed { .. } => {
+                    last_seen.as_deref() == Some(turn_id.as_str())
+                        || (inner.backend.provider()
+                            == crate::session_projection_repo::AgentProvider::OpenCode
+                            && inner
+                                .backend
+                                .active_turn_id_for_thread(
+                                    current_thread.as_deref().unwrap_or_default(),
+                                )
+                                .as_deref()
+                                == Some(turn_id.as_str()))
+                }
                 _ => false,
             };
             if !accept {
@@ -1947,6 +1967,8 @@ async fn on_notification(inner: &Arc<Inner>, notif: Notification) -> Result<()> 
                     );
                     return persist_snapshot(inner).await;
                 }
+                *inner.issuance_block.lock().await = None;
+                *inner.projection_client_id.lock().await = None;
                 *inner.last_turn_id.lock().await = Some(target_turn_id.clone());
                 *inner.state.lock().await = HarnessState::TurnCompleted {
                     last_turn_id: target_turn_id,
@@ -1995,6 +2017,8 @@ async fn on_notification(inner: &Arc<Inner>, notif: Notification) -> Result<()> 
                 );
                 return persist_snapshot(inner).await;
             }
+            *inner.issuance_block.lock().await = None;
+            *inner.projection_client_id.lock().await = None;
             *inner.last_turn_id.lock().await = Some(turn_id.clone());
             *inner.state.lock().await = HarnessState::TurnCompleted {
                 last_turn_id: turn_id.clone(),
@@ -2344,8 +2368,13 @@ async fn write_projection_row(
     thread_id: &str,
     client_id: &str,
     segments: &[HarnessInputSegment],
+    entries: &[QueueEntry],
 ) -> Result<i64> {
-    let item_db_id = insert_projection_row(inner, thread_id, client_id, segments).await?;
+    let proof = (inner.backend.provider()
+        == crate::session_projection_repo::AgentProvider::OpenCode)
+        .then(|| super::submission_recovery::claimed_queue_entries(entries));
+    let item_db_id =
+        insert_projection_row(inner, thread_id, client_id, segments, proof.as_ref()).await?;
     // The existing per-row event, so every client refetches the transcript now rather than at the echo.
     emit_item_added(
         inner,
@@ -2366,6 +2395,7 @@ async fn insert_projection_row(
     thread_id: &str,
     client_id: &str,
     segments: &[HarnessInputSegment],
+    proof: Option<&Value>,
 ) -> Result<i64> {
     let stale = inner
         .repo
@@ -2387,7 +2417,7 @@ async fn insert_projection_row(
         .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "item": {
             "id": client_id,
             "clientId": client_id,
@@ -2396,6 +2426,9 @@ async fn insert_projection_row(
         },
         "_projection": true,
     });
+    if let Some(proof) = proof {
+        params["calmQueueEntries"] = proof.clone();
+    }
     let params_json = serde_json::to_string(&params)?;
     let input_segments = serde_json::to_string(segments)?;
     let item_db_id = inner
@@ -3266,7 +3299,7 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
     }
     let issued = async {
         // Written before `turn/start` goes out, so the row says what codex is told.
-        write_projection_row(inner, &thread_id, client_id.as_str(), &segments)
+        write_projection_row(inner, &thread_id, client_id.as_str(), &segments, &drained)
             .await
             .map_err(IssueFailure::ProjectionWrite)?;
         let turn = IssueTurnHandle::from_reconciliation(inner)

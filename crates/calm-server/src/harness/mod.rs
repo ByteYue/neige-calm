@@ -10,6 +10,7 @@ mod result_receipt;
 pub mod run_loop;
 pub mod snapshot;
 pub mod state;
+pub mod submission_recovery;
 pub mod token_usage;
 pub(crate) mod turn_outcome;
 
@@ -302,13 +303,15 @@ pub async fn spawn_recovered_harness(
             )
         }
     };
+    let recovered_thread =
+        submission_recovery::adopt(repo.as_ref(), &backend, &mut snapshot).await?;
     let handle = PlannerHarness::run(PlannerHarnessParams {
         worker_session_id: runtime_id.clone(),
         track_id: card.track_id,
         card_id: CardId::from(runtime.card_id.clone()),
         // A row with `thread_id = ''` would otherwise win as `Some("")` over the snapshot's valid
         // `last_thread_id`, and the recovered harness would issue turns against an empty thread.
-        thread_id: effective_runtime_thread_id(&runtime),
+        thread_id: recovered_thread.or_else(|| effective_runtime_thread_id(&runtime)),
         repo,
         events,
         card_role_cache,

@@ -30,7 +30,7 @@ pub fn router() -> Router<AppState> {
     tag = "threads",
     params(
         ("thread_id" = String, Path, description = "Provider thread/session id"),
-        ("provider" = Option<String>, Query, description = "Agent provider: codex or claude; defaults to codex"),
+        ("provider" = Option<String>, Query, description = "Agent provider: codex, claude or opencode; defaults to codex"),
     ),
     responses(
         (status = 200, description = "Owning card for this provider thread/session", body = ThreadCardResolution),
@@ -77,7 +77,7 @@ fn parse_provider(provider: Option<&str>) -> Result<AgentProvider> {
         Some("claude") => Ok(AgentProvider::Claude),
         Some("opencode") => Ok(AgentProvider::OpenCode),
         Some(other) => Err(CalmError::BadRequest(format!(
-            "invalid provider {other:?}; expected codex or claude"
+            "invalid provider {other:?}; expected codex, claude or opencode"
         ))),
     }
 }

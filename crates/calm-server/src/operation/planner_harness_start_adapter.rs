@@ -1504,11 +1504,14 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
         if let Some(existing) = previous_live {
             existing.shutdown().await?;
         }
+        let recovered_thread =
+            crate::harness::submission_recovery::adopt(self.repo.as_ref(), &backend, &mut snapshot)
+                .await?;
         let handle = PlannerHarness::run(PlannerHarnessParams {
             worker_session_id: worker_session_id.clone(),
             track_id: TrackId::from(track_id),
             card_id: CardId::from(card_id),
-            thread_id,
+            thread_id: recovered_thread.or(thread_id),
             repo: self.repo.clone(),
             events: ctx.events.clone(),
             card_role_cache: self.card_role_cache.clone(),

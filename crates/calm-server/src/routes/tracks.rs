@@ -2230,13 +2230,13 @@ async fn repoint_track_workspace(
         tracing::error!(
             track_id,
             %error,
-            "workspace repoint: a Claude Planner process of the track could not be stopped"
+            "workspace repoint: a managed Planner process of the track could not be stopped"
         );
         drop(track_guard.take());
         drop(operation_guard.take());
         restart_planner_harness_at(s, actor, track, &fence.old_workspace.path).await;
         return Err(CalmError::Conflict(
-            "a previous Claude Planner process of this track could not be stopped; the \
+            "a previous managed Planner process of this track could not be stopped; the \
              workspace was not moved"
                 .into(),
         ));

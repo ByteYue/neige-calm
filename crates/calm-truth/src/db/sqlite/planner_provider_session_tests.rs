@@ -10,6 +10,62 @@ use serde_json::json;
 
 use super::runtime_read_flip_support::{create_card_in_tx, fresh_repo};
 
+#[tokio::test]
+async fn native_user_echo_keeps_batch_proof_and_updates_one_row() {
+    use crate::db::RepoOutOfDomain;
+    let repo = fresh_repo().await;
+    let mut tx = repo.pool().begin().await.unwrap();
+    let card = create_card_in_tx(&repo, &mut tx, "echo", "codex").await;
+    let track: String = sqlx::query_scalar("SELECT track_id FROM cards WHERE id=?1")
+        .bind(&card)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let proof = json!([{"id":"queued-original","observation":{"type":"user-message","text":"original"},"messageIds":["original-instance"],"attachments":[]}]);
+    let projected = json!({"item":{"id":"client","clientId":"client","type":"userMessage"},"_projection":true,"calmQueueEntries":proof});
+    let original = repo
+        .harness_item_insert(
+            "worker",
+            &card,
+            &track,
+            "thread",
+            None,
+            Some("client"),
+            Some("userMessage"),
+            "item/completed",
+            &projected.to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+    for text in ["", "native full text"] {
+        let echo = json!({"item":{"id":"native-message","clientId":"client","type":"userMessage","content":[{"type":"text","text":text}]}});
+        assert_eq!(
+            repo.transcript_projection_upgrade(
+                &card,
+                "client",
+                Some("turn"),
+                "native-message",
+                &echo.to_string()
+            )
+            .await
+            .unwrap(),
+            Some(original)
+        );
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id,params FROM harness_items WHERE card_id=?1")
+                .bind(&card)
+                .fetch_all(repo.pool())
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        let stored: serde_json::Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(stored["calmQueueEntries"], proof);
+        assert_eq!(stored["item"]["content"][0]["text"], text);
+    }
+}
+
 async fn stored_identity(repo: &SqlxRepo, id: &str) -> (String, String, String) {
     sqlx::query_as("SELECT provider, mode, contract FROM worker_sessions WHERE id = ?1")
         .bind(id)
