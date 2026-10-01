@@ -13,5 +13,7 @@ pub mod stop;
 mod translate;
 pub mod wiring;
 
+#[cfg(all(test, target_os = "linux"))]
+mod process_tests;
 #[cfg(test)]
 mod tests;

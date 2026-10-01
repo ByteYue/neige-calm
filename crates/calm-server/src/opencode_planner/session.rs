@@ -234,6 +234,20 @@ impl OpenCodePlannerSession {
             .filter(|a| a.submission.thread_id == thread)
             .map(|a| a.submission.id.clone())
     }
+    /// Recovery and watchdogs consult the durable admission fence rather than provider idle.
+    pub async fn has_unresolved_submission(&self) -> Result<bool> {
+        if self.shared.state().active.is_some() {
+            return Ok(true);
+        }
+        Ok(
+            crate::db::sqlite::opencode_submission_get_unresolved_by_card(
+                &self.shared.pool()?,
+                &self.shared.params.card_id,
+            )
+            .await?
+            .is_some(),
+        )
+    }
     pub async fn turn_start(
         &self,
         thread: &str,
