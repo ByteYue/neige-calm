@@ -1959,3 +1959,40 @@ describe('Mobile conversation contours', () => {
     expect(drawer.getBoundingClientRect().height).toBe(window.innerHeight);
   });
 });
+
+it('paints persisted mention pills in a narrow transcript', async () => {
+  await page.viewport(414, 896);
+  const text = 'see @`tag:部署` @`area/reports/Deploy notes.md` '
+    + '@`area/reports/Deploy notes.md#b_1a2b`';
+  render(<div style={{ width: 320 }}><ChatThread cards={{}} stalled={false}
+    conversation={railConversation()}
+    turns={[{ id: 'mention-turn', author: 'you', text, atMs: 1 }]} /></div>);
+  await expect.element(page.getByText('#部署', { exact: true })).toBeVisible();
+  await expect.element(page.getByText('Deploy notes', { exact: true })).toBeVisible();
+  await expect.element(page.getByText('Deploy notes › b_1a2b', { exact: true })).toBeVisible();
+  const message = document.querySelector<HTMLElement>('[data-nc-turn="you"]')!;
+  expect(message.textContent).not.toContain('area/reports/');
+  expect(message.scrollWidth).toBeLessThanOrEqual(message.clientWidth);
+  await page.screenshot({ path: '../../../../../test-results/planner-sent-mentions.png' });
+  await page.viewport(1280, 720);
+});
+
+
+it('keeps long mention pills inside a narrow transcript', async () => {
+  await page.viewport(414, 896);
+  const name = 'Very long report name '.repeat(12);
+  const tag = '部署'.repeat(32);
+  render(<div style={{ width: 320 }}><ChatThread cards={{}} stalled={false}
+    conversation={railConversation()}
+    turns={[{ id: 'long-mention', author: 'you',
+      text: '@`area/reports/' + name + '.md` @`tag:' + tag + '`', atMs: 1 }]} /></div>);
+  await expect.element(page.getByText(name, { exact: true })).toBeVisible();
+  const message = document.querySelector<HTMLElement>('[data-nc-turn="you"]')!;
+  expect(message.scrollWidth).toBeLessThanOrEqual(message.clientWidth);
+  const bounds = message.getBoundingClientRect();
+  for (const pill of message.querySelectorAll('[data-nc-sent-mention]')) {
+    expect(pill.getBoundingClientRect().right).toBeLessThanOrEqual(bounds.right);
+  }
+  await page.screenshot({ path: '../../../../../test-results/planner-long-mentions.png' });
+  await page.viewport(1280, 720);
+});
