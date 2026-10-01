@@ -1564,12 +1564,16 @@ pub(crate) async fn delete_card(
                 }
                 // #1830 S2 D7: after the best-effort interrupt above, the attempt is committed as
                 // `interrupted` in this delete transaction.
-                let mut events = release_workspace_lease_for_card_tx(
-                    tx,
-                    card_id.as_ref(),
-                    ReleaseDelivery::Commit(AttemptOutcome::Interrupted),
-                )
-                .await?;
+                let mut events =
+                    crate::scheduler::fail_tasks_for_deleted_card_tx(tx, &card).await?;
+                events.extend(
+                    release_workspace_lease_for_card_tx(
+                        tx,
+                        card_id.as_ref(),
+                        ReleaseDelivery::Commit(AttemptOutcome::Interrupted),
+                    )
+                    .await?,
+                );
                 card_delete_tx(tx, card_id.as_ref(), write_for_tx.role_cache()).await?;
                 events.push((
                     delete_actor,

@@ -535,12 +535,16 @@ async fn card_delete(ctx: &CallbackCtx<'_>, params: Value) -> Result<Value, RpcE
                         Err(e) => return Err(e),
                     }
                 }
-                let mut events = release_workspace_lease_for_card_tx(
-                    tx,
-                    &card_id,
-                    ReleaseDelivery::Commit(AttemptOutcome::Interrupted),
-                )
-                .await?;
+                let mut events =
+                    crate::scheduler::fail_tasks_for_deleted_card_tx(tx, &card).await?;
+                events.extend(
+                    release_workspace_lease_for_card_tx(
+                        tx,
+                        &card_id,
+                        ReleaseDelivery::Commit(AttemptOutcome::Interrupted),
+                    )
+                    .await?,
+                );
                 card_delete_tx(tx, &card_id, write_for_tx.role_cache()).await?;
                 events.push((
                     actor,
@@ -1317,6 +1321,12 @@ mod tests {
         .await
         .unwrap();
         let cid = create["id"].as_str().unwrap().to_string();
+        let task_id = format!("{}:delete-worker", h.track_id);
+        sqlx::query("INSERT INTO tasks
+            (id,track_id,key,kind,goal,context_json,status,worker_card_id,declared_by,created_at_ms,updated_at_ms)
+            VALUES (?1,?2,'delete-worker','codex','test','[]','running',?3,'user',1,1)")
+            .bind(&task_id).bind(&h.track_id).bind(&cid)
+            .execute(h.ctx_storage.sqlx_repo.pool()).await.unwrap();
         let res = dispatch(&h.ctx(), "neige.card.delete", json!({ "card_id": cid }))
             .await
             .unwrap();
@@ -1328,6 +1338,22 @@ mod tests {
             .await
             .unwrap();
         assert!(cards.is_empty());
+        let task = h
+            .ctx_storage
+            .repo
+            .task_get(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, crate::model::TaskStatus::Failed);
+        assert!(
+            task.status_detail
+                .unwrap()
+                .starts_with("worker-card-deleted")
+        );
+        let failures: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind='task.failed' AND json_extract(payload,'$.idempotency_key')=?1")
+            .bind(&task_id).fetch_one(h.ctx_storage.sqlx_repo.pool()).await.unwrap();
+        assert_eq!(failures, 1);
     }
 
     /// The undeletable card is minted via `card_create_with_id_tx` with a plugin-owned kind, so the kind check would let the plugin through and only the `deletable` guard refuses.
