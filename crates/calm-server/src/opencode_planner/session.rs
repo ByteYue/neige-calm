@@ -431,13 +431,14 @@ impl OpenCodePlannerSession {
             created_at_ms: chrono::Utc::now().timestamp_millis(),
         };
         let pool = shared.pool()?;
-        let submission = if let Some(old) = crate::db::sqlite::opencode_submission_get_by_client(
-            &pool,
-            &intent.scope_id,
-            &native,
-            client_id,
-        )
-        .await?
+        let mut submission = if let Some(old) =
+            crate::db::sqlite::opencode_submission_get_by_client(
+                &pool,
+                &intent.scope_id,
+                &native,
+                client_id,
+            )
+            .await?
         {
             let mut old_input = old.input_json.clone();
             old_input["messageID"] = intent.input_json["messageID"].clone();
@@ -460,12 +461,71 @@ impl OpenCodePlannerSession {
                 reason: "this OpenCode client receipt already settled; it cannot be resent".into(),
             });
         }
-        let claimed = crate::db::sqlite::opencode_submission_claim_prepared(
-            &pool,
-            &submission.id,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let claim =
+            crate::db::sqlite::opencode_submission_claim_prepared(&pool, &submission.id, now).await;
+        let mut unknown_reason = None;
+        let claimed = match claim {
+            Ok(true) => {
+                submission.state = OpenCodeSubmissionState::Sending;
+                submission.updated_at_ms = now;
+                true
+            }
+            result => {
+                let reason = match result {
+                    Ok(false) => "OpenCode dispatch was not claimed; reconciling the durable original receipt".to_owned(),
+                    Err(error) => format!("OpenCode dispatch claim is unknown after its intent was persisted: {error}"),
+                    Ok(true) => unreachable!(),
+                };
+                // The pre-CAS clone is not proof of Prepared: a connection error can follow
+                // the state transition. Re-read before deciding whether the original is unsent.
+                let readback = crate::db::sqlite::opencode_submission_get_by_client(
+                    &pool,
+                    &submission.scope_id,
+                    &submission.native_session_id,
+                    &submission.client_id,
+                )
+                .await;
+                match readback {
+                    Ok(Some(actual))
+                        if actual.id == submission.id
+                            && actual.input_fingerprint == submission.input_fingerprint
+                            && actual.input_json == submission.input_json =>
+                    {
+                        if matches!(
+                            actual.state,
+                            OpenCodeSubmissionState::Completed
+                                | OpenCodeSubmissionState::Failed
+                                | OpenCodeSubmissionState::Interrupted
+                        ) {
+                            return Ok(TurnAdmission::Rejected { reason: "the original OpenCode receipt already settled; it was not sent again".into() });
+                        }
+                        submission = actual;
+                    }
+                    _ => {
+                        // Preserve the receipt and hold the logical fence even when SQLite
+                        // cannot currently tell us which side of CAS it committed. No observer
+                        // may infer never-sent from this speculative clone and no POST is made.
+                        submission.state = OpenCodeSubmissionState::Unknown;
+                        let (cancelled, _) = watch::channel(false);
+                        shared.state().active = Some(Active {
+                            submission: submission.clone(),
+                            cancelled,
+                        });
+                        shared.unknown(thread, &submission.id, &reason);
+                        if let Err(error) = shared.stop_process().await {
+                            tracing::error!(%error, "OpenCode uncertain claim cleanup failed");
+                        }
+                        return Ok(TurnAdmission::Unknown {
+                            turn_id: submission.id,
+                            reason,
+                        });
+                    }
+                }
+                unknown_reason = Some(reason);
+                false
+            }
+        };
         let (cancelled, rx) = watch::channel(false);
         shared.state().active = Some(Active {
             submission: submission.clone(),
@@ -488,6 +548,13 @@ impl OpenCodePlannerSession {
         tokio::spawn(async move {
             super::driver::drive(shared, submission, rx, payload).await;
         });
+        if let Some(reason) = unknown_reason {
+            reconcile.unknown(thread, &id, &reason);
+            return Ok(TurnAdmission::Unknown {
+                turn_id: id,
+                reason,
+            });
+        }
         // OpenCode's synchronous POST answers after completion, so use the exact durable
         // user message as its admission evidence. A short acknowledgement budget must not
         // turn an attempted request into a rejection or a retransmission.

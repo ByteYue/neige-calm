@@ -618,3 +618,52 @@ async fn opencode_production_denied_tool_loop_return_settles_failed_without_nati
         assert!(!session.has_unresolved_submission().await.unwrap());
     }
 }
+
+#[tokio::test]
+async fn opencode_production_claim_error_retains_receipt_and_fails_unsent_intent_without_post() {
+    let f = Fixture::new("complete").await;
+    sqlx::query(concat!(
+        "CREATE TRIGGER fixture_claim_error BEFORE UPDATE OF state ON opencode_submissions ",
+        "WHEN NEW.state='sending' BEGIN SELECT RAISE(ABORT,'fixture claim failure'); END;"
+    ))
+    .execute(f.repo.pool())
+    .await
+    .unwrap();
+    let session = f.session().await;
+    let mut notifications = session.subscribe_notifications();
+    session.mark_installed();
+    let model = TurnModelSelection {
+        model: Some("fixture/model".into()),
+        effort: None,
+    };
+    let result = session
+        .turn_start(
+            "thread",
+            vec![InputItem::Text {
+                text: "operation".into(),
+            }],
+            &model,
+            "claim-error",
+        )
+        .await;
+    assert!(
+        matches!(result, Ok(TurnAdmission::Unknown { .. })),
+        "a durably prepared intent cannot escape as ordinary retryable Err: {result:?}"
+    );
+    let (turn, _) = terminal(&mut notifications).await;
+    assert_eq!(turn["status"], "failed");
+    assert!(
+        turn["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("never sent")
+    );
+    let receipt = session
+        .recovery_submission(Some("claim-error"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state, OpenCodeSubmissionState::Failed);
+    assert_eq!(f.state()["posts"].as_array().unwrap().len(), 0);
+    session.shutdown().await.unwrap();
+}
