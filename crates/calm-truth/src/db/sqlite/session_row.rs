@@ -157,7 +157,8 @@ pub async fn owned_planner_revoke_tx(
     sqlx::query(
         r#"UPDATE worker_sessions SET mcp_token_hash = NULL
             WHERE provider = ?1 AND contract = 'planner'
-              AND (?2 IS NULL OR track_id = ?2)"#,
+              AND (?2 IS NULL OR track_id = ?2)
+              AND (?3 IS NULL OR id = ?3)"#,
     )
     .bind(provider.as_db_str())
     .bind(track)

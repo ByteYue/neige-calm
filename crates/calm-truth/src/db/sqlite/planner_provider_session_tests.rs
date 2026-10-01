@@ -126,3 +126,78 @@ async fn a_planner_init_without_a_provider_writes_nothing() {
         }
     );
 }
+
+#[tokio::test]
+async fn owned_planner_session_revocation_preserves_other_credentials() {
+    for (provider, stored) in [
+        (AgentProvider::Claude, "claude"),
+        (AgentProvider::OpenCode, "opencode"),
+    ] {
+        for scope in ["session", "missing", "track", "all"] {
+            let repo = fresh_repo().await;
+            let mut tx = repo.pool().begin().await.unwrap();
+            for (id, row_provider) in [
+                ("target", provider.clone()),
+                ("other", provider.clone()),
+                ("codex-control", AgentProvider::Codex),
+            ] {
+                let card = create_card_in_tx(&repo, &mut tx, id, "codex").await;
+                session_start_runtime_tx(
+                    &mut tx,
+                    WorkerSessionInit::shared_planner(
+                        id.into(),
+                        card,
+                        row_provider,
+                        WorkerSessionState::Idle,
+                        Some(format!("thread-{id}")),
+                        json!({"mode":"harness"}),
+                        1,
+                    ),
+                )
+                .await
+                .unwrap();
+                session_mcp_token_set_if_active_tx(&mut tx, id, &format!("token-{id}"))
+                    .await
+                    .unwrap();
+            }
+            let track: String =
+                sqlx::query_scalar("SELECT track_id FROM worker_sessions WHERE id = 'target'")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            let scope = match scope {
+                "session" => OwnedPlannerScope::Session("target"),
+                "missing" => OwnedPlannerScope::Session("does-not-exist"),
+                "track" => OwnedPlannerScope::Track(&track),
+                "all" => OwnedPlannerScope::All,
+                _ => unreachable!(),
+            };
+            let ids = match provider {
+                AgentProvider::Claude => claude_planner_revoke_tx(&mut tx, scope).await,
+                AgentProvider::OpenCode => opencode_planner_revoke_tx(&mut tx, scope).await,
+                AgentProvider::Codex => unreachable!(),
+            }
+            .expect("scoped revocation executes");
+            let expected_ids = match scope {
+                OwnedPlannerScope::Session("does-not-exist") => vec![],
+                OwnedPlannerScope::All => vec!["other", "target"],
+                _ => vec!["target"],
+            };
+            assert_eq!(ids, expected_ids, "{stored}/{scope:?}: returned sweep IDs");
+            let rows: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT id,mcp_token_hash FROM worker_sessions ORDER BY id")
+                    .fetch_all(&mut *tx)
+                    .await
+                    .unwrap();
+            for (id, token) in rows {
+                let expected = if expected_ids.contains(&id.as_str()) {
+                    None
+                } else {
+                    Some(format!("token-{id}"))
+                };
+                assert_eq!(token, expected, "{stored}/{scope:?}: credential for {id}");
+            }
+            tx.commit().await.unwrap();
+        }
+    }
+}
