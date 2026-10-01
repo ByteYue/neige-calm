@@ -1,159 +1,198 @@
-# OpenCode operational sessions through Neige
+# OpenCode operational conversations in Neige
 
-Status: S1 benchmark implemented; real memory query, exact session continuation,
-PTY reconnection and clean exit acceptance passed. See the
-[operational runbook](../opencode-operational-sessions.md).
+Status: revised design; native conversation integration is not implemented.
+The existing terminal diagnostic is a baseline, not completion of this feature.
 
 Tracking: [fork issue #1](https://github.com/ByteYue/neige-calm/issues/1).
-Original scope: [upstream issue #1928](https://github.com/keanji-x/neige-calm/issues/1928).
+Original discussion: [upstream issue #1928](https://github.com/keanji-x/neige-calm/issues/1928).
 
 ## Outcome
 
-An operator opens OpenCode in Neige, selects an explicit existing native session
-when needed, and enters operational questions, log/progress checks, ETL commands
-or audit prompts. The first acceptance asks OpenCode to inspect host memory and
-then continues that exact conversation.
+An operator binds an existing OpenCode native session in Neige, reads its history,
+and uses the Neige composer to ask about logs, progress, ETL or audits. Neige
+shows assistant replies, tool input/output and actual submission state. Reopening
+or refreshing returns to that exact session without resending earlier prompts.
 
-## Decision
+Opening OpenCode in an ordinary terminal already works. A launch button or a
+terminal memory benchmark does not supply this outcome. The previous design
+removed the essential integration while trying to reduce implementation scope.
+The [terminal runbook](../opencode-operational-sessions.md) remains diagnostic
+reference only; its passed checks do not validate the proposed conversation path.
 
-Start with the existing terminal surface. OpenCode runs as an ordinary developer
-CLI inside a Neige terminal card. Neige owns the card, PTY, input receipts and
-process lifecycle; OpenCode owns conversation history, tools, models and native
-session IDs. This is terminal integration, not a new Planner provider.
+## Decision and alternatives
 
-The production path already exists:
+Use a dedicated OpenCode conversation adapter with the existing chat presentation.
+Initially connect to an operator-managed loopback `opencode serve`, using its
+existing account, native history and project configuration. Bind existing sessions
+only, in operator-owned external directories. Neige does not start or supervise
+this server in the first increment.
 
-`terminal-cards` route -> `TerminalAdapter` -> proc supervisor/renderer ->
-`TerminalCardView` and terminal input/observe/control.
+Use synchronous HTTP message submission plus bounded snapshot polling. SSE and
+its reconnection machinery are unnecessary for the first usable version. A local
+receipt can return before the provider response: it acknowledges durable local
+admission, not native execution or completion.
 
-The route accepts `program`, `cwd`, `env`, `title`, theme and an optional
-idempotency key. The frontend API contract already includes these fields. A
-human can also create an ordinary shell terminal and run OpenCode inside it.
-
-Startup contains only a shell or a prompt-free OpenCode TUI. The terminal-create
-saga can retry a launch after a crash; an operational prompt must not be embedded
-in its program or startup flags. Wait for successful creation and terminal
-readiness, then enter the task. WebSocket input acknowledgements confirm a PTY
-write and do not deduplicate repeated input. The benchmark sends each command
-once and stops on unknown outcomes. MCP input receipts have a separate cached
-client lifetime; they are not a guarantee across kernel or renderer replacement.
-Run a bounded JSON command inside that established shell, not as its startup
-program. This restriction avoids changing terminal recovery for this increment.
-
-The initial implementation does not change PlannerBackend, the Harness state
-machine, scheduler, task kinds, agent/worker provider enums, actor identities,
-MCP credentials, database migrations or transcript schemas. Keep the card kind
-and execution provider as `terminal`; changing their labels would expand
-projection, cleanup and recovery responsibilities.
-
-## Session behavior
-
-- New interactive session: start the selected OpenCode executable in the chosen
-  working directory. The native TUI handles prompts, permissions and questions.
-- Existing session: use `--session <native-id>` with the same account and
-  configuration that own its history. Never substitute `--continue` or silently
-  create another session when the requested ID is missing.
-- Live reattachment: browser reconnection joins the existing PTY. A surviving
-  supervisor may also allow Neige to reattach after a kernel restart.
-- Process exit: reconnect does not respawn a dead child. An ordinary shell stays
-  usable when its OpenCode child exits; otherwise open a new terminal and
-  explicitly resume the recorded native session.
-- Interrupted operation: retain output and report uncertainty. Do not rerun a
-  prompt automatically, especially when it may have invoked an ETL/audit script.
-- Concurrency: avoid multiple writers to one native session. A fresh attachment
-  is for an explicitly selected, operator-owned, quiescent conversation.
-
-The TUI does not provide a reliable machine-readable session-created receipt.
-Do not extract session IDs from ANSI screen bytes. A bounded
-`opencode run --format json` can expose the native ID in output events; a run
-that ends before such an event may leave that ID unknown. A typed native
-session-list binding is a later convenience if manual selection is insufficient.
-
-`run` reads one complete prompt from non-TTY stdin and is not a continuing chat
-stream. Its unattended permission/question behavior differs from the TUI; do
-not enable `--auto` by default. The interactive TUI is the daily operations path.
-
-## First acceptance: memory query and exact continuation
-
-1. Select a configured local Neige test instance and the operator's OpenCode
-   executable/account. Record Neige build, OpenCode version and working directory.
-2. Create an ordinary shell terminal through Neige and wait for the create
-   operation to succeed and the shell to become ready. Then launch OpenCode via
-   terminal input. Do not put the diagnostic prompt in terminal startup or launch
-   it directly from the test driver and call that Neige integration.
-3. Ask it to execute bounded read-only diagnostics: `free -b`, `/proc/meminfo`,
-   and a short process listing containing PID, RSS and command name. Do not run
-   production ETL/audit scripts for this benchmark.
-4. Preserve command/tool output, answer, timestamps, Neige card/terminal IDs and
-   the actual native session ID when available. A response without command
-   evidence does not pass.
-5. Independently sample the same memory metrics on the same host. Distinguish
-   host total/available memory and swap from Neige/OpenCode process RSS and any
-   cgroup limit. Samples taken at different times need not be exactly equal.
-6. Explicitly resume the recorded conversation, ask about the preceding result
-   and run a second read-only command. Verify both retained context and new work.
-7. Reconnect the browser and verify the same live PTY. Separately stop/exit the
-   process and verify that resume requires an explicit launch and native ID.
-
-Terminal screen/replay and persisted output tails are bounded; a capture may be
-truncated. Save complete benchmark command output as an explicit artifact before
-that bound is reached, and retain truncation/unknown markers. Terminal running
-state describes the shell/TUI process, not an OpenCode turn or an ETL job. Inspect
-job progress and results through their actual commands and artifacts.
-
-This proves functional integration. Startup time and process RSS can be recorded
-as observations; they are not performance claims without comparable samples.
-
-## Roadmap
-
-| Stage | Change | Acceptance |
+| Alternative | What source inspection establishes | Decision |
 | --- | --- | --- |
-| S0 | This design, independent reviews, tracking issue and branch | Scope and lifecycle boundaries are explicit |
-| S1 | Reproducible launch and memory/continuation acceptance through existing terminal entry points | Real OpenCode tool output and exact native session continuation |
-| S2 | A narrow launch affordance, only if S1 exposes a usability gap | Executable/cwd/session choices reach existing terminal creation without shell interpolation |
-| Later | Structured per-turn output or HTTP/SSE when actually required | Separate design for submission uncertainty, snapshots and session authorization |
+| Existing terminal | Runs OpenCode but supplies no native binding, composer or structured transcript | Baseline only |
+| Per-turn CLI JSON | Provides output but needs separate history commands, lacks caller-selected message IDs and has unattended permission limitations | Do not build a second control path |
+| Extend PlainChat/Planner | PlainChat and Assistant select Codex; existing turn-start failures can be retried | Too much shared lifecycle and authority for this outcome |
+| Dedicated HTTP adapter | Native history, messages, pending requests and abort already exist | Smallest complete conversation path |
 
-S1 needs no new kernel protocol. A benchmark helper, if needed, only uses the
-existing terminal entry points and saves receipts/evidence; it must not copy
-terminal lifecycle logic or hide launch failures.
+Two design rounds inform this choice. The first removes terminal launch and asks
+whether the required Neige workflow remains: it does not. The second removes
+Planner, worker scheduling, server supervision, SSE, model catalog and Neige MCP
+from the native-conversation proposal: binding, sending, history and control still
+remain. These are source-level design comparisons, not runtime experiments or
+measured performance results.
 
-For S2, determine the smallest UI contract from the baseline. The current add
-menu exposes a fieldless terminal action, while the API already accepts program
-and cwd. Reuse the existing form, directory picker, API operation and terminal
-renderer. Avoid a new `opencode` card identity or a general provider framework.
-Validate shell argument construction in the owning launch feature and forward
-errors. The existing one-click shell workflow should remain available.
+## Product contract
 
-## Authority and verification
+- Select an existing native session from a bounded, directory-scoped list or
+  provide its exact ID. Show the selected directory and native ID.
+- Load a bounded native history snapshot with explicit truncation/pagination.
+  An absent session is an error, never a fresh session or a latest-session fallback.
+- Send plain text from the Neige composer. Native messages and parts supply the
+  transcript; Neige records its own submissions separately.
+- Show assistant text and expandable tool input/output, including running,
+  completed and error states. Preserve unsupported parts visibly.
+- Expose waiting permissions and questions. Allow one-time permission approval
+  or rejection and typed question answers. Do not enable blanket auto-approval
+  or instance-wide remembered permission grants.
+- Show submitting, running, waiting, failed, cancelling and unknown distinctly.
+  Allow one unresolved submission per native session; no queue or steer.
+- Stop is an explicit request against the bound session. Confirm native terminal
+  evidence before reporting cancellation; an abort response is not proof that
+  external jobs stopped or earlier side effects were reversed.
 
-Use the existing human-terminal environment contract for this increment. Do not
-silently switch HOME/configuration, copy credentials, inject a Neige MCP token
-or claim that OpenCode permissions provide an OS sandbox. If a dedicated
-credential-sensitive adapter becomes necessary, it needs typed configuration and
-an explicit child environment allowlist as a separate boundary change.
+Initial binding is read-only until the operator transfers the session's sole
+writing responsibility to Neige. Same-server busy checks are useful but are not
+an atomic lock. Another TUI process using the same native database may be active
+without appearing in this server's status. Concurrent TUI/Neige writing is outside
+the first contract. Detect external user messages or uncertain ownership and stop
+sending; do not abort another client's work.
 
-Before delivery of S1/S2, check launch, exact resume, missing binary, invalid cwd,
-missing session, authentication failure, browser reattachment, process exit and
-card/track cleanup. Unknown outcomes must not cause automatic prompt replay.
-Preserve existing ordinary terminal, Codex and Claude behavior.
+## Ownership and persistence
 
-Use the real production entry points for tests. Any frontend change requires its
-applicable layer guidance, lint/build/unit gates, real-browser preview and
-relevant browser tests. Run text ratchets for every repository change and review
-non-mechanical changes through two independent channels. Do not run real Codex
-E2E on the shared host.
+Configure the connection on the server through a typed loopback endpoint and
+credential reference. The browser selects a configured connection key, never an
+arbitrary URL or credential. Disable redirects and automatic POST retries.
+Every native request carries the validated directory scope. A changed connection
+scope invalidates the binding rather than silently targeting another account.
 
-## Evidence and current limits
+Keep a server-owned card binding: connection/scope reference, canonical directory,
+exact native session ID and binding generation. Create it through a dedicated
+entry point and reuse workspace freezing. Generic card creation/PATCH cannot
+forge or retarget this binding. Bind admission uses the existing canonical
+workspace ownership policy to reject Neige-managed directory scopes, including
+other tracks, paths within managed workspace roots, and kernel-created Attached
+track/lease worktrees and their descendants outside those roots. Track/area deletion can
+recycle those paths, so checking only the card's own track kind is insufficient.
+Managed-workspace support needs a later registered workspace-use guard.
+Register its identity and disposal behavior in the
+owning card extension surface rather than hardcoding OpenCode in generic policy.
 
-- Baseline: Neige `a4a16f14`; no runtime implementation changed for this design.
-- Installed OpenCode reports `1.18.34`; this shell does not find it on PATH.
-  The launch must resolve the operator's selected executable explicitly.
-- Current terminal lifecycle was checked in
-  `crates/calm-server/src/routes/terminal_cards.rs`,
-  `crates/calm-server/src/operation/terminal_adapter.rs`, and
-  `crates/calm-server/src/ws/terminal.rs`.
-- The real Neige/OpenCode memory and continuation benchmark passed on
-  2026-10-01. The runbook records exact commands, metrics, receipts and limits;
-  no performance improvement is claimed.
-- Protocol reference: [OpenCode CLI documentation](https://opencode.ai/docs/cli/)
-  and pinned [v1.18.34 run implementation](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/cli/cmd/run.ts).
+One new submission journal is sufficient initially. Its unresolved claim is unique
+across cards and tracks by canonical connection scope, directory and native session
+ID, excluding card ID and binding generation. Multiple read-only views may coexist;
+only one view holds writing responsibility. Store the binding identity,
+request key, content fingerprint, prompt, preallocated native message ID and
+submission state before dispatch. A durable claim permits one send attempt. The
+same request key and content returns the original receipt; different content
+conflicts. Native message IDs correlate history; they do not make OpenCode POSTs
+idempotent.
+
+After response loss, timeout or Neige restart, an attempted submission becomes
+unknown and is only reconciled by exact native message lookup and related parts.
+No automatic resend occurs. Missing messages or default idle cannot prove that
+nothing executed. Unknown blocks new sends until correlated terminal evidence resolves it; it never
+quietly becomes a retryable failure. Acknowledging or abandoning the receipt does
+not declare it unsent or clear the native-session fence. Without such evidence,
+the operator can detach and select a different existing session.
+
+Completion requires a correlated final assistant message, persisted completion
+and qualified finish/error semantics, with related tools settled. Idle alone is
+insufficient. Protocol completion and operational success remain distinct: an
+ETL or audit succeeds according to its actual command result and artifacts.
+
+Card, track and area deletion share the registered disposal path. Removal detaches
+Neige and does not delete native history, abort native work or stop the user's
+server. Retain unresolved journal records independently of card deletion; the
+same scope/session remains fenced if it is rebound. Cancel undispatched claims
+atomically; attempted claims retain their uncertainty and reconciliation record.
+Removing a read-only view cannot cancel another view's submission claim.
+
+Pending permission/question lists contain other sessions. Filter by the binding
+and revalidate request ownership before replying. Stale requests produce visible
+conflicts; they never cause approval of another request or automatic retries.
+
+## Implementation boundaries
+
+| Owner | Minimal change |
+| --- | --- |
+| Server OpenCode feature | Typed HTTP client, snapshots, binding and submission controller, reconciliation, pending replies and abort |
+| REST/configuration | Human-user authorization, configured connection selection, bind/read/send/stop/reply entry points and OpenAPI wiring |
+| Truth persistence | New journal migration and typed repository operations; server-owned binding and unresolved-session fence |
+| Card lifecycle | Registered identity, protected binding fields, workspace freeze, disposal through card/track/area paths and boot reconciliation |
+| Frontend core | Typed API contracts and native-to-conversation projection, generated artifacts where required |
+| Frontend app/chat | Existing composer/thread presentation, a narrow OpenCode data/actions port, session selection and tool output disclosure |
+
+Do not manufacture a worker session, Codex notification or MCP principal for this
+feature. Keep PlannerBackend, WorkerProvider, scheduler and task kinds unchanged.
+Native snapshots remain the transcript authority; do not add a second full message
+store or copy the Harness queue/state machine.
+
+Respect frontend layers: systems registers a headless conversation identity;
+app composes the data port with chat presentation. Systems must not import chat
+features, and a separate feature must not import another feature horizontally.
+The current app conversation store is Harness-specific and cannot be reused as-is.
+Existing activity `detail` is an error summary: add typed tool input/output
+presentation rather than putting successful output into that field.
+
+## Roadmap and acceptance
+
+| Stage | Deliverable | Exit check |
+| --- | --- | --- |
+| P1 | Bind an existing session and render native history through Neige | Exact identity and directory; missing session fails; two sessions never mix |
+| P2 | Durable send, snapshot progress and structured replies through the Neige composer | Two consecutive turns use the same session; tool input/output is visible; busy blocks another send |
+| P3 | Pending replies, explicit stop, restart/unknown reconciliation and disposal | Permission/question round trip; refresh/restart restore history; lost response never resends; deletion/rebind retains unresolved fences |
+
+P1/P2 are implementation slices; P3 completes the first operational release.
+New-session creation, automatic server launch, model-selection UI, SSE and full
+Planner/provider support require a later demonstrated need.
+
+The principal automated acceptance uses production Neige REST entry points with a
+local fake OpenCode server: record one tool-side effect, drop the response, then
+retry the browser request and restart Neige. Dispatch count remains one and the
+submission stays unknown until positive native evidence resolves it. Also cover
+request-key conflicts, two cards concurrently sending to the same native session
+(total dispatch count one), foreign-session pending requests, idle
+false positives, invalid bindings, managed-directory admission rejection
+(including another track's managed path and generated Attached worktree), stale
+replies and deletion/rebind. Read-only
+views cannot stop work; an external turn after our completed request cannot be
+aborted through that old request.
+
+After those checks, use the real Neige composer to ask for host memory as one
+read-only example. Inspect structured command output, refresh, then ask a related
+second question in the same session. This validates the new product workflow; a
+terminal-only result does not pass. Use a controlled script marker for execution
+and cancellation checks; do not run production ETL merely to demonstrate support.
+
+Run focused Rust tests, critical assertion mutations in an exclusive worktree,
+relevant Codex/Claude regressions, frontend lint/build/tests, real-browser preview
+and integrated browser checks. Run text ratchets and two independent diff reviews.
+Never enable real Codex E2E on the shared production host.
+
+## Evidence and limitations
+
+Source baseline: Neige `17cfb595`; OpenCode `1.18.34`, pinned commit
+`aec0b9a6d8898f68f923aaf08b7306d931fd9d76`. Important Neige paths are
+`harness/profile.rs`, `harness/run_loop.rs`, `routes/track_conversations.rs`,
+`routes/cards.rs`, and frontend chat/thread plus app conversation composition.
+The [OpenCode server API](https://opencode.ai/docs/server/) supplies native
+sessions/messages/abort. Pinned message submission, completion and pending-request
+behavior were checked in OpenCode's session prompt and instance HTTP handlers.
+
+No proposed HTTP integration, recovery or cancellation test has run yet. Existing
+terminal diagnostic evidence must not be reported as native-feature acceptance.
