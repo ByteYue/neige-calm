@@ -43,7 +43,7 @@ def store(sid, body):
 def messages(sid):
     with LOCK, sqlite3.connect(DB) as db:
         return [json.loads(row[0]) for row in db.execute(
-            "SELECT body FROM messages WHERE sid=? ORDER BY seq", (sid,))]
+            "SELECT body FROM messages WHERE sid=? ORDER BY json_extract(body, '$.info.time.created'), id", (sid,))]
 
 def mcp():
     env = SETTINGS["mcp"]["calm"]["environment"]
