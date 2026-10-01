@@ -45,6 +45,7 @@ const GIT_OUTPUT_CAP: usize = 1024 * 1024;
 pub(crate) struct WorkerLeasePlan {
     /// The track's `agent_cwd()`: the worker's cwd and the lease row's `path`.
     pub path: PathBuf,
+    pub access_mode: calm_types::workspace_access::WorkspaceAccess,
     /// The branch the checkout is on (D4); spawn verifies HEAD is on it.
     pub branch: String,
     /// HEAD of `path`, its realpath and its common dir (D2).
@@ -94,6 +95,21 @@ pub(crate) async fn prepare_worker_lease_tx(
     track_id: &str,
     workspace_root: &Path,
 ) -> Result<WorkerLeasePlan> {
+    prepare_worker_access_tx(
+        tx,
+        track_id,
+        workspace_root,
+        calm_types::workspace_access::WorkspaceAccess::ReadWrite,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_worker_access_tx(
+    tx: &mut Tx<'_>,
+    track_id: &str,
+    workspace_root: &Path,
+    access_mode: calm_types::workspace_access::WorkspaceAccess,
+) -> Result<WorkerLeasePlan> {
     validate_path_segment("track_id", track_id)?;
     let (kind, workspace_path, worktree) = track_workspace_tx(tx, track_id).await?;
     let path = match kind {
@@ -113,11 +129,16 @@ pub(crate) async fn prepare_worker_lease_tx(
         },
     };
     let branch = worker_branch(track_id, worktree.is_some())?;
-    ensure_clean_tree(&path).await?;
+    if access_mode == calm_types::workspace_access::WorkspaceAccess::ReadOnly {
+        super::task_guard::verify_read_tree(&path).await?;
+    } else {
+        ensure_clean_tree(&path).await?;
+    }
     let superseded = supersede_stuck_leases_tx(tx, &path).await?;
     let base = directory_base(&path)?;
     Ok(WorkerLeasePlan {
         path,
+        access_mode,
         branch,
         base,
         superseded,
@@ -252,7 +273,7 @@ async fn supersede_stuck_leases_tx(tx: &mut Tx<'_>, path: &Path) -> Result<Vec<B
     let sql = format!(
         "SELECT {WORKSPACE_LEASE_COLUMNS} FROM workspace_leases \
          WHERE path = ?1 AND state = 'held' \
-         AND lease_owner IN (SELECT id FROM operations WHERE phase = ?2)"
+         AND access_mode='read_write' AND lease_owner IN (SELECT id FROM operations WHERE phase = ?2)"
     );
     let rows = sqlx::query(&sql)
         .bind(path.to_string_lossy().as_ref())

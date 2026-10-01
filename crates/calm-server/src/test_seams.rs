@@ -96,6 +96,7 @@ pub async fn acquire_based_workspace_lease_for_test(
         LeaseBase, WorkerLeasePlan, acquire_workspace_lease_tx, base,
     };
     let plan = WorkerLeasePlan {
+        access_mode: calm_types::workspace_access::WorkspaceAccess::ReadWrite,
         path: path.to_path_buf(),
         branch: "main".into(),
         base: LeaseBase {

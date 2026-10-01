@@ -53,7 +53,7 @@ pub(crate) async fn release_workspace_lease_for_card_tx(
 ) -> Result<Vec<(ActorId, EventScope, Event)>> {
     let sql = format!(
         "SELECT {WORKSPACE_LEASE_COLUMNS} FROM workspace_leases \
-         WHERE card_id = ?1 AND state IN ('held','releasing') \
+         WHERE card_id = ?1 AND holder_kind='task' AND state IN ('held','releasing') \
          ORDER BY created_at_ms DESC, lease_id DESC LIMIT 1"
     );
     let row = sqlx::query(&sql)
@@ -128,6 +128,17 @@ async fn release_lease_tx(
     lease: &WorkspaceLease,
     delivery: ReleaseDelivery,
 ) -> Result<Vec<(ActorId, EventScope, Event)>> {
+    if lease.access_mode == calm_types::workspace_access::WorkspaceAccess::ReadOnly {
+        let stopped: bool = sqlx::query_scalar(
+            "SELECT read_stop_confirmed_at_ms IS NOT NULL FROM workspace_leases WHERE lease_id=?1",
+        )
+        .bind(&lease.lease_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if !stopped {
+            return Ok(Vec::new());
+        }
+    }
     let events = release_workspace_lease_tx(tx, lease).await?;
     if events.is_empty() || lease.delivery_policy != Some(DeliveryPolicy::Kernel) {
         return Ok(events);

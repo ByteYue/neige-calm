@@ -366,6 +366,14 @@ impl Task {
         serde_json::from_str(&self.depends_on_json).unwrap_or_default()
     }
 
+    pub fn workspace_access(
+        &self,
+    ) -> Result<calm_types::workspace_access::WorkspaceAccess, String> {
+        let context: serde_json::Value =
+            serde_json::from_str(&self.context_json).map_err(|error| error.to_string())?;
+        calm_types::workspace_access::WorkspaceAccess::from_context(&context)
+    }
+
     /// #1830 S2 D5: [`calm_types::task_execution::runs_in_track_checkout`] on this row.
     pub fn runs_in_track_checkout(&self) -> bool {
         let kind = match self.kind {

@@ -585,6 +585,18 @@ async fn settle(shared: &Shared, input: SettleInput, ending: Ending) {
                 "claude planner settlement stop cut off at settle_by".into(),
             ))
         });
+    if stopped.is_ok()
+        && let Some(pool) = params.repo.sqlite_pool()
+        && let Err(error) =
+            crate::operation::workspace_lease::execution_guard::release_stopped_execution(
+                &pool,
+                "native",
+                &thread.to_string(),
+            )
+            .await
+    {
+        tracing::warn!(%error,"claude write guard release failed; retained for retry");
+    }
     if let Err(error) = stopped {
         tracing::warn!(
             worker_session_id = %params.worker_session_id,

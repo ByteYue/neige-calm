@@ -62,6 +62,12 @@ pub struct OperationRuntime {
 }
 
 impl OperationRuntime {
+    pub(crate) fn shared_codex(
+        &self,
+    ) -> Option<&crate::shared_codex_appserver::SharedCodexAppServer> {
+        self.spawn_ctx.shared_codex_appserver.as_deref()
+    }
+
     /// Kinds installed in this runtime's production adapter registry.
     pub fn registered_adapter_kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.kinds.keys().copied()
@@ -172,6 +178,12 @@ impl OperationRuntime {
 
     pub async fn fail_running_worker_card(&self, card_id: &str) -> Result<()> {
         self.interrupt_running_codex_turn_for_card(card_id).await?;
+        super::workspace_lease::task_guard::confirm_read_stop(
+            &self.spawn_ctx.operation_repo.sqlite_pool(),
+            card_id,
+            self.spawn_ctx.shared_codex_appserver.as_deref(),
+        )
+        .await?;
         if let Some(term) = self.spawn_ctx.repo.terminal_get_by_card(card_id).await? {
             reap_terminal_artifacts_with_renderer(
                 Some(self.spawn_ctx.terminal_renderer.as_ref()),

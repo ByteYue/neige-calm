@@ -56,9 +56,9 @@ pub type WorkerIdleClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 /// The live recheck behind the idle arm. The persisted `last_thread_status` only selects a
 /// candidate; this probe's `thread/read` is the evidence.
 pub struct WorkerIdleWake {
-    probe: Arc<dyn CodexDaemonProbe>,
+    pub(super) probe: Arc<dyn CodexDaemonProbe>,
     grace: Duration,
-    probe_timeout: Duration,
+    pub(super) probe_timeout: Duration,
     clock: WorkerIdleClock,
 }
 

@@ -449,7 +449,14 @@ impl ClaudePlannerSession {
             Some(token) if self.row_hash_present().await? => token,
             _ => self.mint_mcp_token().await?,
         };
+        // stop() scans the session marker and returns Ok only when no marked process remains.
         stop(&host.instance, &params.worker_session_id).await?;
+        if let Some(pool) = params.repo.sqlite_pool() {
+            crate::operation::workspace_lease::execution_guard::release_stopped_execution(
+                &pool, "native", thread,
+            )
+            .await?;
+        }
 
         let line = serde_json::to_string(&UserLine::new(
             thread_uuid,
@@ -486,6 +493,9 @@ impl ClaudePlannerSession {
             Ok(argv) => argv,
             Err(error) => return Err(self.abort_before_ok(None, instructions, error).await),
         };
+        if let Some(pool) = params.repo.sqlite_pool() {
+            crate::operation::workspace_lease::execution_guard::ExecutionWriteGuard::acquire_native(&pool,&params.card_id,thread,"").await?.started(&turn_id).await?;
+        }
         let spawned = Command::new(&config.claude_binary)
             .args(argv)
             .env_clear()

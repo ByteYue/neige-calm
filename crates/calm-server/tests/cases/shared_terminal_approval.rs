@@ -109,6 +109,7 @@ async fn worker_mint_does_not_receive_planner_terminal_policy() {
             None,
             root.path().join("mcp.sock"),
             "fixture-token".into(),
+            "workspace-write",
         )
         .await
         .unwrap();

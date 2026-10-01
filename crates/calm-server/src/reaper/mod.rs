@@ -458,6 +458,13 @@ async fn release_reaped_worker_workspace_lease(
     session: &WorkerSession,
 ) -> Result<()> {
     if let Some(card_id) = session.card_id.as_ref() {
+        if let Some(pool) = repo.sqlite_pool() {
+            crate::operation::workspace_lease::task_guard::record_read_stop(
+                &pool,
+                card_id.as_str(),
+            )
+            .await?;
+        }
         release_workspace_lease_for_card_repo(
             repo,
             events,

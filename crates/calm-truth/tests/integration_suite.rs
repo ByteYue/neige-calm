@@ -48,3 +48,6 @@ mod file_delivery_migration;
 
 #[path = "planner_provider_card_key_migration.rs"]
 mod planner_provider_card_key_migration;
+
+#[path = "workspace_access_migration.rs"]
+mod workspace_access_migration;

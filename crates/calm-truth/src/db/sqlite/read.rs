@@ -979,6 +979,7 @@ impl RepoRead for SqlxRepo {
             r#"SELECT lease_id, card_id, track_id, path, state
                FROM workspace_leases
                WHERE card_id = ?1
+                 AND holder_kind = 'task'
                  AND state = 'held'
                ORDER BY created_at_ms DESC, lease_id DESC
                LIMIT 1"#,

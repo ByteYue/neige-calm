@@ -946,6 +946,7 @@ fn delivery_script_no_change_after_commit_reset() {
             git_common_dir: repo.common_dir.clone(),
         }),
         delivery_policy: Some(DeliveryPolicy::Kernel),
+        access_mode: calm_types::workspace_access::WorkspaceAccess::ReadWrite,
     };
     let delivery = delivery_row(None);
     let payload = forge_payload_for(&delivery, &lease, &repo.branch).unwrap();
@@ -1221,6 +1222,7 @@ async fn kernel_lease(
         .join(card_id);
     std::fs::create_dir_all(&path).unwrap();
     let plan = WorkerLeasePlan {
+        access_mode: calm_types::workspace_access::WorkspaceAccess::ReadWrite,
         base: LeaseBase {
             base_sha: "b".repeat(40),
             base_source: base::BaseSource::Commit,
@@ -1952,6 +1954,7 @@ fn candidate_from_operation_result_copies_event_and_lease() {
             git_common_dir: PathBuf::from("/real/repo/.git"),
         }),
         delivery_policy: Some(DeliveryPolicy::Kernel),
+        access_mode: calm_types::workspace_access::WorkspaceAccess::ReadWrite,
     };
     let delivery = delivery_row(None);
     let event = json!({
@@ -2415,6 +2418,7 @@ fn lease(delivery_policy: Option<DeliveryPolicy>) -> WorkspaceLease {
             git_common_dir: PathBuf::from("/repo/.git"),
         }),
         delivery_policy,
+        access_mode: calm_types::workspace_access::WorkspaceAccess::ReadWrite,
     }
 }
 

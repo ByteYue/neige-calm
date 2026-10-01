@@ -162,6 +162,7 @@ pub(crate) enum NoBindingReason {
     Terminal,
     ChildTrack,
     NoLease,
+    ReadOnly,
 }
 
 /// Why a leased attempt is not bound: the lease predates kernel delivery.
@@ -256,6 +257,11 @@ pub(crate) fn candidate_binding(
             reason: NoBindingReason::NoLease,
         });
     };
+    if lease.access_mode == calm_types::workspace_access::WorkspaceAccess::ReadOnly {
+        return Ok(CandidateBinding::None {
+            reason: NoBindingReason::ReadOnly,
+        });
+    }
     let Some(facts) = facts else {
         return Err(CalmError::Internal(format!(
             "task {}: lease {} has no worktree facts",

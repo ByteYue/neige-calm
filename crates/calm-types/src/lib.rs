@@ -34,3 +34,5 @@ pub mod worker;
 pub mod worker_flow;
 
 pub mod task_execution;
+
+pub mod workspace_access;

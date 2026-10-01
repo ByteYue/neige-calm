@@ -23,8 +23,8 @@ use crate::mcp_server::wiring::{card_mcp_env, mint_and_persist_card_token};
 use crate::model::{Card, CardRole, new_id, now_ms};
 use crate::operation::worker_cleanup::{WorkerCleanupOutcome, compensate_worker_rows};
 use crate::operation::workspace_lease::{
-    ReleaseDelivery, acquire_workspace_lease_tx, prepare_worker_lease_tx,
-    release::release_workspace_lease_by_id, worker::verify_worker_checkout,
+    ReleaseDelivery, acquire_workspace_lease_tx, release::release_workspace_lease_by_id,
+    worker::verify_worker_checkout,
 };
 use crate::pending_codex_threads::{PendingEntry, PendingThreadStartRegistry};
 use crate::planner_model::TurnModelSelection;
@@ -774,7 +774,15 @@ impl ProviderAdapter for CodexWorkerAdapter {
         let track_id = TrackId::from(payload.track_id.clone());
         // `payload.cwd` is forward-compatible only: the worker runs in the track's checkout
         // (#1830 S2), decided and checked clean here and frozen below; the spawn only verifies it.
-        let plan = prepare_worker_lease_tx(tx, track_id.as_str(), &self.workspace_root).await?;
+        let access = calm_types::workspace_access::WorkspaceAccess::from_context(&payload.context)
+            .map_err(CalmError::BadRequest)?;
+        let plan = super::workspace_lease::worker::prepare_worker_access_tx(
+            tx,
+            track_id.as_str(),
+            &self.workspace_root,
+            access,
+        )
+        .await?;
         let cwd = plan.path.to_string_lossy().to_string();
         let env = build_codex_env(self.repo.as_ref(), self.codex.as_ref(), &card_id).await?;
         let rendered_prompt = render_task_worker_prompt(
@@ -852,6 +860,7 @@ impl ProviderAdapter for CodexWorkerAdapter {
             "terminal_id": term.id,
             "cwd": cwd,
             "lease_id": lease.lease_id,
+            "workspace_access":access,
             "branch": plan.branch,
             "base_sha": plan.base.base_sha,
             "canonical_path": plan.base.canonical_path,
@@ -963,6 +972,11 @@ impl ProviderAdapter for CodexWorkerAdapter {
             rendered_prompt: &rendered_prompt,
             cwd: &cwd,
             legacy_env: &env,
+            workspace_guard: super::workspace_lease::task_guard::TaskWorkspaceGuard::restore(
+                &ctx.operation_repo.sqlite_pool(),
+                &output.output_string("lease_id", "codex-worker")?,
+            )
+            .await?,
         })
         .await?;
 
@@ -1044,6 +1058,11 @@ impl ProviderAdapter for CodexWorkerAdapter {
         if step.op == "release_workspace_lease" {
             let lease_id = step.arg_string("lease_id", "codex")?;
             let pool = ctx.operation_repo.sqlite_pool();
+            super::workspace_lease::task_guard::record_read_stop(
+                &pool,
+                &output.output_string("card_id", "codex cleanup")?,
+            )
+            .await?;
             release_workspace_lease_by_id(
                 &pool,
                 &ctx.events,
@@ -1141,11 +1160,13 @@ pub(crate) struct CodexWorkerSpawnCtx<'a> {
     pub(crate) rendered_prompt: &'a str,
     pub(crate) cwd: &'a str,
     pub(crate) legacy_env: &'a Value,
+    pub(crate) workspace_guard: super::workspace_lease::task_guard::TaskWorkspaceGuard,
 }
 
 pub(crate) async fn spawn_codex_worker_via_shared_daemon(
     ctx: CodexWorkerSpawnCtx<'_>,
 ) -> Result<SpawnHandle> {
+    let sandbox_mode = ctx.workspace_guard.into_sandbox().await?;
     let mut notifications = ctx.shared_codex_appserver.subscribe_notifications();
     let remote_uri = ctx.shared_codex_appserver.remote_uri();
     let card_id = ctx.card.id.as_str();
@@ -1184,6 +1205,7 @@ pub(crate) async fn spawn_codex_worker_via_shared_daemon(
                     Some(worker_instructions),
                     server.shim_config.socket_path.clone(),
                     token.to_string(),
+                    sandbox_mode,
                 )
                 .await?;
             tracing::info!(

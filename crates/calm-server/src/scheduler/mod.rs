@@ -3,6 +3,7 @@
 //! never reorders beyond `(priority DESC, created_at ASC, key ASC)`, never edits the plan.
 
 mod git_delivery;
+mod read_guards;
 mod running_worker;
 mod worker_failure;
 use running_worker::RunningWorkerFailure;
@@ -148,7 +149,11 @@ pub fn compute_ready(tasks: &[Task], track_idle: bool) -> Result<Vec<Task>> {
         {
             continue;
         }
-        if !track_idle && task.runs_in_track_checkout() {
+        if !track_idle
+            && task.runs_in_track_checkout()
+            && task.workspace_access().map_err(CalmError::BadRequest)?
+                == calm_types::workspace_access::WorkspaceAccess::ReadWrite
+        {
             continue;
         }
         ready.push(task.clone());
@@ -416,6 +421,7 @@ pub struct Scheduler {
     gate_logs_dir: std::path::PathBuf,
     /// Per-track single-flight: exactly the push-locks pattern.
     track_locks: DashMap<TrackId, Arc<tokio::sync::Mutex<()>>>,
+    read_settlement: Arc<tokio::sync::Mutex<()>>,
     /// Dirty flags — a trigger arriving mid-pass marks dirty and the
     /// lock holder loops once more, so no envelope is ever lost to "a
     /// pass was already running".
@@ -523,6 +529,7 @@ impl Scheduler {
             idle_checks: Self::new_idle_checks(),
             gate_logs_dir,
             track_locks: DashMap::new(),
+            read_settlement: Arc::new(tokio::sync::Mutex::new(())),
             track_dirty: DashMap::new(),
             inflight: Arc::new(DashMap::new()),
             boot_sweep_done: AtomicBool::new(false),
@@ -1076,7 +1083,7 @@ impl Scheduler {
                         // #1830 S2 D5: a codex/claude worker runs in the track's checkout, so it
                         // needs the track idle apart from itself.
                         if frozen.runs_in_track_checkout()
-                            && !crate::db::sqlite::track_idle(tx, track_id.as_str(), &task_id)
+                            && !crate::db::sqlite::track_available(tx, track_id.as_str(), &task_id, frozen.workspace_access().map_err(CalmError::BadRequest)?)
                                 .await?
                         {
                             return Err(race_lost_err());
@@ -1549,6 +1556,7 @@ impl Scheduler {
     /// Shared sweep body: runs the reconcile arms inline and returns the set of tracks
     /// holding `pending` rows for the caller to dispatch.
     async fn sweep_reconcile(self: &Arc<Self>) -> BTreeSet<String> {
+        self.start_read_guard_settlement();
         // The parked sweep recovers durable verdicts from dead gates and kill-fails
         // past-deadline work; every arm is fenced single-winner, so racing the live observer is safe.
         if let Some(runtime) = self.operation_runtime.upgrade()

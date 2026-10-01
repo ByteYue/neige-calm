@@ -18,8 +18,10 @@ use super::forge_action_adapter::FORGE_ACTION_KIND;
 use super::{PhaseTag, TimestampMs, Tx};
 
 pub(crate) mod base;
+pub(crate) mod execution_guard;
 pub(crate) mod facts;
 pub(crate) mod release;
+pub(crate) mod task_guard;
 pub(crate) mod track_worktree;
 pub(crate) mod upstream;
 pub(crate) mod upstream_fetch;
@@ -44,7 +46,7 @@ pub(crate) use worker::{WorkerLeasePlan, prepare_worker_lease_tx, worker_branch_
 /// calm-truth read `db/sqlite/read.rs` `workspace_lease_for_card` builds its
 /// own five-field struct and is deliberately not on this list.
 pub(crate) const WORKSPACE_LEASE_COLUMNS: &str = "lease_id, card_id, track_id, path, state, boot_id, \
-     base_sha, base_source, base_attempt_id, canonical_path, git_common_dir, delivery_policy";
+     base_sha, base_source, base_attempt_id, canonical_path, git_common_dir, delivery_policy, access_mode";
 
 #[derive(Clone, Debug)]
 pub(crate) struct WorkspaceLease {
@@ -61,6 +63,7 @@ pub(crate) struct WorkspaceLease {
     /// `Some(Kernel)` for every lease a worker op takes since slice 2 (written
     /// in the same INSERT as `base`); `None` is legacy — no candidate binding.
     pub delivery_policy: Option<DeliveryPolicy>,
+    pub access_mode: calm_types::workspace_access::WorkspaceAccess,
 }
 
 /// A kernel-made worktree as a git target: the track worktree (#1830 S1) that
@@ -148,6 +151,7 @@ pub(crate) async fn acquire_workspace_lease_tx(
         lease_owner,
         &plan.path,
         Some(&plan.base),
+        plan.access_mode,
     )
     .await
 }
@@ -168,7 +172,16 @@ pub(crate) async fn acquire_plain_workspace_lease_tx(
             path.display()
         ))
     })?;
-    acquire_workspace_lease_at_path_tx(tx, card_id, track_id, lease_owner, path, None).await
+    acquire_workspace_lease_at_path_tx(
+        tx,
+        card_id,
+        track_id,
+        lease_owner,
+        path,
+        None,
+        calm_types::workspace_access::WorkspaceAccess::ReadWrite,
+    )
+    .await
 }
 
 async fn acquire_workspace_lease_at_path_tx(
@@ -178,6 +191,7 @@ async fn acquire_workspace_lease_at_path_tx(
     lease_owner: &str,
     path: &Path,
     base: Option<&LeaseBase>,
+    access_mode: calm_types::workspace_access::WorkspaceAccess,
 ) -> Result<(WorkspaceLease, BroadcastEnvelope)> {
     let lease_id = new_id();
     let path_string = path.to_string_lossy().to_string();
@@ -188,9 +202,9 @@ async fn acquire_workspace_lease_at_path_tx(
                lease_id, card_id, track_id, path, state, lease_owner,
                lease_until_ms, boot_id, created_at_ms, updated_at_ms,
                base_sha, base_source, base_attempt_id, canonical_path, git_common_dir,
-               delivery_policy
+               delivery_policy,access_mode
            )
-           VALUES (?1, ?2, ?3, ?4, 'held', ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+           VALUES (?1, ?2, ?3, ?4, 'held', ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"#,
     )
     .bind(&lease_id)
     .bind(card_id)
@@ -200,9 +214,18 @@ async fn acquire_workspace_lease_at_path_tx(
     .bind(now + WORKSPACE_LEASE_MS)
     .bind(&boot_id)
     .bind(now);
-    let delivery_policy = base.map(|_| DeliveryPolicy::Kernel);
+    let delivery_policy = if access_mode == calm_types::workspace_access::WorkspaceAccess::ReadOnly
+    {
+        None
+    } else {
+        base.map(|_| DeliveryPolicy::Kernel)
+    };
     LeaseBase::bind_columns(query, base)?
         .bind(delivery_policy.map(DeliveryPolicy::as_column))
+        .bind(match access_mode {
+            calm_types::workspace_access::WorkspaceAccess::ReadOnly => "read_only",
+            _ => "read_write",
+        })
         .execute(&mut **tx)
         .await?;
 
@@ -229,6 +252,7 @@ async fn acquire_workspace_lease_at_path_tx(
         boot_id,
         base: base.cloned(),
         delivery_policy,
+        access_mode,
     };
     Ok((
         lease,
@@ -419,6 +443,9 @@ pub(super) fn row_to_workspace_lease(row: sqlx::sqlite::SqliteRow) -> Result<Wor
         boot_id: row.try_get("boot_id")?,
         base: LeaseBase::from_row(&row)?,
         delivery_policy: DeliveryPolicy::from_row(&row)?,
+        access_mode: serde_json::from_value(serde_json::Value::String(
+            row.try_get("access_mode")?,
+        ))?,
     })
 }
 

@@ -3070,6 +3070,19 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(pool) = inner.repo.sqlite_pool() {
+        let mut connection = pool.acquire().await?;
+        if !crate::db::sqlite::track_available(
+            &mut connection,
+            inner.track_id.as_str(),
+            "",
+            calm_types::workspace_access::WorkspaceAccess::ReadWrite,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+    }
     let prior_turn = {
         let mut state = inner.state.lock().await;
         if !state.can_issue_turn() {

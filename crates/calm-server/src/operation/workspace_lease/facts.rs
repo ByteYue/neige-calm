@@ -53,7 +53,7 @@ pub(crate) async fn latest_workspace_lease_for_card_tx(
 ) -> Result<Option<super::WorkspaceLease>> {
     let sql = format!(
         "SELECT {WORKSPACE_LEASE_COLUMNS} FROM workspace_leases \
-         WHERE card_id = ?1 ORDER BY created_at_ms DESC, lease_id DESC LIMIT 1"
+         WHERE card_id = ?1 AND holder_kind='task' ORDER BY created_at_ms DESC, lease_id DESC LIMIT 1"
     );
     let row = sqlx::query(&sql)
         .bind(card_id)

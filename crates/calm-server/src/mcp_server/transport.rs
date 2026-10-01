@@ -641,6 +641,15 @@ async fn dispatch_plugin_tools_call(
     {
         return Err(unknown_tool());
     }
+    if identity.role == CardRole::Worker && ctx.sqlite_pool.as_ref().is_some() {
+        let pool = ctx.sqlite_pool.as_ref().expect("checked pool");
+        if crate::operation::workspace_lease::task_guard::is_read_card(pool, &identity.card_id)
+            .await
+            .map_err(|error| RpcError::internal(error.to_string()))?
+        {
+            return Err(unknown_tool());
+        }
+    }
     require_role_any(&identity, PLUGIN_TOOL_ROLES)?;
     match kind {
         None => {

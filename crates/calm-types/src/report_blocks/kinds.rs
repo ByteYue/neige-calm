@@ -274,6 +274,11 @@ fn validate_task(map: &Map<String, Value>, errors: &mut Vec<String>) {
     }
     if let Some(context) = map.get("context") {
         check_nested_string_caps("context", context, errors);
+        if let Err(error) = crate::workspace_access::WorkspaceAccess::from_context(context)
+            .and_then(|access| access.validate_task(&Value::Object(map.clone())))
+        {
+            errors.push(error);
+        }
     }
     match map.get("refs") {
         None => {}

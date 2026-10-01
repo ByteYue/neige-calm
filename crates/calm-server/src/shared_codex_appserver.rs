@@ -1229,11 +1229,12 @@ impl SharedCodexAppServer {
         developer_instructions: Option<String>,
         socket_path: PathBuf,
         raw_token: String,
+        sandbox_mode: &str,
     ) -> Result<String> {
         let params = SharedThreadStartParams {
             cwd,
             approval_policy: "never".into(),
-            sandbox_mode: "workspace-write".into(),
+            sandbox_mode: sandbox_mode.into(),
             developer_instructions,
             config: ThreadConfig::McpShell {
                 role: CardRole::Worker,
@@ -1309,6 +1310,17 @@ impl SharedCodexAppServer {
     /// Planner-harness reconciliation turn issuance goes through `IssueTurnHandle`; direct
     /// callers here are non-harness boot/operation paths or tests. `client_user_message_id`
     /// comes back as `item.clientId` on the echoed `userMessage`.
+    pub(crate) async fn background_terminals_stopped(&self, thread: &str) -> Result<bool> {
+        #[cfg(feature = "fixtures")]
+        if self.fake.is_some() {
+            return Ok(true);
+        }
+        self.connected_client()
+            .await?
+            .background_terminals_stopped(thread)
+            .await
+    }
+
     pub async fn turn_start(
         &self,
         thread_id: &str,
@@ -1316,6 +1328,14 @@ impl SharedCodexAppServer {
         selection: &TurnModelSelection,
         client_user_message_id: Option<&str>,
     ) -> Result<TurnId> {
+        if let Some(card) = self.cached_card_for_thread(thread_id)
+            && let Some(task) = self.repo.task_for_worker_card(&card).await?
+            && task.status.is_terminal()
+        {
+            return Err(CalmError::Conflict(
+                "ended task cannot start another turn".into(),
+            ));
+        }
         if self.sealed_turn_threads.contains_key(thread_id) {
             return Err(CalmError::Conflict(format!(
                 "thread {thread_id} is sealed because its track is being deleted"
@@ -1329,6 +1349,25 @@ impl SharedCodexAppServer {
                 "turn/start for thread missing shared daemon card mapping"
             );
         }
+        let native_write = if let (Some(pool), Some(card)) = (
+            self.repo.sqlite_pool(),
+            self.cached_card_for_thread(thread_id),
+        ) {
+            let task = self.repo.task_for_worker_card(&card).await?;
+            if task
+                .as_ref()
+                .map(|task| task.workspace_access())
+                .transpose()
+                .map_err(CalmError::BadRequest)?
+                != Some(calm_types::workspace_access::WorkspaceAccess::ReadOnly)
+            {
+                Some(crate::operation::workspace_lease::execution_guard::ExecutionWriteGuard::acquire_native(&pool, &card, thread_id, task.as_ref().map_or("",|task|task.id.as_str())).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         #[cfg(feature = "fixtures")]
         if let Some(fake) = self.fake.as_ref() {
             if fake.reject_turn_start.load(Ordering::SeqCst) {
@@ -1378,6 +1417,9 @@ impl SharedCodexAppServer {
                     "thread {thread_id} was sealed while turn/start was in flight"
                 )));
             }
+            if let Some(guard) = native_write {
+                guard.started(&turn_id).await?;
+            }
             return Ok(turn_id);
         }
         let client = self.connected_client().await?;
@@ -1397,6 +1439,9 @@ impl SharedCodexAppServer {
             return Err(CalmError::Conflict(format!(
                 "thread {thread_id} was sealed while turn/start was in flight"
             )));
+        }
+        if let Some(guard) = native_write {
+            guard.started(&turn_id).await?;
         }
         Ok(turn_id)
     }
@@ -3393,7 +3438,8 @@ impl SharedCodexAppServer {
                 "resuming shared codex thread"
             );
             if mode == ResumeMode::HotTakeover {
-                Self::resume_thread_typed(&client, &thread_id, &card_id, ThreadConfig::NoMcp).await;
+                self.resume_thread_typed(&client, &thread_id, &card_id, ThreadConfig::NoMcp)
+                    .await;
                 continue;
             }
 
@@ -3438,7 +3484,7 @@ impl SharedCodexAppServer {
                 Ok(ColdResumeAuthorization::Token {role,raw}) => (role,raw),
                 Ok(ColdResumeAuthorization::Skip) => continue,
                 Ok(ColdResumeAuthorization::NoMcp) => {
-                    Self::resume_thread_typed(&client, &thread_id, &card_id, ThreadConfig::NoMcp)
+                    self.resume_thread_typed(&client, &thread_id, &card_id, ThreadConfig::NoMcp)
                         .await;
                     continue;
                 }
@@ -3455,7 +3501,7 @@ impl SharedCodexAppServer {
             };
             // Only the cold respawn caller may rotate and reemit per-card MCP config, and only for the
             // card's active thread; hot takeover plain-resumes because loaded threads ignore resume config.
-            Self::resume_thread_typed(
+            self.resume_thread_typed(
                 &client,
                 &thread_id,
                 &card_id,
@@ -3470,6 +3516,7 @@ impl SharedCodexAppServer {
     }
 
     async fn resume_thread_typed(
+        &self,
         client: &CodexAppServer,
         thread_id: &str,
         card_id: &str,
@@ -3488,7 +3535,47 @@ impl SharedCodexAppServer {
                 return;
             }
         };
-        if let Err(e) = client.thread_resume_with_config(thread_id, lowered).await {
+        let read_only = match self.repo.sqlite_pool() {
+            Some(pool) => {
+                match crate::operation::workspace_lease::task_guard::is_read_card(&pool, card_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error,%card_id,"resume workspace access lookup failed");
+                        return;
+                    }
+                }
+            }
+            None => false,
+        };
+        if read_only {
+            let Some(pool) = self.repo.sqlite_pool() else {
+                return;
+            };
+            let lease_id=match sqlx::query_scalar::<_,String>(
+                "SELECT lease_id FROM workspace_leases WHERE card_id=?1 AND access_mode='read_only' AND state='held'")
+                .bind(card_id).fetch_optional(&pool).await {
+                Ok(Some(id))=>id,_=>return,
+            };
+            let verified = async {
+                crate::operation::workspace_lease::task_guard::TaskWorkspaceGuard::restore(
+                    &pool, &lease_id,
+                )
+                .await?
+                .into_sandbox()
+                .await
+            }
+            .await;
+            if let Err(error) = verified {
+                tracing::warn!(%error,%card_id,"read worker resume guard refused");
+                return;
+            }
+        }
+        if let Err(e) = client
+            .thread_resume_with_sandbox(thread_id, lowered, read_only.then_some("read-only"))
+            .await
+        {
             tracing::warn!(
                 target = "shared_codex_daemon::resume",
                 %thread_id,

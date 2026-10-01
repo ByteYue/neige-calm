@@ -17,6 +17,21 @@ pub async fn track_idle(
     track_id: &str,
     except_attempt: &str,
 ) -> Result<bool> {
+    track_available(
+        conn,
+        track_id,
+        except_attempt,
+        calm_types::workspace_access::WorkspaceAccess::ReadWrite,
+    )
+    .await
+}
+
+pub async fn track_available(
+    conn: &mut SqliteConnection,
+    track_id: &str,
+    except_attempt: &str,
+    access: calm_types::workspace_access::WorkspaceAccess,
+) -> Result<bool> {
     let sql = format!(
         "SELECT {TASK_COLUMNS} FROM current_tasks WHERE track_id = ?1 AND id <> ?2 \
          AND status IN ('dispatched','running','verifying')"
@@ -27,7 +42,13 @@ pub async fn track_idle(
         .fetch_all(&mut *conn)
         .await?;
     for task in in_flight {
-        if task.runs_in_track_checkout() {
+        if task.runs_in_track_checkout()
+            && (access == calm_types::workspace_access::WorkspaceAccess::ReadWrite
+                || task
+                    .workspace_access()
+                    .map_err(crate::error::CalmError::BadRequest)?
+                    == calm_types::workspace_access::WorkspaceAccess::ReadWrite)
+        {
             return Ok(false);
         }
     }
@@ -37,10 +58,15 @@ pub async fn track_idle(
          LEFT JOIN operations o ON o.id = wl.lease_owner \
          WHERE wl.track_id = ?1 AND wl.state IN ('held','releasing') \
          AND o.idempotency_key IS NOT ?2 \
-         AND o.phase IS NOT 'stuck')",
+         AND (o.phase IS NOT 'stuck' OR wl.access_mode='read_only') \
+         AND (?3='read_write' OR wl.access_mode='read_write'))",
     )
     .bind(track_id)
     .bind(except_attempt)
+    .bind(match access {
+        calm_types::workspace_access::WorkspaceAccess::ReadOnly => "read_only",
+        _ => "read_write",
+    })
     .fetch_one(&mut *conn)
     .await?;
     if lease_held {

@@ -756,11 +756,43 @@ impl CodexAppServer {
         thread_id: &str,
         config: Option<serde_json::Value>,
     ) -> Result<ThreadResult> {
+        self.thread_resume_with_sandbox(thread_id, config, None)
+            .await
+    }
+
+    pub async fn thread_resume_with_sandbox(
+        &self,
+        thread_id: &str,
+        config: Option<serde_json::Value>,
+        sandbox: Option<&str>,
+    ) -> Result<ThreadResult> {
         let mut value = json!({ "threadId": thread_id });
         if let Some(config) = config {
             value["config"] = config;
         }
+        if let Some(sandbox) = sandbox {
+            value["sandbox"] = json!(sandbox);
+        }
         self.request("thread/resume", value).await
+    }
+
+    pub async fn background_terminals_stopped(&self, thread: &str) -> Result<bool> {
+        let response: serde_json::Value = self
+            .request(
+                "thread/backgroundTerminals/list",
+                json!({"threadId":thread,"limit":1}),
+            )
+            .await?;
+        let data = response
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                CalmError::CodexAppServer("background terminal roster is missing".into())
+            })?;
+        Ok(data.is_empty()
+            && response
+                .get("nextCursor")
+                .is_none_or(serde_json::Value::is_null))
     }
 
     /// `thread/read` — current status and, with `include_turns`, the turn history whose last `completed_at` is the died-mid-turn discriminator.
