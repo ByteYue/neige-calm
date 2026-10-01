@@ -1,6 +1,8 @@
 # OpenCode operational sessions through Neige
 
-Status: scoped design; implementation and live acceptance are pending.
+Status: S1 benchmark implemented; real memory query, exact session continuation,
+PTY reconnection and clean exit acceptance passed. See the
+[operational runbook](../opencode-operational-sessions.md).
 
 Tracking: [fork issue #1](https://github.com/ByteYue/neige-calm/issues/1).
 Original scope: [upstream issue #1928](https://github.com/keanji-x/neige-calm/issues/1928).
@@ -31,8 +33,10 @@ human can also create an ordinary shell terminal and run OpenCode inside it.
 Startup contains only a shell or a prompt-free OpenCode TUI. The terminal-create
 saga can retry a launch after a crash; an operational prompt must not be embedded
 in its program or startup flags. Wait for successful creation and terminal
-readiness, then enter the task. Automated input uses the existing stable request
-receipts and checks them after a lost response rather than submitting a new ID.
+readiness, then enter the task. WebSocket input acknowledgements confirm a PTY
+write and do not deduplicate repeated input. The benchmark sends each command
+once and stops on unknown outcomes. MCP input receipts have a separate cached
+client lifetime; they are not a guarantee across kernel or renderer replacement.
 Run a bounded JSON command inside that established shell, not as its startup
 program. This restriction avoids changing terminal recovery for this increment.
 
@@ -148,7 +152,8 @@ E2E on the shared host.
   `crates/calm-server/src/routes/terminal_cards.rs`,
   `crates/calm-server/src/operation/terminal_adapter.rs`, and
   `crates/calm-server/src/ws/terminal.rs`.
-- The real Neige/OpenCode memory benchmark is pending; no result or performance
-  improvement is claimed.
+- The real Neige/OpenCode memory and continuation benchmark passed on
+  2026-10-01. The runbook records exact commands, metrics, receipts and limits;
+  no performance improvement is claimed.
 - Protocol reference: [OpenCode CLI documentation](https://opencode.ai/docs/cli/)
   and pinned [v1.18.34 run implementation](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/cli/cmd/run.ts).
