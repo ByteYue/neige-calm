@@ -187,10 +187,13 @@ impl Fixture {
         }
     }
     async fn session(&self) -> OpenCodePlannerSession {
+        self.session_for("worker").await
+    }
+    async fn session_for(&self, worker: &str) -> OpenCodePlannerSession {
         let repo: Arc<dyn Repo> = self.repo.clone();
         OpenCodePlannerSession::open(OpenCodePlannerSessionParams {
             host: self.host.clone(),
-            worker_session_id: "worker".into(),
+            worker_session_id: worker.into(),
             card_id: self.card.clone(),
             track_id: self.track.clone(),
             cwd: self.cwd.clone(),
@@ -279,6 +282,12 @@ async fn opencode_production_prepared_recovery_is_visible_failure_without_spawn_
     );
     assert_eq!(total, 10);
     assert!(!session.has_unresolved_submission().await.unwrap());
+    let terminal_receipt = session
+        .recovery_submission(Some("client"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal_receipt.state, OpenCodeSubmissionState::Failed);
     assert!(f.state()["posts"].as_array().unwrap().is_empty());
     assert_eq!(
         opencode_submission_get_by_client(f.repo.pool(), &f.host.scope_id, "ses_owned", "client")
@@ -356,6 +365,10 @@ async fn opencode_production_second_turn_accumulates_usage_and_resets_to_profile
     let (first, total) = terminal(&mut notifications).await;
     assert_eq!(first["status"], "completed");
     assert_eq!(total, 13);
+    sqlx::query("UPDATE worker_sessions SET agent_session_id=NULL WHERE id='worker'")
+        .execute(f.repo.pool())
+        .await
+        .unwrap();
     let default = TurnModelSelection {
         model: None,
         effort: None,
@@ -465,4 +478,87 @@ async fn opencode_production_paged_history_retains_complete_current_turn_and_tri
     );
     assert!(f.state()["posts"].as_array().unwrap().is_empty());
     process.shutdown(&f.host, "paging").await.unwrap();
+}
+
+#[tokio::test]
+async fn opencode_production_paging_preserves_the_entire_equal_time_bucket() {
+    let f = Fixture::new("loss").await;
+    f.intent(true).await;
+    let mut messages = vec![
+        json!({"info":{"id":"msg_old","sessionID":"ses_owned","role":"user","time":{"created":999}},"parts":[]}),
+    ];
+    // Pinned native order is (time_created,id). An assistant can sort before its preassigned
+    // parent at the same millisecond, even though it was produced by the later prompt loop.
+    for i in 0..300 {
+        messages.push(json!({"info":{"id":format!("msg_a{i:03}"),"sessionID":"ses_owned","role":"assistant","parentID":"msg_user","finish":"stop","time":{"created":1000,"completed":1001}},"parts":[]}));
+    }
+    messages.push(json!({"info":{"id":"msg_user","sessionID":"ses_owned","role":"user","time":{"created":1000}},"parts":[]}));
+    let profile = &f.host.configured().unwrap().config_dir;
+    std::fs::create_dir_all(profile).unwrap();
+    std::fs::write(
+        profile.join("fixture-native.json"),
+        serde_json::to_vec(&json!({"messages":messages,"posts":[]})).unwrap(),
+    )
+    .unwrap();
+    let mut process = super::process::ServerProcess::start(&f.host, "tied", &f.cwd, &[], None)
+        .await
+        .unwrap();
+    let intent = opencode_submission_get_unresolved_by_card(f.repo.pool(), &f.card)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = super::driver::snapshot(&process.client, "ses_owned", &intent).await;
+    process.shutdown(&f.host, "tied").await.unwrap();
+    let tail = result.unwrap();
+    assert_eq!(
+        tail.len(),
+        301,
+        "original parent position cannot truncate its same-millisecond assistant replies"
+    );
+    assert!(tail.iter().any(|m| m["info"]["id"] == "msg_a000"));
+    assert!(tail.iter().any(|m| m["info"]["id"] == "msg_user"));
+}
+
+#[tokio::test]
+async fn opencode_production_recovery_adopts_original_identity_across_worker_incarnation() {
+    let f = Fixture::new("complete").await;
+    f.intent(false).await;
+    let mut tx = f.repo.pool().begin().await.unwrap();
+    session_supersede_active_tx(&mut tx, &"worker".into(), 3)
+        .await
+        .unwrap();
+    session_start_runtime_tx(
+        &mut tx,
+        WorkerSessionInit::shared_planner(
+            "successor".into(),
+            f.card.clone(),
+            AgentProvider::OpenCode,
+            WorkerSessionState::Starting,
+            Some("fresh-thread".into()),
+            json!({"mode":"harness"}),
+            4,
+        ),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let session = f.session_for("successor").await;
+    let receipt = session
+        .recovery_submission(Some("client"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.worker_session_id, "worker");
+    let identity: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT thread_id,agent_session_id FROM worker_sessions WHERE id='successor'",
+    )
+    .fetch_one(f.repo.pool())
+    .await
+    .unwrap();
+    assert_eq!(identity, (Some("thread".into()), Some("ses_owned".into())));
+    let mut notifications = session.subscribe_notifications();
+    session.mark_installed();
+    assert_eq!(terminal(&mut notifications).await.0["status"], "failed");
+    assert!(!f.cwd.join("serve-starts").exists());
+    session.shutdown().await.unwrap();
 }

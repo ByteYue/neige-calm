@@ -230,26 +230,29 @@ impl TurnProjection {
         }
     }
     pub(crate) fn usage(&self, messages: &[Value]) -> Notification {
-        let total: i64 = messages
+        let assistants: Vec<&Value> = messages
             .iter()
-            .filter(|m| m["info"]["parentID"].as_str() == Some(&self.message))
-            .map(|m| {
-                let t = &m["info"]["tokens"];
-                [
-                    t["input"].as_i64(),
-                    t["output"].as_i64(),
-                    t["reasoning"].as_i64(),
-                    t["cache"]["read"].as_i64(),
-                    t["cache"]["write"].as_i64(),
-                ]
-                .into_iter()
-                .flatten()
-                .sum::<i64>()
+            .filter(|m| {
+                m["info"]["role"].as_str() == Some("assistant")
+                    && m["info"]["parentID"].as_str() == Some(&self.message)
             })
-            .sum();
+            .collect();
+        let total = assistants
+            .iter()
+            .fold(0i64, |sum, m| sum.saturating_add(message_tokens(m)));
+        let last = assistants
+            .into_iter()
+            .max_by_key(|m| {
+                (
+                    m["info"]["time"]["created"].as_i64().unwrap_or(0),
+                    m["info"]["id"].as_str().unwrap_or(""),
+                )
+            })
+            .map(message_tokens)
+            .unwrap_or(0);
         Notification::Other {
             method: "thread/tokenUsage/updated".into(),
-            params: json!({"threadId":self.thread,"tokenUsage":{"total":{"totalTokens":self.prior_tokens.saturating_add(total)},"last":{"totalTokens":total},"modelContextWindow":null}}),
+            params: json!({"threadId":self.thread,"tokenUsage":{"total":{"totalTokens":self.prior_tokens.saturating_add(total)},"last":{"totalTokens":last},"modelContextWindow":null}}),
         }
     }
 }
@@ -278,4 +281,18 @@ pub(crate) fn mcp_name_map<'a>(
         }
     }
     Ok(map)
+}
+
+fn message_tokens(message: &Value) -> i64 {
+    let tokens = &message["info"]["tokens"];
+    [
+        tokens["input"].as_i64(),
+        tokens["output"].as_i64(),
+        tokens["reasoning"].as_i64(),
+        tokens["cache"]["read"].as_i64(),
+        tokens["cache"]["write"].as_i64(),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(0i64, i64::saturating_add)
 }

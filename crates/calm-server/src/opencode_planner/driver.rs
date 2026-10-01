@@ -202,18 +202,16 @@ async fn settle(
         Outcome::Interrupted => OpenCodeSubmissionState::Interrupted,
     };
     shared.stop_process().await?;
-    shared
-        .params
-        .repo
-        .harness_turn_outcome_put(
-            &shared.params.worker_session_id,
-            &shared.params.card_id,
-            &shared.params.track_id,
-            &submission.thread_id,
-            &submission.id,
-            &serde_json::to_string(&value)?,
-        )
-        .await?;
+    crate::harness::turn_outcome::record(
+        shared.params.repo.as_ref(),
+        &shared.params.worker_session_id,
+        &shared.params.card_id,
+        &shared.params.track_id,
+        &submission.thread_id,
+        &submission.id,
+        &value,
+    )
+    .await?;
     crate::db::sqlite::opencode_submission_settle(
         &shared.pool()?,
         &submission.id,
@@ -252,9 +250,7 @@ async fn reject_pending(
     submission: &OpenCodeSubmission,
 ) -> Result<()> {
     for (kind, list) in [("permission", "/permission"), ("question", "/question")] {
-        let Ok(pending) = client.get(list).await else {
-            continue;
-        };
+        let pending = client.get(list).await?;
         let Some(pending) = pending.as_array() else {
             return Err(CalmError::Conflict(
                 "OpenCode pending request list is malformed".into(),
@@ -312,11 +308,17 @@ pub(crate) async fn snapshot(
         .await?;
     if user["info"]["id"].as_str() != Some(&submission.native_message_id)
         || user["info"]["sessionID"].as_str() != Some(native)
+        || user["info"]["role"].as_str() != Some("user")
     {
         return Err(CalmError::Conflict(
             "OpenCode exact message evidence mismatched".into(),
         ));
     }
+    let created = user["info"]["time"]["created"].as_i64().ok_or_else(|| {
+        CalmError::Conflict("OpenCode original message has no creation time".into())
+    })?;
+    let mut found_original = false;
+    let mut inspected = 0usize;
     let mut messages = Vec::new();
     let mut cursor: Option<String> = None;
     let mut seen_cursors = std::collections::HashSet::new();
@@ -337,32 +339,49 @@ pub(crate) async fn snapshot(
             .value
             .as_array()
             .ok_or_else(|| CalmError::Conflict("OpenCode message snapshot is malformed".into()))?;
-        let original = page_messages
-            .iter()
-            .position(|m| m["info"]["id"] == user["info"]["id"]);
-        let relevant = &page_messages[original.unwrap_or(0)..];
-        if messages.len().saturating_add(relevant.len()) > 16_384 {
+        inspected = inspected.saturating_add(page_messages.len());
+        if inspected > 65_536 {
             return Err(CalmError::Conflict(
-                "OpenCode current-turn tail exceeds the bounded reconciliation budget".into(),
+                "OpenCode reconciliation exceeded its bounded timestamp group".into(),
             ));
         }
-        for message in relevant {
+        let mut relevant = Vec::new();
+        for message in page_messages {
             if message["info"]["sessionID"].as_str() != Some(native) {
                 return Err(CalmError::Conflict(
                     "OpenCode snapshot contained another session".into(),
                 ));
             }
-            bytes = bytes.saturating_add(serde_json::to_vec(message)?.len());
-            if bytes > 16 * 1024 * 1024 || messages.len() >= 16_384 {
+            if message["info"]["time"]["created"].as_i64().is_none() {
                 return Err(CalmError::Conflict(
-                    "OpenCode current-turn tail exceeds the bounded reconciliation budget".into(),
+                    "OpenCode message snapshot has no creation time".into(),
                 ));
             }
+            let original = message["info"]["id"] == user["info"]["id"];
+            found_original |= original;
+            if original
+                || message["info"]["parentID"].as_str() == Some(&submission.native_message_id)
+            {
+                bytes = bytes.saturating_add(serde_json::to_vec(message)?.len());
+                if bytes > 16 * 1024 * 1024
+                    || messages.len().saturating_add(relevant.len()) >= 16_384
+                {
+                    return Err(CalmError::Conflict(
+                        "OpenCode current-turn tail exceeds the bounded reconciliation budget"
+                            .into(),
+                    ));
+                }
+                relevant.push(message.clone());
+            }
         }
-        // Pages are ascending internally but retrieved newest first. Preserve native
-        // transcript order by prepending each older page; trim previous turns once found.
-        messages.splice(0..0, relevant.iter().cloned());
-        if original.is_some() {
+        // Native pages sort by (created,id). A same-millisecond assistant can sort before
+        // its UUID parent, so cover the entire equal-time group, including older pages.
+        messages.splice(0..0, relevant);
+        let crossed_original_time = page_messages
+            .first()
+            .and_then(|m| m["info"]["time"]["created"].as_i64())
+            .is_some_and(|at| at < created);
+        if found_original && (crossed_original_time || page.next_cursor.is_none()) {
             return Ok(messages);
         }
         let Some(next) = page.next_cursor else {

@@ -95,6 +95,7 @@ impl Shared {
             super::client::native_id(&id, "ses")?;
             let native = client.get(&format!("/session/{id}")).await?;
             validate_native_session(&native, &id, &self.params.cwd)?;
+            self.bind_native(&id, thread).await?;
             return Ok(id);
         }
         let native = client
@@ -113,8 +114,13 @@ impl Shared {
             .to_owned();
         super::client::native_id(&id, "ses")?;
         validate_native_session(&native, &id, &self.params.cwd)?;
+        self.bind_native(&id, thread).await?;
+        self.state().native_session = Some(id.clone());
+        Ok(id)
+    }
+    async fn bind_native(&self, id: &str, thread: &str) -> Result<()> {
         let worker = self.params.worker_session_id.clone();
-        let persisted = id.clone();
+        let persisted = id.to_owned();
         let thread = thread.to_owned();
         crate::db::write_in_tx_typed(self.params.repo.as_ref(), move |tx| {
             Box::pin(async move {
@@ -137,8 +143,7 @@ impl Shared {
             })
         })
         .await?;
-        self.state().native_session = Some(id.clone());
-        Ok(id)
+        Ok(())
     }
     pub(crate) fn send(&self, notification: Notification) {
         let _ = self.notifications.send(notification);
@@ -182,17 +187,21 @@ impl OpenCodePlannerSession {
         let unresolved =
             crate::db::sqlite::opencode_submission_get_unresolved_by_card(&pool, &params.card_id)
                 .await?;
+        if let Some(submission) = &unresolved {
+            validate_receipt(&params, submission, Some(&submission.native_session_id)).await?;
+        }
         let native_session = unresolved
             .as_ref()
             .map(|s| s.native_session_id.clone())
             .or(row.agent_session_id);
-        let active = unresolved.map(|submission| Active {
+        let active = unresolved.clone().map(|submission| Active {
             submission,
             cancelled: watch::Sender::new(false),
         });
         let (notifications, _) = broadcast::channel(1024);
+        let recovered = unresolved.clone();
         let total_tokens = params.prior_total_tokens;
-        Ok(Self {
+        let session = Self {
             shared: Arc::new(Shared {
                 params,
                 state: Mutex::new(State {
@@ -206,7 +215,16 @@ impl OpenCodePlannerSession {
                 notifications,
                 installed: AtomicBool::new(false),
             }),
-        })
+        };
+        if let Some(receipt) = recovered {
+            // Correlation belongs to the persisted submission, including across a new worker
+            // incarnation. Persist before recovery notifications; no provider is started here.
+            session
+                .shared
+                .bind_native(&receipt.native_session_id, &receipt.thread_id)
+                .await?;
+        }
+        Ok(session)
     }
     pub fn host(&self) -> &Arc<OpenCodePlannerHost> {
         &self.shared.params.host
@@ -234,6 +252,47 @@ impl OpenCodePlannerSession {
             });
         }
     }
+    /// Read-only owner recovery lookup. A completed receipt may win the observer/startup race;
+    /// use the persisted client key to find it without a new admission or a native query.
+    pub async fn recovery_submission(
+        &self,
+        client_id: Option<&str>,
+    ) -> Result<Option<OpenCodeSubmission>> {
+        let native = self.shared.state().native_session.clone();
+        let pool = self.shared.pool()?;
+        let receipt = if let (Some(client), Some(native)) = (client_id, native.as_deref()) {
+            crate::db::sqlite::opencode_submission_get_by_client(
+                &pool,
+                &self.shared.params.host.scope_id,
+                native,
+                client,
+            )
+            .await?
+        } else if client_id.is_none() {
+            crate::db::sqlite::opencode_submission_get_unresolved_by_card(
+                &pool,
+                &self.shared.params.card_id,
+            )
+            .await?
+        } else {
+            None
+        };
+        if let Some(receipt) = &receipt {
+            validate_receipt(&self.shared.params, receipt, native.as_deref()).await?;
+        }
+        Ok(receipt)
+    }
+
+    /// Exact durable receipt for the owning Harness to restore projection correlation before
+    /// mark_installed starts a GET-only recovery observer. This never admits another prompt.
+    pub fn recovered_submission(&self) -> Option<OpenCodeSubmission> {
+        self.shared
+            .state()
+            .active
+            .as_ref()
+            .map(|a| a.submission.clone())
+    }
+
     pub fn active_turn_id_for_thread(&self, thread: &str) -> Option<String> {
         self.shared
             .state()
@@ -551,5 +610,61 @@ fn validate_native_session(native: &Value, id: &str, cwd: &std::path::Path) -> R
             "OpenCode native session identity/directory does not match this Planner".into(),
         ));
     }
+    Ok(())
+}
+
+async fn validate_receipt(
+    params: &OpenCodePlannerSessionParams,
+    receipt: &OpenCodeSubmission,
+    native: Option<&str>,
+) -> Result<()> {
+    use calm_types::worker::{WorkerContract, WorkerProviderKind};
+    let owner = params
+        .repo
+        .session_get(&WorkerSessionId(params.worker_session_id.clone()))
+        .await?
+        .ok_or_else(|| CalmError::NotFound("OpenCode recovery owner no longer exists".into()))?;
+    let current = params
+        .repo
+        .session_projection_active_for_card(&params.card_id)
+        .await?;
+    if owner.provider != WorkerProviderKind::OpenCode
+        || owner.contract != WorkerContract::Planner
+        || !owner.state.is_active_authority()
+        || owner.card_id.as_ref().map(ToString::to_string).as_deref() != Some(&params.card_id)
+        || owner.track_id.to_string() != params.track_id
+        || current.as_ref().map(|s| s.id.as_str()) != Some(&params.worker_session_id)
+        || receipt.card_id != params.card_id
+        || receipt.scope_id != params.host.scope_id
+        || native != Some(receipt.native_session_id.as_str())
+    {
+        return Err(CalmError::Conflict(
+            "OpenCode recovery receipt does not match the live Planner owner/scope/native binding"
+                .into(),
+        ));
+    }
+    if let Some(original) = params
+        .repo
+        .session_get(&WorkerSessionId(receipt.worker_session_id.clone()))
+        .await?
+    {
+        if original.provider != WorkerProviderKind::OpenCode
+            || original.contract != WorkerContract::Planner
+            || original
+                .card_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref()
+                != Some(&params.card_id)
+            || original.thread_id.as_deref() != Some(&receipt.thread_id)
+            || original.agent_session_id.as_deref() != Some(&receipt.native_session_id)
+        {
+            return Err(CalmError::Conflict(
+                "OpenCode recovery receipt has conflicting original attribution".into(),
+            ));
+        }
+    }
+    super::client::native_id(&receipt.native_session_id, "ses")?;
+    super::client::native_id(&receipt.native_message_id, "msg")?;
     Ok(())
 }

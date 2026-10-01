@@ -215,3 +215,19 @@ fn opencode_mcp_projection_preserves_registered_dotted_identity_and_rejects_coll
         matches!(&frames[0],Notification::Item{params,..} if params["item"]["type"]=="mcpToolCall" && params["item"]["server"]=="calm" && params["item"]["tool"]==*name)
     );
 }
+
+#[test]
+fn opencode_usage_last_is_latest_model_request_while_total_accumulates_every_step() {
+    let p = projection();
+    let mut first = assistant("tool-calls", vec![]);
+    first["info"]["tokens"] = json!({"input":5,"output":7});
+    let mut second = assistant("stop", vec![]);
+    second["info"]["id"] = json!("msg_second");
+    second["info"]["time"]["created"] = json!(4);
+    second["info"]["tokens"] = json!({"input":1,"output":2});
+    let Notification::Other { params, .. } = p.usage(&[first, second]) else {
+        panic!("usage projection")
+    };
+    assert_eq!(params["tokenUsage"]["total"]["totalTokens"], 25);
+    assert_eq!(params["tokenUsage"]["last"]["totalTokens"], 3);
+}
