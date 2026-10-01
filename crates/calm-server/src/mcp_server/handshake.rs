@@ -145,6 +145,7 @@ fn fence_unserved_neige_client(params: &Value) -> Result<(), RpcError> {
 fn agent_provider_from_worker_provider(provider: WorkerProviderKind) -> AgentProvider {
     match provider {
         WorkerProviderKind::Claude => AgentProvider::Claude,
+        WorkerProviderKind::OpenCode => AgentProvider::OpenCode,
         WorkerProviderKind::Codex | WorkerProviderKind::Terminal => AgentProvider::Codex,
     }
 }

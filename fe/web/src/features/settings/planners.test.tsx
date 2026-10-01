@@ -62,6 +62,15 @@ describe('PlannersPane', () => {
     expect(screen.getByRole('alert').textContent).toBe('network down');
   });
 
+  it('shows OpenCode readiness and its own server reason without the Codex creation note', () => {
+    pane({ providers: [
+      { provider: 'opencode', status: 'unavailable', reason: 'OpenCode credentials are missing', checked_at_ms: 1 },
+    ] });
+    expect(within(row('OpenCode')).getByText('Unavailable')).toBeTruthy();
+    expect(within(row('OpenCode')).getByText('OpenCode credentials are missing')).toBeTruthy();
+    expect(screen.queryByText(/A track can still be created/)).toBeNull();
+  });
+
   it('offers a retry when the first read failed', () => {
     const props = pane({ providers: undefined, loadError: 'boom' });
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));

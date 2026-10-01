@@ -69,6 +69,7 @@ fn assert_provider_list_is_complete(providers: &[AgentProvider]) {
         match provider {
             AgentProvider::Codex => "Codex",
             AgentProvider::Claude => "Claude",
+            AgentProvider::OpenCode => "OpenCode",
         }
     }
     let mut labels: Vec<&'static str> = providers.iter().map(label).collect();
@@ -76,7 +77,7 @@ fn assert_provider_list_is_complete(providers: &[AgentProvider]) {
     labels.dedup();
     assert_eq!(
         labels.len(),
-        2,
+        3,
         "every `AgentProvider` must appear: got {labels:?}"
     );
 }
@@ -89,7 +90,11 @@ fn policy_for_is_total_over_the_origins_a_caller_can_build_here() {
         CardRole::Worker,
         CardRole::ReportCard,
     ];
-    let providers = [AgentProvider::Codex, AgentProvider::Claude];
+    let providers = [
+        AgentProvider::Codex,
+        AgentProvider::Claude,
+        AgentProvider::OpenCode,
+    ];
 
     assert_role_list_is_complete(&roles);
     assert_provider_list_is_complete(&providers);

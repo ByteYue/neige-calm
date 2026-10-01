@@ -5,9 +5,8 @@ import { Badge as AstryxBadge } from '@astryxdesign/core/Badge';
 import { Button as AstryxButton } from '@astryxdesign/core/Button';
 import { Text as AstryxText } from '@astryxdesign/core/Text';
 
-import type { AgentProvider } from '../../../../core/api/schemas.ts';
 import {
-  CREATE_REFUSED_WHEN_UNAVAILABLE, STILL_CREATES_NOTE, type ProviderAvailability,
+  CREATE_REFUSED_WHEN_UNAVAILABLE, PLANNER_PROVIDER_LABELS, STILL_CREATES_NOTE, type ProviderAvailability,
 } from '../../../../core/domain/agent-providers.ts';
 import { ErrorBox } from '../../ui/error-box/public.tsx';
 import { SettingRow, SettingsList, SettingsPane } from './public.tsx';
@@ -24,8 +23,6 @@ export type PlannersPaneProps = Readonly<{
   /** Why the last Recheck failed; the previous answer stays on screen. */
   recheckError: string | null;
 }>;
-
-const PROVIDER_LABELS: Readonly<Record<AgentProvider, string>> = Object.freeze({ codex: 'Codex', claude: 'Claude' });
 
 /** `unavailable` is warning, not error: a login or a config fix away. `not_configured` is a server fact, not a fault. */
 const STATUS_BADGES: Readonly<Record<ProviderAvailability['status'], Readonly<{
@@ -70,7 +67,7 @@ export function PlannersPane({
             {providers.map((entry) => (
               <SettingRow
                 key={entry.provider}
-                title={PROVIDER_LABELS[entry.provider]}
+                title={PLANNER_PROVIDER_LABELS[entry.provider]}
                 /* A node, not a string: a string description is cut to one line, and a reason is a fix to read whole. */
                 description={<span className={styles.plannerReason}>{describe(entry)}</span>}
                 control={<AstryxBadge className={styles.pluginStateChip}

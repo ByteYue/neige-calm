@@ -386,6 +386,10 @@ fn dispatcher_operation_runtime(
         crate::claude_planner::config::ClaudePlannerHost::unconfigured_scratch()
             .expect("a scratch Claude Planner host for the dispatcher's own runtime"),
     );
+    let opencode_planner = Arc::new(
+        crate::opencode_planner::config::OpenCodePlannerHost::unconfigured_scratch()
+            .expect("scratch OpenCode Planner host for dispatcher runtime"),
+    );
     let planner_harness_start_adapter = Arc::new(PlannerHarnessStartAdapter::new(
         repo.clone(),
         shared_codex_appserver.clone(),
@@ -396,6 +400,7 @@ fn dispatcher_operation_runtime(
         write.area_cache().clone(),
         mcp_socket_path,
         claude_planner.clone(),
+        opencode_planner.clone(),
     ));
     let planner_harness_interrupt_adapter =
         Arc::new(PlannerHarnessInterruptAdapter::new(harness.clone()));
@@ -404,6 +409,7 @@ fn dispatcher_operation_runtime(
         shared_codex_appserver.clone(),
         repo,
         claude_planner,
+        opencode_planner,
     ));
     let task_verify_adapter = Arc::new(
         crate::operation::task_verify_adapter::TaskVerifyAdapter::new(
@@ -777,6 +783,7 @@ impl Dispatcher {
         let provider_registry = WorkerProviderRegistry::new(
             supervisor_sock_for_provider_registry(&daemon),
             shared_codex_appserver,
+            harness.clone(),
         );
         let reaper = Arc::new(Reaper::new(
             repo.clone(),
