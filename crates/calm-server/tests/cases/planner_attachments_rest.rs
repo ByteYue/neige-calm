@@ -25,6 +25,7 @@ use tower::ServiceExt;
 const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 struct Boot {
+    repo: Arc<SqlxRepo>,
     app: axum::Router,
     planner_card: Card,
     worker_card: Card,
@@ -34,6 +35,10 @@ struct Boot {
 
 /// One managed workspace with a real git repository, one planner card and one worker card; `kind` picks `Managed` (the supported shape) or `Attached`.
 async fn boot_with_kind(kind: TrackWorkspaceKind) -> Boot {
+    boot_with_provider(kind, "codex").await
+}
+
+async fn boot_with_provider(kind: TrackWorkspaceKind, provider: &str) -> Boot {
     let tmp = TempDir::new().unwrap();
     let workspace_root = tmp.path().join("workspaces");
     let repo = Arc::new(SqlxRepo::open("sqlite::memory:").await.unwrap());
@@ -98,7 +103,7 @@ async fn boot_with_kind(kind: TrackWorkspaceKind) -> Boot {
             title: None,
             kind: "codex".into(),
             sort: None,
-            payload: json!({"schemaVersion": 1, "planner_harness": true, "planner_provider": "codex"}),
+            payload: json!({"schemaVersion": 1, "planner_harness": true, "planner_provider": provider}),
         },
         CardRole::Planner,
         false,
@@ -149,6 +154,7 @@ async fn boot_with_kind(kind: TrackWorkspaceKind) -> Boot {
         .with_state(state);
 
     Boot {
+        repo,
         app,
         planner_card,
         worker_card,
@@ -1182,3 +1188,6 @@ async fn a_client_that_disappears_mid_body_leaves_no_part() {
         file_names(&b.staging())
     );
 }
+
+#[path = "planner_attachments_provider.rs"]
+mod provider;
