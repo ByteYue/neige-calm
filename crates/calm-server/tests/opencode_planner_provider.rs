@@ -28,6 +28,9 @@ const FAKE: &str = concat!(
 );
 const BUDGET: Duration = Duration::from_secs(35);
 
+#[path = "fixtures/opencode_planner_fake/native_tool_step.rs"]
+mod native_tool_step;
+
 struct Root(tempfile::TempDir);
 
 impl Root {
@@ -352,7 +355,7 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opencode_rest_catalog_turns_recovery_reset_and_delete() {
-    let root = Root::new("complete");
+    let root = Root::new("held-stop");
     let stack = Stack::boot(&root).await;
     let (status, providers) = stack.request("GET", "/api/agent-providers", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -382,6 +385,7 @@ async fn opencode_rest_catalog_turns_recovery_reset_and_delete() {
     assert_eq!(before.agent_provider, Some(AgentProvider::OpenCode));
     assert!(before.session_id.is_none(), "native session is lazy");
     stack.input(&card, "host memory please").await;
+    native_tool_step::assert_pending_final(&root, &stack, &card).await;
     stack.completed(&card, 1).await;
     let first = root.requests();
     assert_eq!(first.len(), 1);

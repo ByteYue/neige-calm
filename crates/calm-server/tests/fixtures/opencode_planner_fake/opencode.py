@@ -71,7 +71,7 @@ def mcp():
             raise RuntimeError(reply)
         return json.dumps(reply["result"])
 
-def assistant(sid, user, running=False, aborted=False):
+def assistant(sid, user, running=False, aborted=False, stop_step=False):
     now = int(time.time() * 1000)
     aid = "msg_" + uuid.uuid4().hex
     info = {"id": aid, "sessionID": sid, "role": "assistant", "parentID": user,
@@ -82,7 +82,7 @@ def assistant(sid, user, running=False, aborted=False):
              "output": "memory fixture output", "metadata": {"exit": 0}}
     if not running:
         info["time"]["completed"] = now + 1
-        info["finish"] = "stop"
+        info["finish"] = "stop" if stop_step or aborted else "tool-calls"
         state["time"]["end"] = now + 1
     if aborted:
         info["error"] = {"name": "MessageAbortedError", "data": {"message": "aborted"}}
@@ -93,15 +93,26 @@ def assistant(sid, user, running=False, aborted=False):
         parts.extend([
             {"id": "prt_" + uuid.uuid4().hex, "type": "tool", "tool": "calm_calm_user_notify",
              "state": {"status": "completed", "input": {"text": "native MCP notification"},
-                       "output": mcp(), "time": {"start": now, "end": now + 1}}},
-            {"id": "prt_" + uuid.uuid4().hex, "type": "text", "text": "memory fixture answer",
-             "time": {"start": now, "end": now + 1}}])
+                       "output": mcp(), "time": {"start": now, "end": now + 1}}}])
     return {"info": info, "parts": parts}
+
+def final_reply(sid, user, after):
+    now = max(int(time.time() * 1000), after + 2)
+    aid = "msg_" + uuid.uuid4().hex
+    return {"info": {"id": aid, "sessionID": sid, "role": "assistant", "parentID": user,
+                     "time": {"created": now, "completed": now + 1}, "finish": "stop",
+                     "tokens": {"input": 4, "output": 3, "reasoning": 0,
+                                "cache": {"read": 0, "write": 0}}},
+            "parts": [{"id": "prt_" + uuid.uuid4().hex, "messageID": aid, "sessionID": sid,
+                       "type": "text", "text": "memory fixture answer",
+                       "time": {"start": now, "end": now + 1}}]}
 
 def finish_after_release(sid, user):
     while not (ROOT / "release").exists():
         time.sleep(0.05)
-    store(sid, assistant(sid, user))
+    step = assistant(sid, user)
+    store(sid, step)
+    store(sid, final_reply(sid, user, step["info"]["time"]["created"]))
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -203,7 +214,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
-            result = assistant(sid, payload["messageID"], running=mode == "busy")
+            result = assistant(sid, payload["messageID"], running=mode == "busy",
+                               stop_step=mode == "held-stop")
             store(sid, result)
             if mode == "busy":
                 child = subprocess.Popen(["/bin/sleep", "300"], start_new_session=True)
@@ -211,6 +223,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 while any(row["info"]["id"] == result["info"]["id"] and
                           "completed" not in row["info"]["time"] for row in messages(sid)):
                     time.sleep(0.05)
+            else:
+                if mode == "held-stop":
+                    while not (ROOT / "release").exists():
+                        time.sleep(0.05)
+                result = final_reply(sid, payload["messageID"], result["info"]["time"]["created"])
+                store(sid, result)
             self.reply(200, result)
         else:
             self.reply(404, {})
