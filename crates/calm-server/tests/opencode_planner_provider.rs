@@ -677,8 +677,7 @@ async fn opencode_rest_lost_response_settles_and_retires_receipt_for_next_turn()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opencode_rest_prepared_recovery_retires_real_queued_batch_without_post() {
-    use calm_server::harness::queue::input_segments_for_entries;
-    use calm_truth::opencode_submission::{OpenCodeSubmissionIntent, OpenCodeSubmissionState};
+    use calm_truth::opencode_submission::OpenCodeSubmissionState;
     let root = Root::new("complete");
     let stack = Stack::boot(&root).await;
     let (track, card) = stack.create().await;
@@ -686,35 +685,51 @@ async fn opencode_rest_prepared_recovery_retires_real_queued_batch_without_post(
     stack.completed(&card, 1).await;
     let runtime = stack.runtime(&card).await;
     let harness = stack.state.harness.get(&runtime.id).unwrap();
-    harness.pause_issuance_for_dev();
+    let pool = stack.repo().sqlite_pool().unwrap();
+    sqlx::raw_sql(include_str!(
+        "fixtures/opencode_planner_fake/prepared-crash.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     stack
         .input(&card, "prepared operation that must never be sent")
         .await;
+    wait(
+        "real Prepared intent rebuffered after claim fault",
+        || async {
+            calm_server::db::sqlite::opencode_submission_get_unresolved_by_card(&pool, &card)
+                .await
+                .unwrap()
+                .is_some_and(|intent| intent.state == OpenCodeSubmissionState::Prepared)
+                && harness.snapshot().await.pending_entries().len() == 1
+        },
+    )
+    .await;
+    harness.pause_issuance_for_dev();
+    let prepared =
+        calm_server::db::sqlite::opencode_submission_get_unresolved_by_card(&pool, &card)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(root.requests().len(), 1, "faulted claim sent no POST");
+    stack
+        .input(&card, "later unrelated operation retained across recovery")
+        .await;
     let mut snapshot = harness.snapshot().await;
-    let entries = snapshot.pending_entries();
-    assert_eq!(entries.len(), 1);
-    let receipt = entries[0].id().unwrap().clone();
-    let segments = input_segments_for_entries(&card.clone().into(), &entries);
-    let text = segments
-        .iter()
-        .map(|segment| segment.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let pool = stack.repo().sqlite_pool().unwrap();
-    let (scope, generation): (String, i64) =
-        sqlx::query_as("SELECT scope_id,generation FROM opencode_submissions WHERE card_id=?1")
-            .bind(&card)
-            .fetch_one(&pool)
+    assert_eq!(snapshot.pending_entries().len(), 2);
+    assert_eq!(
+        snapshot.projection_client_id.as_ref().unwrap().as_str(),
+        prepared.client_id
+    );
+    snapshot.phase = calm_types::harness::HarnessPhaseTag::IssuingTurn;
+    stack.shutdown().await;
+    for trigger in ["fixture_stop_claim", "fixture_keep_projection"] {
+        sqlx::query(&format!("DROP TRIGGER {trigger}"))
+            .execute(&pool)
             .await
             .unwrap();
-    let mut input = root.requests()[0]["payload"].clone();
-    input["messageID"] = json!("msg_prepared_integration");
-    input["parts"] = json!([{"id":"prt_prepared_integration","type":"text","text":text}]);
-    snapshot.phase = calm_types::harness::HarnessPhaseTag::IssuingTurn;
-    snapshot.projection_client_id = Some(receipt.clone());
-    stack.shutdown().await;
-    // Persist a crash image using the real snapshot and admission writers. The original
-    // REST-enqueued head stays present, exactly as before dispatch claims its journal row.
+    }
     let mut tx = pool.begin().await.unwrap();
     calm_server::db::sqlite::session_set_handle_state_of_any_runtime_tx(
         &mut tx,
@@ -725,71 +740,57 @@ async fn opencode_rest_prepared_recovery_retires_real_queued_batch_without_post(
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let intent = OpenCodeSubmissionIntent {
-        id: "prepared-integration".into(),
-        worker_session_id: runtime.id.clone(),
-        card_id: card.clone(),
-        scope_id: scope.clone(),
-        generation,
-        thread_id: runtime.thread_id.unwrap(),
-        native_session_id: runtime.session_id.unwrap(),
-        client_id: receipt.to_string(),
-        native_message_id: "msg_prepared_integration".into(),
-        input_json: input,
-        created_at_ms: chrono::Utc::now().timestamp_millis(),
-    };
-    let prepared = calm_server::db::sqlite::opencode_submission_prepare(&pool, &intent)
-        .await
-        .unwrap();
-    assert_eq!(prepared.state, OpenCodeSubmissionState::Prepared);
     let stack = Stack::boot(&root).await;
-    stack.completed(&card, 2).await;
+    stack.completed(&card, 3).await;
     let recovered = calm_server::db::sqlite::opencode_submission_get_by_client(
         &pool,
-        &scope,
-        &intent.native_session_id,
-        receipt.as_str(),
+        &prepared.scope_id,
+        &prepared.native_session_id,
+        &prepared.client_id,
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(recovered.state, OpenCodeSubmissionState::Failed);
-    let settled = stack
-        .state
-        .harness
-        .get(&runtime.id)
-        .unwrap()
-        .snapshot()
-        .await;
-    assert_eq!(settled.last_turn_id.as_deref(), Some(intent.id.as_str()));
-    assert!(
-        settled.projection_client_id.is_none(),
-        "unsent receipt retired"
-    );
-    assert_eq!(
-        root.requests().len(),
-        1,
-        "Prepared recovery must send zero additional POSTs"
-    );
     assert!(
         stack
             .outcomes(&card)
             .await
             .iter()
-            .any(|turn| turn["id"] == intent.id && turn["status"] == "failed")
+            .any(|turn| turn["id"] == prepared.id && turn["status"] == "failed")
+    );
+    let requests = root.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "only the unrelated later operation adds a POST"
     );
     assert!(
-        stack.run(&card).await["pending"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "original batch was retired"
+        requests
+            .iter()
+            .all(|request| request["payload"]["messageID"] != prepared.native_message_id)
     );
+    let sent = requests[1]["payload"]["parts"].to_string();
+    assert!(
+        sent.contains("later unrelated operation"),
+        "later queue entry preserved: {sent}"
+    );
+    assert!(
+        !sent.contains("prepared operation"),
+        "original claimed batch retired: {sent}"
+    );
+    let harness = stack.state.harness.get(&runtime.id).unwrap();
+    let settled = harness.snapshot().await;
+    assert!(
+        settled.projection_client_id.is_none(),
+        "unsent receipt retired"
+    );
+    assert_eq!(stack.run(&card).await["pending"], json!([]));
     stack
         .input(&card, "a new operation after unsent recovery")
         .await;
-    stack.completed(&card, 3).await;
-    assert_eq!(root.requests().len(), 2);
+    stack.completed(&card, 4).await;
+    assert_eq!(root.requests().len(), 3);
     let (status, body) = stack
         .request("DELETE", &format!("/api/tracks/{track}"), None)
         .await;
