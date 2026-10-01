@@ -8,6 +8,7 @@ fn projection() -> TurnProjection {
         "turn".into(),
         "msg_user".into(),
         "client".into(),
+        vec!["operation".into()],
         "/workspace".into(),
         10,
     )
@@ -230,4 +231,55 @@ fn opencode_usage_last_is_latest_model_request_while_total_accumulates_every_ste
     };
     assert_eq!(params["tokenUsage"]["total"]["totalTokens"], 25);
     assert_eq!(params["tokenUsage"]["last"]["totalTokens"], 3);
+}
+
+#[test]
+fn opencode_user_echo_waits_for_durable_parts_and_upgrades_the_projection_once() {
+    let mut p = projection();
+    let mut user = json!({"info":{"id":"msg_user","sessionID":"ses_owned","role":"user","time":{"created":1}},"parts":[]});
+    assert!(
+        p.snapshot(&[user.clone()]).is_empty(),
+        "native info-only persistence must not replace the user's existing projection with empty content"
+    );
+    user["parts"] = json!([{"id":"prt_user","type":"text","text":"operation"}]);
+    let complete = p.snapshot(&[user.clone()]);
+    assert_eq!(complete.len(), 1);
+    assert!(
+        matches!(&complete[0],Notification::Item{params,..} if params["item"]["clientId"]=="client" && params["item"]["content"][0]["text"]=="operation")
+    );
+    assert!(p.snapshot(&[user]).is_empty());
+}
+
+#[test]
+fn opencode_denied_loop_return_requires_matching_response_and_settled_tool_evidence() {
+    let p = projection();
+    let denied = assistant(
+        "tool-calls",
+        vec![json!({"id":"prt_denied","type":"tool","state":{"status":"error","error":"denied"}})],
+    );
+    assert!(matches!(
+        p.denied_loop_return(&[denied.clone()], &denied, "ses_owned", "rejected"),
+        Some(Outcome::Failed(_))
+    ));
+    assert_eq!(
+        p.denied_loop_return(
+            &[denied.clone()],
+            &json!({"status":"idle"}),
+            "ses_owned",
+            "rejected"
+        ),
+        None
+    );
+    let mut foreign = denied.clone();
+    foreign["info"]["parentID"] = json!("msg_foreign");
+    assert_eq!(
+        p.denied_loop_return(&[denied.clone()], &foreign, "ses_owned", "rejected"),
+        None
+    );
+    let mut pending = denied.clone();
+    pending["parts"][0]["state"]["status"] = json!("running");
+    assert_eq!(
+        p.denied_loop_return(&[pending], &denied, "ses_owned", "rejected"),
+        None
+    );
 }

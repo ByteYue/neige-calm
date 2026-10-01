@@ -48,7 +48,8 @@ impl ServerProcess {
         file.as_file_mut().flush()?;
         // The owned child binds its listener before announcing its actual port. Never send
         // credentials to a port reserved then released by the kernel: another process could bind it.
-        let mut child = Command::new(&config.opencode_binary)
+        let mut command = Command::new(&config.opencode_binary);
+        command
             .args([
                 "serve",
                 "--hostname",
@@ -65,8 +66,15 @@ impl ServerProcess {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        // The same freshly minted Planner capability backs both MCP and the neige CLI
+        // promised by Planner instructions. Ambient socket/tokens remain excluded.
+        if let Some(token) = token {
+            command
+                .env("NEIGE_MCP_SOCKET", &host.mcp_socket)
+                .env("NEIGE_MCP_TOKEN", token);
+        }
+        let mut child = command.spawn()?;
         let mut stdout = child
             .stdout
             .take()

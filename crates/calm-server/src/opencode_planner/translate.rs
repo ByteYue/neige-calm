@@ -11,6 +11,8 @@ pub(crate) struct TurnProjection {
     cwd: String,
     seen: HashMap<String, Value>,
     prior_tokens: i64,
+    original_text: Vec<String>,
+    user_emitted: bool,
     mcp_names: HashMap<String, String>,
 }
 
@@ -37,6 +39,7 @@ impl TurnProjection {
         turn: String,
         message: String,
         client_id: String,
+        original_text: Vec<String>,
         cwd: String,
         prior_tokens: i64,
     ) -> crate::error::Result<Self> {
@@ -51,6 +54,8 @@ impl TurnProjection {
             cwd,
             seen: HashMap::new(),
             prior_tokens,
+            original_text,
+            user_emitted: false,
             mcp_names,
         })
     }
@@ -83,7 +88,7 @@ impl TurnProjection {
             if !ours && !assistant {
                 continue;
             }
-            if ours {
+            if ours && !self.user_emitted {
                 let content = message["parts"]
                     .as_array()
                     .map(|p| {
@@ -93,6 +98,14 @@ impl TurnProjection {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let text: Vec<&str> = content.iter().filter_map(|p| p["text"].as_str()).collect();
+                let expected: Vec<&str> = self.original_text.iter().map(String::as_str).collect();
+                // Native persists the user info before its parts. Only a complete original
+                // input can replace the kernel's projection, and it is upgraded exactly once.
+                if text != expected {
+                    continue;
+                }
+                self.user_emitted = true;
                 let item = json!({"id":self.message,"type":"userMessage","clientId":self.client_id,"content":content});
                 self.emit(
                     item,
@@ -229,6 +242,58 @@ impl TurnProjection {
             Some(reason) => Some(Outcome::Failed(format!("OpenCode finished with {reason}"))),
         }
     }
+    /// Pinned native processor stops a rejected permission/question loop with finish=tool-calls.
+    /// A completed synchronous POST plus our confirmed rejection and settled native tools is
+    /// positive failed-loop evidence. A lost response or provider idle can never establish it.
+    pub(crate) fn denied_loop_return(
+        &self,
+        messages: &[Value],
+        response: &Value,
+        native: &str,
+        reason: &str,
+    ) -> Option<Outcome> {
+        let returned = &response["info"];
+        if returned["role"].as_str() != Some("assistant")
+            || returned["sessionID"].as_str() != Some(native)
+            || returned["parentID"].as_str() != Some(&self.message)
+            || returned["finish"].as_str() != Some("tool-calls")
+            || !returned["time"]["completed"].is_number()
+        {
+            return None;
+        }
+        let assistants: Vec<&Value> = messages
+            .iter()
+            .filter(|m| {
+                m["info"]["role"].as_str() == Some("assistant")
+                    && m["info"]["parentID"].as_str() == Some(&self.message)
+            })
+            .collect();
+        let latest = assistants.iter().max_by_key(|m| {
+            (
+                m["info"]["time"]["created"].as_i64().unwrap_or(0),
+                m["info"]["id"].as_str().unwrap_or(""),
+            )
+        })?;
+        if latest["info"]["id"] != returned["id"]
+            || !latest["info"]["time"]["completed"].is_number()
+        {
+            return None;
+        }
+        let mut tool_error = false;
+        for message in assistants {
+            for part in message["parts"].as_array()? {
+                if part["type"].as_str() == Some("tool") {
+                    match part["state"]["status"].as_str() {
+                        Some("error") => tool_error = true,
+                        Some("completed") => {}
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        tool_error.then(|| Outcome::Failed(reason.into()))
+    }
+
     pub(crate) fn usage(&self, messages: &[Value]) -> Notification {
         let assistants: Vec<&Value> = messages
             .iter()

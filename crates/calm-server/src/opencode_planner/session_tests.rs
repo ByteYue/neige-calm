@@ -41,10 +41,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/global/health': return self.answer({'healthy':True,'version':'1.18.34'})
         if path=='/provider': return self.answer({'all':[{'id':'fixture','models':{'model':{'name':'Default'},'other':{'name':'Other'}}}],'connected':['fixture']})
         if path=='/config':return self.answer({'model':'fixture/model'})
-        if path in ['/permission','/question']:return self.answer([])
+        if path=='/permission':
+            state=load()
+            return self.answer([{'id':'per_fixture','sessionID':'ses_owned','permission':'external_directory','patterns':['/proc/*']}] if mode.startswith('deny') and state['messages'] and not state.get('denied') else [])
+        if path=='/question':return self.answer([])
         if path=='/session/ses_owned': return self.answer({'id':'ses_owned','directory':os.getcwd()},404 if mode=='identity-error' else 200)
         state=load()
         if path.startswith('/session/ses_owned/message/'):
+            if mode=='deny-snapshot-transient' and state.get('denied') and not state.get('read_failed'):
+                state['read_failed']=True;save(state);return self.answer({},404)
             matches=[m for m in state['messages'] if m['info']['id']==path.rsplit('/',1)[1]]
             return self.answer(matches[0] if matches else {},200 if matches else 404)
         if path=='/session/ses_owned/message':
@@ -55,13 +60,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path=self.path.split('?')[0];body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or b'{}')
         if path=='/session':return self.answer({'id':'ses_owned','directory':os.getcwd()})
         if path=='/session/ses_owned/abort':return self.answer(True)
+        if path=='/permission/per_fixture/reply':
+            with lock:
+                state=load();state['denied']=True;state['messages'][-1]['info']['finish']='tool-calls';state['messages'][-1]['info']['time']['completed']=3
+                state['messages'][-1]['parts'][0]['state'].update({'status':'error','error':'The user rejected permission to use this specific tool call.'});save(state)
+            return self.answer(True)
         if path=='/session/ses_owned/message':
             with lock:
                 state=load();state['posts'].append(body)
                 user={'info':{'id':body['messageID'],'sessionID':'ses_owned','role':'user','time':{'created':len(state['messages'])+1}},'parts':body['parts']};state['messages'].append(user)
                 if mode=='complete':
                     state['messages'].append({'info':{'id':'msg_answer_'+str(len(state['posts'])),'sessionID':'ses_owned','role':'assistant','parentID':body['messageID'],'finish':'stop','time':{'created':len(state['messages'])+1,'completed':3},'tokens':{'input':1,'output':2}},'parts':[{'id':'prt_answer_'+str(len(state['posts'])),'type':'text','text':'answer','time':{'end':3}}]})
+                if mode.startswith('deny'):
+                    state['messages'].append({'info':{'id':'msg_denied','sessionID':'ses_owned','role':'assistant','parentID':body['messageID'],'time':{'created':2}},'parts':[{'id':'prt_denied','type':'tool','tool':'bash','state':{'status':'running','input':{'command':'cat /proc/meminfo'}}}]})
                 save(state)
+            if mode.startswith('deny'):
+                import time
+                while not load().get('denied'):time.sleep(0.01)
+                return self.answer(load()['messages'][-1])
             if mode=='loss':self.close_connection=True;return
             return self.answer(state['messages'][-1])
         return self.answer({},404)
@@ -468,6 +484,7 @@ async fn opencode_production_paged_history_retains_complete_current_turn_and_tri
         "intent".into(),
         "msg_user".into(),
         "client".into(),
+        vec!["operation".into()],
         f.cwd.display().to_string(),
         10,
     )
@@ -561,4 +578,43 @@ async fn opencode_production_recovery_adopts_original_identity_across_worker_inc
     assert_eq!(terminal(&mut notifications).await.0["status"], "failed");
     assert!(!f.cwd.join("serve-starts").exists());
     session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn opencode_production_denied_tool_loop_return_settles_failed_without_native_stop_finish() {
+    for mode in ["deny", "deny-snapshot-transient"] {
+        let f = Fixture::new(mode).await;
+        let session = f.session().await;
+        let mut notifications = session.subscribe_notifications();
+        session.mark_installed();
+        let model = TurnModelSelection {
+            model: Some("fixture/model".into()),
+            effort: None,
+        };
+        let admission = session
+            .turn_start(
+                "thread",
+                vec![InputItem::Text {
+                    text: "operation".into(),
+                }],
+                &model,
+                "denied",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, TurnAdmission::Accepted { .. }));
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(8), terminal(&mut notifications)).await;
+        session.shutdown().await.unwrap();
+        let (turn,_) = outcome.expect("a correlated synchronous loop return plus our confirmed denial and settled tools is a failed terminal outcome");
+        assert_eq!(turn["status"], "failed");
+        assert!(
+            turn["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("rejected")
+        );
+        assert_eq!(f.state()["posts"].as_array().unwrap().len(), 1);
+        assert!(!session.has_unresolved_submission().await.unwrap());
+    }
 }

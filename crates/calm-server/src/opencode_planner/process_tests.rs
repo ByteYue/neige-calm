@@ -89,7 +89,16 @@ async fn opencode_managed_serve_auth_config_and_stop_are_scope_isolated() {
         host.configured().unwrap().config_dir.to_str()
     );
     assert_eq!(first["environment"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1");
-    assert!(first["environment"].get("NEIGE_MCP_TOKEN").is_none());
+    assert_eq!(first["environment"]["NEIGE_MCP_TOKEN"], "token-one");
+    assert_eq!(second["environment"]["NEIGE_MCP_TOKEN"], "token-two");
+    assert_eq!(
+        first["environment"]["NEIGE_MCP_SOCKET"].as_str(),
+        host.mcp_socket.to_str()
+    );
+    assert_ne!(
+        first["environment"]["NEIGE_MCP_TOKEN"],
+        "ambient-must-not-leak"
+    );
     assert!(first["environment"].get("OPENAI_API_KEY").is_none());
     let child = first["child"].as_u64().unwrap();
     assert!(!no_live_process(child));
@@ -114,4 +123,18 @@ async fn opencode_readiness_uses_the_owned_serve_catalog_and_reaps_it() {
     assert_eq!(catalog.models.len(), 1);
     assert_eq!(catalog.models[0].value, "fixture/model");
     assert_eq!(catalog.models[0].effort_levels, ["large", "small"]);
+}
+
+#[tokio::test]
+async fn opencode_unscoped_catalog_process_never_inherits_an_ambient_neige_token() {
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path());
+    let mut process = ServerProcess::start(&host, "no-token", root.path(), &[], None)
+        .await
+        .unwrap();
+    let fixture = process.client.get("/fixture").await.unwrap();
+    assert!(fixture["environment"].get("NEIGE_MCP_TOKEN").is_none());
+    assert!(fixture["environment"].get("NEIGE_MCP_SOCKET").is_none());
+    assert!(fixture["settings"].get("mcp").is_none());
+    process.shutdown(&host, "no-token").await.unwrap();
 }

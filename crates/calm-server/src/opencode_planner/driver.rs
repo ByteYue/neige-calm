@@ -47,11 +47,28 @@ async fn run(
 ) -> Result<()> {
     let pool = shared.pool()?;
     let prior_tokens = shared.state().total_tokens;
+    let original_text = submission.input_json["parts"]
+        .as_array()
+        .ok_or_else(|| {
+            CalmError::Conflict("OpenCode durable submission has no input parts".into())
+        })?
+        .iter()
+        .map(|part| {
+            part["text"]
+                .as_str()
+                .filter(|_| part["type"].as_str() == Some("text"))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    CalmError::Conflict("OpenCode durable submission has invalid text parts".into())
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut projection = TurnProjection::new(
         submission.thread_id.clone(),
         submission.id.clone(),
         submission.native_message_id.clone(),
         submission.client_id.clone(),
+        original_text,
         shared.params.cwd.to_string_lossy().into_owned(),
         prior_tokens,
     )?;
@@ -107,6 +124,8 @@ async fn run(
     }
     let mut stop_until = None;
     let mut failed_transport = false;
+    let mut native_return = None;
+    let mut denial = None;
     loop {
         if *cancelled.borrow() && stop_until.is_none() {
             stop_until = Some(tokio::time::Instant::now() + Duration::from_secs(5));
@@ -122,7 +141,9 @@ async fn run(
         }
         if send.0.as_ref().is_some_and(|task| task.is_finished()) {
             let result = send.0.take().expect("finished send").await;
-            if !matches!(result, Ok(Ok(_))) {
+            if let Ok(Ok(response)) = result {
+                native_return = Some(response);
+            } else {
                 failed_transport = true;
                 crate::db::sqlite::opencode_submission_mark_unknown(
                     &pool,
@@ -134,7 +155,10 @@ async fn run(
             }
         }
         let observation = async {
-            reject_pending(&shared, &client, &native, submission).await?;
+            if let Some(rejected) = reject_pending(&shared, &client, &native, submission).await? {
+                // Retain a confirmed control receipt even if the following snapshot fails.
+                denial = Some(rejected);
+            }
             snapshot(&client, &native, submission).await
         };
         let observed = if let Some(until) = stop_until {
@@ -156,7 +180,15 @@ async fn run(
                 for frame in projection.snapshot(&messages) {
                     shared.send(frame);
                 }
-                if let Some(outcome) = projection.outcome(&messages) {
+                let outcome = projection.outcome(&messages).or_else(|| {
+                    match (native_return.as_ref(), denial.as_deref()) {
+                        (Some(response), Some(reason)) => {
+                            projection.denied_loop_return(&messages, response, &native, reason)
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(outcome) = outcome {
                     return settle(&shared, submission, &projection, &outcome, &messages).await;
                 }
             }
@@ -248,7 +280,8 @@ async fn reject_pending(
     client: &Client,
     native: &str,
     submission: &OpenCodeSubmission,
-) -> Result<()> {
+) -> Result<Option<String>> {
+    let mut rejected = None;
     for (kind, list) in [("permission", "/permission"), ("question", "/question")] {
         let pending = client.get(list).await?;
         let Some(pending) = pending.as_array() else {
@@ -279,9 +312,17 @@ async fn reject_pending(
             } else {
                 (format!("/question/{id}/reject"), serde_json::json!({}))
             };
-            client
+            let reply = client
                 .request("POST", &path, Some(&payload), Duration::from_secs(3))
                 .await?;
+            if reply != Value::Bool(true) {
+                return Err(CalmError::Conflict(
+                    "OpenCode did not confirm its pending request rejection".into(),
+                ));
+            }
+            rejected = Some(format!(
+                "OpenCode {kind} request was rejected: this Planner has no interactive approval channel"
+            ));
             shared.send(crate::codex_appserver::Notification::Other {method:"opencode/request/denied".into(),params:serde_json::json!({"threadId":submission.thread_id,"turnId":submission.id,"message":format!("OpenCode {kind} request was rejected: this Planner has no interactive approval channel")})});
             shared.send(crate::codex_appserver::Notification::Item {
                 method:"item/completed".into(),
@@ -292,7 +333,7 @@ async fn reject_pending(
             });
         }
     }
-    Ok(())
+    Ok(rejected)
 }
 
 pub(crate) async fn snapshot(

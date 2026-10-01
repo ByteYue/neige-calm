@@ -283,6 +283,25 @@ impl OpenCodePlannerSession {
         Ok(receipt)
     }
 
+    /// The Harness owns when this receipt replaces its correlation. Revalidate the exact
+    /// durable record and current authority; persist identity without starting or submitting.
+    pub async fn adopt_recovery_binding(&self, receipt: &OpenCodeSubmission) -> Result<()> {
+        let recorded = self
+            .recovery_submission(Some(&receipt.client_id))
+            .await?
+            .ok_or_else(|| {
+                CalmError::Conflict("OpenCode recovery receipt no longer exists".into())
+            })?;
+        if &recorded != receipt {
+            return Err(CalmError::Conflict(
+                "OpenCode recovery receipt changed before adoption".into(),
+            ));
+        }
+        self.shared
+            .bind_native(&receipt.native_session_id, &receipt.thread_id)
+            .await
+    }
+
     /// Exact durable receipt for the owning Harness to restore projection correlation before
     /// mark_installed starts a GET-only recovery observer. This never admits another prompt.
     pub fn recovered_submission(&self) -> Option<OpenCodeSubmission> {
