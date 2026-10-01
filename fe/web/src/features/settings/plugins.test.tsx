@@ -30,6 +30,7 @@ function plugin(overrides: Partial<PluginListItem> = {}): PluginListItem {
     state: 'running',
     manifest_name: 'Todo',
     has_config: false,
+    can_uninstall: true,
     ...overrides,
   };
 }
@@ -56,6 +57,17 @@ function props(overrides: Partial<PluginsPaneProps> = {}): PluginsPaneProps {
 }
 
 describe('Plugins pane', () => {
+  it('keeps a built-in capability switch but offers no removal', async () => {
+    const onSetEnabled = vi.fn();
+    render(<PluginsPane {...props({
+      plugins: [plugin({ manifest_name: 'Development', can_uninstall: false })],
+      onSetEnabled,
+    })} />);
+    expect(screen.queryByRole('button', { name: 'Remove Development' })).toBeNull();
+    await userEvent.click(screen.getByRole('switch', { name: 'Enable Development' }));
+    expect(onSetEnabled).toHaveBeenCalledWith('todo', false);
+  });
+
   it('names each switch after its plugin, and reports the target state', async () => {
     const onSetEnabled = vi.fn();
     render(<PluginsPane {...props({

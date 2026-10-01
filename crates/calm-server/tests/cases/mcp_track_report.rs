@@ -157,6 +157,28 @@ pub(crate) async fn boot() -> Boot {
 /// [`boot`] on an explicit sqlite URL (a file-backed database an out-of-process kernel can be
 /// launched against afterwards).
 pub(crate) async fn boot_at(db_url: &str) -> Boot {
+    boot_with_scope(db_url, None).await
+}
+
+pub(crate) async fn boot_development() -> Boot {
+    const ID: &str = "dev.neige.git-forge";
+    let boot = boot_with_scope("sqlite::memory:", Some(ID)).await;
+    let host = Arc::new(calm_server::plugin_host::PluginHost::new_full(
+        Arc::new(calm_server::plugin_host::PluginRegistry::empty().with_builtins()),
+        boot.repo.clone(),
+        boot.ctx.gate_logs_dir.join("plugins"),
+        boot.ctx.gate_logs_dir.join("plugin-data"),
+        Vec::new(),
+        boot.ctx.events.clone(),
+        boot.ctx.write.clone(),
+    ));
+    host.reconcile_builtins().await.unwrap();
+    host.enable(ID).await.unwrap();
+    assert!(boot.ctx.plugin_host.set(host).is_ok());
+    boot
+}
+
+async fn boot_with_scope(db_url: &str, plugin_scope: Option<&str>) -> Boot {
     let repo: Arc<dyn Repo> = Arc::new(SqlxRepo::open(db_url).await.expect("open sqlite"));
     let area = repo
         .area_create(NewArea {
@@ -174,7 +196,7 @@ pub(crate) async fn boot_at(db_url: &str) -> Boot {
             sort: None,
             cwd: String::new(),
             template_id: None,
-            plugin_scope: None,
+            plugin_scope: plugin_scope.map(str::to_string),
             attach_folder: false,
             theme: calm_server::routes::theme::RequestTheme::default_dark(),
         })

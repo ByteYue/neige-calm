@@ -16,13 +16,14 @@ use calm_types::forge_git::{
 };
 use serde_json::{Value, json};
 
+use crate::builtin_plugins::dev::PLUGIN_ID as GIT_FORGE_PLUGIN_ID;
 use crate::event::{FieldSource, ForgeEventSpec};
 use crate::mcp_server::framing::RpcError;
 use crate::mcp_server::registry::{
     AppContext, ToolCallIdentity, ToolDescriptor, ToolHandler, ToolHandlerFuture, ToolRegistry,
     require_role, role_gated_write_annotations,
 };
-use crate::mcp_server::tools::emit::{GIT_FORGE_PLUGIN_ID, worker_delivery_payload};
+use crate::mcp_server::tools::emit::worker_delivery_payload;
 use crate::mcp_server::transport::{PluginForgePayload, submit_forge_action_with_key};
 use crate::model::{CardRole, TaskStatus, Track, new_id};
 use crate::operation::OperationOutcome;

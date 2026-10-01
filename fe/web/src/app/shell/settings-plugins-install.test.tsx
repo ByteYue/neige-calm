@@ -35,6 +35,7 @@ const ROW = {
   state: 'disabled',
   manifest_name: 'Todo',
   has_config: false,
+  can_uninstall: true,
 };
 
 type Reply = (request: ApiRequest) => ApiTransportResponse;

@@ -52,9 +52,12 @@ async fn create_attached_track(fx: &Fixture, cwd: &Path) -> String {
         "title": "planner commit",
         "cwd": cwd.to_string_lossy(),
         "attach_folder": true,
+        "template_id": "issue-development",
+        "template_input": {"issue_url":"https://github.com/example/repo/issues/1", "repo":"example/repo", "issue_number":1},
         "theme": {"fg": [255, 255, 255], "bg": [0, 0, 0]},
     });
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")

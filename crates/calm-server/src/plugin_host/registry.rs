@@ -57,6 +57,18 @@ impl PluginRegistry {
         }
     }
 
+    /// Add only compiled components before a host takes ownership of this registry.
+    pub fn with_builtins(self) -> Self {
+        let mut inner = self.inner.write().unwrap();
+        for component in crate::builtin_plugins::catalog() {
+            let manifest = component.manifest().clone();
+            inner.install_paths.remove(&manifest.id);
+            inner.manifests.insert(manifest.id.clone(), manifest);
+        }
+        drop(inner);
+        self
+    }
+
     /// **Build-time** construction: seeding a registry no `PluginHost` owns yet needs no lifecycle guard. The builder is consuming, so the build-time write path is gone once it is live.
     pub fn builder() -> PluginRegistryBuilder {
         PluginRegistryBuilder {
@@ -158,6 +170,14 @@ impl PluginRegistry {
             }
             match load_one(&manifest_path) {
                 Ok(manifest) => {
+                    if crate::builtin_plugins::is_reserved(&manifest.id)
+                        || manifest.kind == super::ConnectorKind::Builtin
+                    {
+                        report
+                            .skipped
+                            .push((path, "built-in plugin identity is reserved".into()));
+                        continue;
+                    }
                     let id = manifest.id.clone();
                     let path_is_canonical = dir_name_is_id(&path, &id);
                     let mut inner = registry.inner.write().unwrap();

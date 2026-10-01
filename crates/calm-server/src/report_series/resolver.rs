@@ -330,6 +330,15 @@ impl SeriesResolver {
         if *scope == TrackPluginScope::None {
             return Enqueue::Miss("track owner plugin unavailable".to_string());
         }
+        let Some(manifest) = plugin_host.registry().get(&request.plugin_id) else {
+            return Enqueue::Miss("plugin manifest unavailable".into());
+        };
+        if !scope.allows_manifest(&manifest) {
+            return Enqueue::Miss(format!(
+                "plugin {} is outside this track's plugin scope",
+                request.plugin_id
+            ));
+        }
 
         let job = Job {
             ctx: ctx.clone(),
@@ -516,28 +525,29 @@ impl SeriesResolver {
                 .await;
         }
 
-        // 3. Scope.
-        match plugin_scope_for_track(&ctx, Some(&track_id)).await {
-            TrackPluginScope::None => {
-                return ResolveOutcome::Dropped("track owner plugin unavailable".to_string());
-            }
-            TrackPluginScope::Only(owner) if owner != request.plugin_id => {
-                let reason = format!(
-                    "plugin {} is outside this track's plugin scope",
-                    request.plugin_id
-                );
-                return self
-                    .write_unavailable(
-                        &ctx,
-                        &track_id,
-                        &block_id,
-                        &request.request_hash,
-                        &as_of,
-                        &reason,
-                    )
-                    .await;
-            }
-            TrackPluginScope::All | TrackPluginScope::Only(_) => {}
+        // 3. Kernel template-owner scope and manifest visibility.
+        let scope = plugin_scope_for_track(&ctx, Some(&track_id)).await;
+        if matches!(scope, TrackPluginScope::None) {
+            return ResolveOutcome::Dropped("track owner plugin unavailable".to_string());
+        }
+        let Some(manifest) = plugin_host.registry().get(&request.plugin_id) else {
+            return ResolveOutcome::Dropped("plugin manifest unavailable".into());
+        };
+        if !scope.allows_manifest(&manifest) {
+            let reason = format!(
+                "plugin {} is outside this track's plugin scope",
+                request.plugin_id
+            );
+            return self
+                .write_unavailable(
+                    &ctx,
+                    &track_id,
+                    &block_id,
+                    &request.request_hash,
+                    &as_of,
+                    &reason,
+                )
+                .await;
         }
 
         // 4. Client. Only local variants are series sources: a remote connector must not be driven by document content.
@@ -565,6 +575,7 @@ impl SeriesResolver {
                         .await
                 }
                 ConnectorClient::Cli(c) => c.tools_call(&request.tool, arguments).await,
+                ConnectorClient::Builtin(c) => c.tools_call(&request.tool, &arguments),
                 ConnectorClient::Http(_) => Err(crate::plugin_host::mcp::RpcError::internal(
                     "remote connectors are not series sources",
                 )),

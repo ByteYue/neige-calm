@@ -551,3 +551,39 @@ async fn reason_is_capped() {
     assert_eq!(reason.chars().count(), 256);
     assert!(reason.starts_with("plugin error: é"));
 }
+
+#[tokio::test]
+async fn bound_track_series_source_is_refused_without_its_template_owner() {
+    let fx = SeriesFixture::boot(FixtureOptions::default()).await;
+    let id = crate::report_series_fixture::MARKET_PLUGIN_ID;
+    let mut manifest = fx.plugin_host.registry().get(id).unwrap();
+    manifest.manifest_version = 4;
+    manifest.agent_tools_scope = calm_server::plugin_host::manifest::AgentToolsScope::BoundTrack;
+    let guard = fx.plugin_host.try_lock_lifecycle(id).unwrap();
+    fx.plugin_host.registry_insert(&guard, manifest, None);
+    drop(guard);
+    let block = fx.write_series_block(seam_fixture()["block"].clone()).await;
+    let (enqueue, outcomes) = fx.resolve_block(&block).await;
+    assert!(matches!(enqueue, Enqueue::Miss(ref reason) if reason.contains("outside")));
+    assert!(outcomes.is_empty());
+    assert_eq!(fx.call_count(), 0);
+}
+
+#[tokio::test]
+async fn queued_series_rechecks_a_new_scope_restriction_before_call() {
+    let fx = SeriesFixture::boot(FixtureOptions::default()).await;
+    let block = fx.write_series_block(seam_fixture()["block"].clone()).await;
+    assert_eq!(fx.enqueue(&block).await, Enqueue::Queued);
+    let id = crate::report_series_fixture::MARKET_PLUGIN_ID;
+    let mut manifest = fx.plugin_host.registry().get(id).unwrap();
+    manifest.manifest_version = 4;
+    manifest.agent_tools_scope = calm_server::plugin_host::manifest::AgentToolsScope::BoundTrack;
+    let guard = fx.plugin_host.try_lock_lifecycle(id).unwrap();
+    fx.plugin_host.registry_insert(&guard, manifest, None);
+    drop(guard);
+    assert_eq!(
+        fx.run_recorded_jobs().await,
+        vec![wrote("unavailable", false)]
+    );
+    assert_eq!(fx.call_count(), 0);
+}

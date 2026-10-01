@@ -379,6 +379,8 @@ async fn dispatch_request(
                             let scope = plugin_scope_for_track(ctx, None).await;
                             let mut descriptors =
                                 registry.descriptors_visible_to_any_role(PLUGIN_TOOL_ROLES);
+                            descriptors
+                                .retain(|d| crate::builtin_plugins::owner(&d.name).is_none());
                             descriptors.extend(plugin_tool_descriptors(ctx, &scope).await);
                             descriptors
                         }
@@ -388,6 +390,7 @@ async fn dispatch_request(
                         let scope = plugin_scope_for_track(ctx, None).await;
                         let mut descriptors =
                             registry.descriptors_visible_to_any_role(PLUGIN_TOOL_ROLES);
+                        descriptors.retain(|d| crate::builtin_plugins::owner(&d.name).is_none());
                         descriptors.extend(plugin_tool_descriptors(ctx, &scope).await);
                         descriptors
                     }
@@ -460,12 +463,21 @@ async fn dispatch_request(
     }
 }
 
-async fn extend_plugin_tool_descriptors_for_role(
+pub(crate) async fn extend_plugin_tool_descriptors_for_role(
     ctx: &Arc<AppContext>,
     descriptors: &mut Vec<ToolDescriptor>,
     role: CardRole,
     scope: &TrackPluginScope,
 ) {
+    let running = match ctx.plugin_host.get() {
+        Some(host) => host.running_plugin_ids().await,
+        None => BTreeSet::new(),
+    };
+    descriptors.retain(|d| {
+        crate::builtin_plugins::owner(&d.name).is_none_or(|p| {
+            running.contains(&p.manifest().id) && scope.allows_manifest(p.manifest())
+        })
+    });
     if PLUGIN_TOOL_ROLES.contains(&role) {
         descriptors.extend(plugin_tool_descriptors(ctx, scope).await);
     }
@@ -492,10 +504,10 @@ fn plugin_tool_descriptors_from(
 ) -> Vec<ToolDescriptor> {
     let mut descriptors = Vec::new();
     for manifest in manifests {
-        let plugin_id = manifest.id;
-        if !running_ids.contains(&plugin_id) || !scope.allows(&plugin_id) {
+        if !running_ids.contains(&manifest.id) || !scope.allows_manifest(&manifest) {
             continue;
         }
+        let plugin_id = manifest.id;
         for entry in manifest.exposes_tools {
             let mut description = entry.description.unwrap_or_default();
             if entry.kind == Some(ToolKind::ForgeAction) {
@@ -600,13 +612,32 @@ async fn dispatch_plugin_tools_call(
     let Some((plugin_id, tool_name, kind)) =
         plugin_tool_route(plugin_host.registry(), name, &running_ids)?
     else {
+        // Exact installed declarations may explain disabled state to an eligible Planner.
+        // Unknown names and unauthorized callers keep the uniform existence-shaped rejection.
+        let installed_ids = plugin_host
+            .registry()
+            .list()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        if let Some((id, _, _)) = plugin_tool_route(plugin_host.registry(), name, &installed_ids)?
+            && let Some(manifest) = plugin_host.registry().get(&id)
+            && let Some(error) =
+                crate::mcp_server::tool_visibility::disabled_plugin_error(ctx, &identity, &manifest)
+                    .await
+        {
+            return Err(error);
+        }
         return Err(unknown_tool());
     };
 
-    // A track bound to a template may only call the owning plugin's tools; rejected via `unknown_tool` so a bound track cannot probe for other plugins' tools.
+    let manifest = plugin_host
+        .registry()
+        .get(&plugin_id)
+        .ok_or_else(unknown_tool)?;
     if !plugin_scope_for_track(ctx, identity.track_id.as_deref())
         .await
-        .allows(&plugin_id)
+        .allows_manifest(&manifest)
     {
         return Err(unknown_tool());
     }
@@ -636,6 +667,7 @@ async fn dispatch_plugin_tools_call(
                 ConnectorClient::Http(c) => c.tools_call(&tool_name, arguments).await,
                 // An `Ok` result carries the child's own `isError` verdict, an `Err` is a kernel-side refusal.
                 ConnectorClient::Cli(c) => c.tools_call(&tool_name, arguments).await,
+                ConnectorClient::Builtin(c) => c.tools_call(&tool_name, &arguments),
             };
             // A call that produced no result (transport error, unparseable reply, disconnect) still replaces the key's entry with `Error`, so the previous body is not capturable any more.
             if let Some((track_id, args)) = record_for {
@@ -658,7 +690,12 @@ async fn dispatch_plugin_tools_call(
                     "plugin not trusted to submit forge actions",
                 ));
             }
-            // Forge actions are stdio-only; a connector's materialized tools always carry `kind: None`.
+            if let Some(ConnectorClient::Builtin(component)) =
+                plugin_host.connector_client(&plugin_id).await
+            {
+                let result = component.tools_call(&tool_name, &arguments)?;
+                return dispatch_forge_action_result(ctx, result, &plugin_id, identity).await;
+            }
             let client = plugin_host.mcp_client(&plugin_id).await.ok_or_else(|| {
                 RpcError::custom(-32002, format!("plugin `{plugin_id}` not running"))
             })?;
@@ -887,6 +924,15 @@ async fn dispatch_forge_action_plugin_tool(
     let result = client
         .tools_call(tool_name, arguments, identity.track_id.as_deref())
         .await?;
+    dispatch_forge_action_result(ctx, result, plugin_id, identity).await
+}
+
+async fn dispatch_forge_action_result(
+    ctx: &Arc<AppContext>,
+    result: crate::plugin_host::CallToolResult,
+    plugin_id: &str,
+    identity: ToolCallIdentity,
+) -> Result<Value, RpcError> {
     if result.is_error == Some(true) {
         return serde_json::to_value(result)
             .map_err(|e| RpcError::internal(format!("plugin tools/call serialization: {e}")));

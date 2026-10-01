@@ -1,8 +1,8 @@
-//! Calm kernel — minimal container/PTY core. Business semantics (tasks, calendar, plans,
-//! git, ...) live in out-of-process plugins reached via MCP.
+//! Calm kernel: execution, persistence, and scoped capabilities. Compiled components and external plugins share the plugin lifecycle.
 
 pub mod actor;
 pub mod auth;
+pub mod builtin_plugins;
 pub mod card_kind;
 pub mod forge_trust;
 pub mod harness;

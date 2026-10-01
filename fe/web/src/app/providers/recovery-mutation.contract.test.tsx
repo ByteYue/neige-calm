@@ -7,7 +7,7 @@ import type { ApiTransportResponse } from '../../../../core/api/types.ts';
 import { createUnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
 import { createRecoveryTransports } from '../../systems/recovery/transport.ts';
 import { usePlannerAttachments } from '../../features/planner/attachments.tsx';
-import { useTodayReportResetMutation, usePlannerMutations, usePluginMutations } from './queries.ts';
+import { useTodayReportResetMutation, usePlannerMutations, usePluginMutations, queryKeys } from './queries.ts';
 
 afterEach(() => { cleanup(); onlineManager.setOnline(true); vi.unstubAllGlobals(); });
 it('offline production reset rejects before mutation admission and never resumes a paused mutation', async () => {
@@ -107,7 +107,7 @@ it('releasing an old plugin lease preserves a newer pending intent on the same r
   act(() => pending[1].resolve({ status: 200, statusText: 'OK', body: { id: 'plugin-a', enabled: false } }));
   await waitFor(() => expect(result.current.pendingIds.size).toBe(0));
   expect(result.current.errors.size).toBe(0); expect(result.current.effectBoundaryIds.has('plugin-a')).toBe(true);
-  expect(invalidate).toHaveBeenCalledOnce();
+  expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([queryKeys.plugins()]);
 });
 
 

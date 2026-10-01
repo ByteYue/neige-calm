@@ -16,11 +16,12 @@ use calm_types::git_candidate::{DeliveryFailureCode, DeliveryWakeReason};
 use sqlx::Row;
 
 use super::candidate::CandidateRow;
+use crate::builtin_plugins::dev::PLUGIN_ID as GIT_FORGE_PLUGIN_ID;
 use crate::db::write_in_tx_typed;
 use crate::error::{CalmError, Result};
 use crate::event::{FieldSource, ForgeEventSpec};
 use crate::mcp_server::registry::AppContext;
-use crate::mcp_server::tools::emit::{GIT_FORGE_PLUGIN_ID, worker_delivery_payload};
+use crate::mcp_server::tools::emit::worker_delivery_payload;
 use crate::mcp_server::transport::{
     ForgeActionSubmission, PluginForgePayload, submit_forge_action_with_key,
 };

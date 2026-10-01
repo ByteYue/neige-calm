@@ -445,3 +445,55 @@ async fn selected_template_detail_is_exact_and_read_only() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn template_plugin_guides_are_read_only_and_independent_of_enablement() {
+    let boot = boot(false).await;
+    for enabled in [false, true] {
+        boot.repo
+            .plugin_update_enabled(&boot.plugin_id, enabled)
+            .await
+            .unwrap();
+        for (id, expected) in [
+            (
+                ISSUE_DEVELOPMENT,
+                json!([{"id":"dev.neige.git-forge","name":"development"}]),
+            ),
+            (SMALL_CHANGE, json!([])),
+        ] {
+            let before = db_digest(&boot.repo).await;
+            let response = boot
+                .app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/track-templates/{id}/plugin-guides"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(body, expected);
+            assert_eq!(
+                db_digest(&boot.repo).await,
+                before,
+                "guide reads must not write state"
+            );
+        }
+    }
+    let response = boot
+        .app
+        .oneshot(
+            Request::builder()
+                .uri("/api/track-templates/no-such-template/plugin-guides")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

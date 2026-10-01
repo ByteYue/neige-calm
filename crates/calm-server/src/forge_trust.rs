@@ -7,10 +7,12 @@ pub(crate) fn trusted_forge_plugins_env_lock() -> &'static tokio::sync::Mutex<()
 }
 
 pub fn trusted_forge_plugin(plugin_id: &str) -> bool {
-    let configured = std::env::var("NEIGE_TRUSTED_FORGE_PLUGINS")
-        .unwrap_or_else(|_| "dev.neige.git-forge".to_string());
-    configured
-        .split(',')
-        .map(str::trim)
-        .any(|trusted| trusted == plugin_id)
+    match std::env::var("NEIGE_TRUSTED_FORGE_PLUGINS") {
+        Ok(configured) => configured
+            .split(',')
+            .map(str::trim)
+            .any(|trusted| trusted == plugin_id),
+        // Compiled declarations are the default trust set; an explicit operator list stays authoritative.
+        Err(_) => crate::builtin_plugins::get(plugin_id).is_some(),
+    }
 }

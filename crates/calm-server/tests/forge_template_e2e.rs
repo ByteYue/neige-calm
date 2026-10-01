@@ -21,15 +21,16 @@ use calm_server::event::{
     ChannelVerdict, ChannelVerdictKind, Event, EventBus, EventScope, RatifyDecision,
 };
 
+use calm_server::builtin_plugins::dev::review::TOOL_REVIEW_ROUND;
 use calm_server::harness::{
     HarnessPhaseTag, HarnessRegistry, HarnessSnapshot, Observation, spawn_recovered_harness,
 };
 use calm_server::ids::{ActorId, AreaId, CardId, TrackId};
-use calm_server::mcp_server::tools::review::{TOOL_RATIFY_REQUEST, TOOL_REVIEW_ROUND};
+use calm_server::mcp_server::tools::review::TOOL_RATIFY_REQUEST;
 use calm_server::mcp_server::{
     AppContext, McpServer, ToolCallIdentity, ToolRegistry, build_default_registry,
 };
-use calm_server::model::{CardRole, NewArea, NewCard, NewPlugin, NewTrack, new_id, now_ms};
+use calm_server::model::{CardRole, NewArea, NewCard, NewTrack, new_id, now_ms};
 use calm_server::operation::forge_action_adapter::{
     FORGE_ACTION_KIND, ForgeActionAdapter, ForgeActionPayload, ProbeSpec,
 };
@@ -64,7 +65,6 @@ use tokio::sync::OnceCell;
 use tokio::time::{Instant, sleep, timeout};
 use tower::ServiceExt;
 
-const FORGE_BIN: &str = env!("CARGO_BIN_EXE_git-forge");
 const PLUGIN_ID: &str = "dev.neige.git-forge";
 const COMMIT_TOOL: &str = "plugin.dev.neige.git-forge_git.commit";
 const PR_LIST_TOOL: &str = "plugin.dev.neige.git-forge_gh.pr.list";
@@ -448,12 +448,14 @@ async fn git_forge_template_registers_and_track_create_binds() {
         }),
     )
     .await;
-    // `issue-development` is also a seeded template key, so an untrusted git-forge does not 400 the create; plugin tools stay unbound.
-    assert_eq!(status, StatusCode::CREATED, "body={body}");
-    assert_eq!(body["template_id"], TEMPLATE_ID);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
     assert!(
-        body["plugin_scope"].is_null(),
-        "untrusted plugin must not stamp plugin_scope, body={body}"
+        body["error"].as_str().unwrap().contains("requires"),
+        "{body}"
+    );
+    assert_eq!(
+        track_count_by_title(&fx.repo, "untrusted template track").await,
+        0
     );
 
     fx.plugin_host
@@ -1453,7 +1455,7 @@ async fn boot_fixture() -> Fixture {
             sort: None,
             cwd: track_cwd.display().to_string(),
             template_id: None,
-            plugin_scope: None,
+            plugin_scope: Some(PLUGIN_ID.into()),
             attach_folder: false,
             theme: calm_server::routes::theme::RequestTheme::default_dark(),
         })
@@ -1781,36 +1783,23 @@ async fn boot_plugin_host(
     events: EventBus,
     write: WriteContext,
 ) -> Arc<PluginHost> {
-    let install_dir = plugins_dir.join(PLUGIN_ID);
-    let bin_dir = install_dir.join("bin");
-    std::fs::create_dir_all(&bin_dir).expect("create plugin bin dir");
     std::fs::create_dir_all(&plugins_data_dir).expect("create plugin data dir");
-    std::os::unix::fs::symlink(Path::new(FORGE_BIN), bin_dir.join("git-forge"))
-        .expect("symlink git-forge plugin");
-
-    let manifest = read_manifest();
-    let manifest_json = manifest.to_json();
-    let registry = PluginRegistry::from_manifests([(manifest, Some(install_dir.clone()))]);
-    repo.plugin_install(NewPlugin {
-        id: PLUGIN_ID.into(),
-        version: "0.1.0".into(),
-        install_path: install_dir.display().to_string(),
-        manifest: manifest_json,
-        enabled: true,
-        user_config: json!({}),
-    })
-    .await
-    .expect("seed plugin row");
-
-    Arc::new(PluginHost::new_full(
-        Arc::new(registry),
-        repo,
+    let host = Arc::new(PluginHost::new_full(
+        Arc::new(PluginRegistry::empty().with_builtins()),
+        repo.clone(),
         plugins_dir,
         plugins_data_dir,
         Vec::new(),
         events,
         write,
-    ))
+    ));
+    host.reconcile_builtins()
+        .await
+        .expect("reconcile compiled Dev");
+    repo.plugin_update_enabled(PLUGIN_ID, true)
+        .await
+        .expect("enable Dev");
+    host
 }
 
 async fn insert_workspace_lease(

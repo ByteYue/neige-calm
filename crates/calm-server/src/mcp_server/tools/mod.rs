@@ -15,7 +15,6 @@ pub mod source;
 pub mod terminal;
 pub mod track_file;
 pub mod track_history;
-pub mod track_publish;
 pub mod track_rename;
 pub mod track_report;
 pub mod track_report_blocks;
@@ -42,7 +41,7 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
     track_report_blocks::register_into(registry);
     track_file::register_into(registry);
     track_history::register_into(registry);
-    track_publish::register_into(registry);
+    crate::builtin_plugins::register_native_tools(registry);
     admin::register_into(registry);
 }
 

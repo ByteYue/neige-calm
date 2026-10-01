@@ -210,7 +210,7 @@ async fn boot() -> Boot {
             proc_supervisor_sock: None,
         }),
         Arc::new(PluginHost::new_full(
-            Arc::new(PluginRegistry::empty()),
+            Arc::new(PluginRegistry::empty().with_builtins()),
             repo.clone(),
             PathBuf::new(),
             tmp.path().join("plugins"),

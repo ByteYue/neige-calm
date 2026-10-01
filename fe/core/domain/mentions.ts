@@ -3,6 +3,7 @@
 // `insert` (the path format lives in Rust alone); this file never assembles a path.
 
 import { z } from 'zod';
+import type { PluginListItem } from './plugins.js';
 
 import type {
   BlockMention, MentionCandidates, TagMention, TrackMention,
@@ -52,7 +53,7 @@ export function mentionsOperation(
   };
 }
 
-export type MentionKind = 'tag' | 'track' | 'block';
+export type MentionKind = 'tag' | 'track' | 'block' | 'plugin';
 
 /** One row of the `@` menu and the chip it becomes. */
 export type MentionSuggestion = Readonly<{
@@ -188,4 +189,21 @@ export function sentMentionParts(text: string): readonly SentMentionPart[] {
   }
   if (end < text.length) parts.push({ text: text.slice(end), label: null });
   return parts;
+}
+
+/** References are ordinary message text, never plugin enablement or tool authorization. */
+export function pluginMentionSuggestions(plugins: readonly PluginListItem[], typed: string): readonly MentionSuggestion[] {
+  const query = mentionQueryOf(typed);
+  if (query.kind !== null) return [];
+  const needle = query.text.trim().toLocaleLowerCase();
+  return plugins.filter(plugin => `${plugin.manifest_name} ${plugin.id}`.toLocaleLowerCase().includes(needle))
+    .sort((a, b) => a.manifest_name.localeCompare(b.manifest_name) || a.id.localeCompare(b.id))
+    .slice(0, 8).map(plugin => {
+      const description = Array.from(plugin.manifest_description?.trim() || 'No description provided.').slice(0, 480).join('');
+      return {
+        id: `plugin:${plugin.id}`, kind: 'plugin' as const, label: plugin.manifest_name,
+        chip: plugin.manifest_name, detail: description,
+        insert: `Plugin reference (documentation only; kernel permissions still apply): ${JSON.stringify({ id: plugin.id, name: plugin.manifest_name, description })}`,
+      };
+    });
 }

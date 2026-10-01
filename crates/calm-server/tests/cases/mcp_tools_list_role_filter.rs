@@ -22,7 +22,6 @@ fn expected_planner_toolset() -> Vec<&'static str> {
         "calm.report.links.backlinks",
         "calm.report.read",
         "calm.report.write_markdown",
-        "calm.review.round",
         "calm.source.capture",
         "calm.source.list",
         "calm.task.verdict",
@@ -32,7 +31,6 @@ fn expected_planner_toolset() -> Vec<&'static str> {
         "calm.terminal.open",
         "calm.terminal.resolve",
         "calm.track.close",
-        "calm.track.publish",
         "calm.track.rename",
         "calm.user.notify",
     ]

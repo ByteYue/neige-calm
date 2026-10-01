@@ -421,6 +421,23 @@ pub(crate) async fn planner_instructions(
             .as_ref()
             .and_then(|bound| bound.input.as_ref()),
     );
+    let track = repo
+        .track_get(track_id)
+        .await?
+        .ok_or_else(|| CalmError::NotFound(format!("track {track_id}")))?;
+    // Documentation follows the saved template; it never enables or authorizes tools.
+    for component in crate::builtin_plugins::catalog() {
+        let manifest = component.manifest();
+        if track.plugin_scope.as_deref() == Some(manifest.id.as_str())
+            || manifest
+                .templates
+                .iter()
+                .any(|template| Some(template.id.as_str()) == track.template_id.as_deref())
+        {
+            instructions.push_str("\n\n");
+            instructions.push_str(component.instructions());
+        }
+    }
     let card = repo
         .card_get(card_id)
         .await?
@@ -2419,7 +2436,7 @@ mod tests {
     use crate::routes::theme::RequestTheme;
     use tokio::time::{Instant, sleep};
 
-    const TEMPLATE_ID: &str = "issue-development";
+    const TEMPLATE_ID: &str = "investigation";
 
     fn populated_template_descriptor() -> TemplateDescriptor {
         TemplateDescriptor {

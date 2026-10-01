@@ -21,6 +21,8 @@ pub const SECRETS_FILENAME: &str = "secrets.json";
 pub enum ConnectorClient {
     /// `kind: app` — the stdio child process.
     Stdio(Arc<McpClient>),
+    /// Trusted compiled implementation; no process or IPC.
+    Builtin(&'static crate::builtin_plugins::BuiltinPlugin),
     /// `kind: mcp-http` — remote streamable-HTTP MCP server.
     Http(Arc<HttpMcpClient>),
     /// `kind: cli-query` — a pinned local query binary; no child is supervised, each `tools/call` forks a fresh short-lived process.
@@ -32,6 +34,7 @@ impl std::fmt::Debug for ConnectorClient {
         // No payloads: the HTTP variant holds an API key and the CLI variant holds a secret environment.
         f.write_str(match self {
             Self::Stdio(_) => "ConnectorClient::Stdio",
+            Self::Builtin(_) => "ConnectorClient::Builtin",
             Self::Http(_) => "ConnectorClient::Http",
             Self::Cli(_) => "ConnectorClient::Cli",
         })
@@ -43,6 +46,7 @@ impl ConnectorClient {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::Stdio(_) => "stdio",
+            Self::Builtin(_) => "builtin",
             Self::Http(_) => "mcp-http",
             Self::Cli(_) => "cli-query",
         }

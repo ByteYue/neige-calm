@@ -1308,6 +1308,7 @@ function useConversationPanel(
               </ChatFooterNotice>
             )}
             <ChatComposer disabled={creating} onSend={sendDraft} onNewConversation={startAnother}
+              mentionTrigger={mentionTrigger}
               draft={{ text: composerDraft, onChange: setComposerDraft }}
               /* A track conversation is not a Planner create: no availability gate here (#1817). */
               footerActions={<ModelPill groups={[{ provider: 'codex', catalog: draftCatalog.data ?? null, availability: null }]} provider="codex" selection={draft.model}

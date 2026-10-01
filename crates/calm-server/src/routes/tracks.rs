@@ -371,6 +371,13 @@ impl NamedSource {
                             "track create: `template_id` must reference a known track template; got `{template_id}`"
                         ))
                     })?;
+                    if let Some(required) = crate::builtin_plugins::required_owner(admission.key())
+                        && admission.binding.as_ref().is_none_or(|m| m.id != required)
+                    {
+                        return Err(CalmError::BadRequest(format!(
+                            "track create: template `{template_id}` requires `{required}`; enable its built-in capability in Settings"
+                        )));
+                    }
                     TrackInit::Template {
                         key: admission.key(),
                         binding: admission.binding.map(Box::new),
@@ -1001,6 +1008,8 @@ pub(crate) async fn resolve_template_binding(
     let running_plugin_ids = s.plugin.running_plugin_ids().await;
     s.plugin.registry().list().into_iter().find(|manifest| {
         crate::track_binding::plugin_is_eligible_owner(&running_plugin_ids, &manifest.id)
+            && crate::builtin_plugins::required_owner(template.key())
+                .is_none_or(|id| manifest.id == id)
             && manifest
                 .templates
                 .iter()

@@ -5,6 +5,7 @@
 import { useMemo, useRef } from 'react';
 import type { ChatComposerToken, ChatComposerTrigger } from '@astryxdesign/core/Chat';
 import type { SearchableItem, SearchSource } from '@astryxdesign/core/Typeahead';
+import { Badge } from '@astryxdesign/core/Badge';
 
 import type { MentionKind, MentionSearch, MentionSuggestion } from '../../../../../core/domain/mentions.ts';
 import styles from './mention-trigger.module.css';
@@ -14,6 +15,7 @@ const GROUP_HEADING: Readonly<Record<MentionKind, string>> = Object.freeze({
   tag: 'Tags',
   track: 'Tracks',
   block: 'Blocks',
+  plugin: 'Plugins',
 });
 
 /**
@@ -46,7 +48,9 @@ function suggestionOf(item: SearchableItem): MentionSuggestion {
  * the server's `insert` exactly; the reader sees the short `chip` form instead.
  */
 export function mentionToken(suggestion: MentionSuggestion): ChatComposerToken {
-  return { value: suggestion.insert, label: suggestion.chip };
+  // Named references stay named even when their serialized documentation is long.
+  // The custom renderer avoids Astryx's automatic long-paste token presentation.
+  return { value: suggestion.insert, render: () => <Badge label={suggestion.chip} variant="neutral" /> };
 }
 
 /**
@@ -103,7 +107,7 @@ export function mentionTrigger(source: SearchSource<MentionItem>): ChatComposerT
     character: '@',
     searchSource: source,
     menuLabel: 'Mention',
-    emptySearchResultsText: 'Nothing in this area matches',
+    emptySearchResultsText: 'No matches',
     renderItem: (item) => <MentionRow suggestion={suggestionOf(item)} />,
     onSelect: (item) => mentionToken(suggestionOf(item)),
   };

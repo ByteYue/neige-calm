@@ -1,6 +1,7 @@
 //! Plugin host — the kernel's side of the plugin protocol.
 
 pub mod auth;
+mod builtin;
 pub mod callbacks;
 pub mod child_process;
 pub mod cli_query;
@@ -808,7 +809,7 @@ impl PluginHost {
             .iter()
             .filter(|p| p.enabled)
             .filter_map(|p| self.registry.get(&p.id))
-            .filter(|m| !m.kind.is_app())
+            .filter(|m| matches!(m.kind, ConnectorKind::McpHttp | ConnectorKind::CliQuery))
             .map(|m| connector_bringup_budget(&m))
             .max()
             .unwrap_or_default();
@@ -823,10 +824,9 @@ impl PluginHost {
             }
             // `app` plugins spawn a local child and are not network-bound, so
             // they are outside this budget — it exists for the remote half.
-            let is_connector = self
-                .registry
-                .get(&plug.id)
-                .is_some_and(|m| !m.kind.is_app());
+            let is_connector = self.registry.get(&plug.id).is_some_and(|m| {
+                matches!(m.kind, ConnectorKind::McpHttp | ConnectorKind::CliQuery)
+            });
             if !is_connector {
                 // The fence wraps the whole iteration (lock wait, spawn, every emission), not a named step inside it.
                 match tokio::time::timeout(self.app_autospawn_wall, self.autospawn_one(&plug.id))
@@ -1147,6 +1147,9 @@ impl PluginHost {
 
         // Branch by kind BEFORE `ensure_plugin_token()`: a token for a connector would be a `plugin_tokens` row nobody ever presents.
         match manifest.kind {
+            ConnectorKind::Builtin => {
+                return self.spawn_builtin(lifecycle, manifest, guard).await;
+            }
             ConnectorKind::App => {}
             ConnectorKind::McpHttp => {
                 return self
@@ -2228,6 +2231,17 @@ fn find_template_conflict(
     if !is_trusted(&manifest.id) {
         return None;
     }
+    for template in &manifest.templates {
+        if let Some(owner) = crate::builtin_plugins::required_owner(&template.id)
+            && owner != manifest.id
+        {
+            return Some(HostError::TemplateConflict {
+                plugin_id: manifest.id.clone(),
+                template_id: template.id.clone(),
+                held_by: owner.into(),
+            });
+        }
+    }
     for other in candidates {
         if other.id == manifest.id || !holder_ids.contains(&other.id) || !is_trusted(&other.id) {
             continue;
@@ -2347,8 +2361,8 @@ mod template_conflict_tests {
 
     #[test]
     fn duplicate_template_on_running_trusted_plugin_conflicts() {
-        let incoming = manifest_with_template("dev.second", "issue-development");
-        let holder = manifest_with_template("dev.first", "issue-development");
+        let incoming = manifest_with_template("dev.second", "investigation");
+        let holder = manifest_with_template("dev.first", "investigation");
         let trusted = |_: &str| true;
         let conflict =
             find_template_conflict(&incoming, [holder], &running(&["dev.first"]), &trusted)
@@ -2360,7 +2374,7 @@ mod template_conflict_tests {
                 held_by,
             } => {
                 assert_eq!(plugin_id, "dev.second");
-                assert_eq!(template_id, "issue-development");
+                assert_eq!(template_id, "investigation");
                 assert_eq!(held_by, "dev.first");
             }
             other => panic!("expected TemplateConflict, got {other:?}"),
@@ -2369,8 +2383,8 @@ mod template_conflict_tests {
 
     #[test]
     fn stopped_holder_does_not_squat_on_template_id() {
-        let incoming = manifest_with_template("dev.second", "issue-development");
-        let holder = manifest_with_template("dev.first", "issue-development");
+        let incoming = manifest_with_template("dev.second", "investigation");
+        let holder = manifest_with_template("dev.first", "investigation");
         let trusted = |_: &str| true;
         assert!(
             find_template_conflict(&incoming, [holder], &running(&[]), &trusted).is_none(),
@@ -2380,8 +2394,8 @@ mod template_conflict_tests {
 
     #[test]
     fn untrusted_duplicates_are_tolerated() {
-        let incoming = manifest_with_template("dev.second", "issue-development");
-        let holder = manifest_with_template("dev.first", "issue-development");
+        let incoming = manifest_with_template("dev.second", "investigation");
+        let holder = manifest_with_template("dev.first", "investigation");
         let running_ids = running(&["dev.first"]);
 
         // Untrusted spawner: never enters the resolution set — no conflict.
@@ -2406,8 +2420,8 @@ mod template_conflict_tests {
 
     #[test]
     fn respawn_skips_own_registry_entry_and_distinct_ids_pass() {
-        let incoming = manifest_with_template("dev.first", "issue-development");
-        let own_entry = manifest_with_template("dev.first", "issue-development");
+        let incoming = manifest_with_template("dev.first", "investigation");
+        let own_entry = manifest_with_template("dev.first", "investigation");
         let trusted = |_: &str| true;
         assert!(
             find_template_conflict(&incoming, [own_entry], &running(&["dev.first"]), &trusted)
@@ -2420,6 +2434,24 @@ mod template_conflict_tests {
             find_template_conflict(&incoming, [other], &running(&["dev.other"]), &trusted)
                 .is_none(),
             "distinct template ids must not conflict"
+        );
+    }
+}
+
+#[cfg(test)]
+mod required_template_owner {
+    #[test]
+    fn required_dev_template_cannot_be_claimed_when_dev_is_disabled() {
+        let incoming = super::Manifest::parse(r#"{"manifest_version":2,"id":"other.plugin","version":"0.1.0","min_kernel_version":"0.1.0","display_name":"Other","entrypoint":{"command":"bin/tool"},"templates":[{"id":"issue-development"}]}"#).unwrap();
+        let error = super::find_template_conflict(
+            &incoming,
+            [],
+            &std::collections::BTreeSet::new(),
+            &|_| true,
+        )
+        .unwrap();
+        assert!(
+            matches!(error, super::HostError::TemplateConflict { ref held_by, .. } if held_by == "dev.neige.git-forge")
         );
     }
 }

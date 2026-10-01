@@ -117,7 +117,7 @@ export function PluginsPane({
                           : ''}
                       </span>
                       <span className={styles.pluginId}>{plugin.id}</span>
-                      {confirming === plugin.id && (
+                      {confirming === plugin.id && plugin.can_uninstall && (
                         <span className={styles.notice} role="alert">
                           Remove this plugin? Its stored configuration and, for a remote server, its
                           saved key are deleted with it.
@@ -128,7 +128,7 @@ export function PluginsPane({
                   control={(
                     <span className={styles.pluginControls} data-nc-plugin-controls="">
                       {/* While a row is confirming, the question replaces the row's other controls. Both buttons name the plugin in their accessible name only. */}
-                      {confirming === plugin.id ? (
+                      {confirming === plugin.id && plugin.can_uninstall ? (
                         <>
                           <AstryxButton
                             label={`Remove ${plugin.manifest_name}`}
@@ -151,6 +151,7 @@ export function PluginsPane({
                         </>
                       ) : (
                         <>
+                          {plugin.can_uninstall && (
                           <AstryxButton
                             label={`Remove ${plugin.manifest_name}`}
                             variant="ghost"
@@ -159,6 +160,7 @@ export function PluginsPane({
                           >
                             Remove
                           </AstryxButton>
+                          )}
                       {plugin.has_config && (
                         <AstryxIconButton
                           /* `label` is the whole accessible name (rendered as `aria-label`), so it keeps the plugin's name. */

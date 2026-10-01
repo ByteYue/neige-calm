@@ -125,6 +125,13 @@ impl PluginHost {
         manifest: Manifest,
         place_tree: impl FnOnce(&StdPath) -> Result<()>,
     ) -> Result<Plugin> {
+        if crate::builtin_plugins::is_reserved(&manifest.id)
+            || manifest.kind == super::ConnectorKind::Builtin
+        {
+            return Err(CalmError::PluginInstall(
+                "built-in components cannot be installed from a directory or connector".into(),
+            ));
+        }
         if let Some(prev) = self.repo.plugin_get_by_id(&manifest.id).await? {
             return Err(CalmError::PluginConflict(format!(
                 "plugin `{}` already installed at version `{}`",
@@ -147,6 +154,8 @@ impl PluginHost {
         let plug = self.repo.plugin_install(new_plugin).await?;
 
         self.registry_insert(guard, manifest, Some(install_dir));
+        self.emit_state_under(guard, &super::PluginRuntimeStatus::Disabled)
+            .await;
 
         Ok(plug)
     }
@@ -182,6 +191,11 @@ impl PluginHost {
     /// Stop, then tear down every trace of the plugin except an operator-owned on-disk tree.
     /// The token / kv / overlay cascade deliberately swallows its errors; `plugin_delete` is the one write reported.
     pub async fn uninstall(self: &Arc<Self>, id: &str) -> Result<()> {
+        if crate::builtin_plugins::is_reserved(id) {
+            return Err(CalmError::BadRequest(
+                "built-in components can be disabled, not uninstalled".into(),
+            ));
+        }
         // Probe before guard: taking the guard first would answer 409 for an unknown id that happens to be busy.
         self.plugin_row_or_404(id).await?;
         let guard = self.try_lock_lifecycle(id).map_err(spawn_error_to_calm)?;
@@ -199,6 +213,8 @@ impl PluginHost {
         let _ = self.repo.overlays_clear_by_plugin(id).await;
         self.repo.plugin_delete(id).await?;
         self.registry_remove(&guard);
+        self.emit_state_under(&guard, &super::PluginRuntimeStatus::Disabled)
+            .await;
 
         // The on-disk tree is left in place unless the kernel wrote it (a synthesized connector's tree holds
         // the `secrets.json` this uninstall was asked to forget). Best-effort: the row is already gone.
@@ -235,6 +251,19 @@ impl PluginHost {
             Err(HostError::NotFound(_)) => {}
             Err(e) => return Err(CalmError::Internal(format!("stop failed: {e}"))),
         }
+        if let Some(component) = crate::builtin_plugins::get(id) {
+            let manifest = component.manifest().clone();
+            self.registry_insert(&guard, manifest.clone(), None);
+            self.repo
+                .plugin_update_manifest(id, manifest.to_json())
+                .await?;
+            if plug.enabled {
+                self.spawn_under(&guard, None)
+                    .await
+                    .map_err(spawn_error_to_calm)?;
+            }
+            return self.plugin_row_or_404(id).await;
+        }
         let install_dir = PathBuf::from(&plug.install_path);
         let manifest_path = install_dir.join("manifest.json");
         let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|e| {
@@ -242,6 +271,13 @@ impl PluginHost {
         })?;
         let manifest =
             Manifest::parse(&manifest_text).map_err(|e| CalmError::PluginInstall(e.to_string()))?;
+        if manifest.kind == super::ConnectorKind::Builtin
+            || crate::builtin_plugins::is_reserved(&manifest.id)
+        {
+            return Err(CalmError::PluginInstall(
+                "built-in declarations cannot be loaded from disk".into(),
+            ));
+        }
         if manifest.id != id {
             return Err(CalmError::PluginInstall(format!(
                 "manifest id changed during reload: was `{id}`, now `{}`",

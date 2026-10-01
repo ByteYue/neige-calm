@@ -21,6 +21,12 @@ pub(crate) enum TrackPluginScope {
 }
 
 impl TrackPluginScope {
+    pub(crate) fn allows_manifest(&self, manifest: &crate::plugin_host::Manifest) -> bool {
+        self.allows(&manifest.id)
+            && (manifest.agent_tools_scope
+                == crate::plugin_host::manifest::AgentToolsScope::Enabled
+                || matches!(self, Self::Only(owner) if owner == &manifest.id))
+    }
     pub(crate) fn allows(&self, plugin_id: &str) -> bool {
         match self {
             Self::All => true,
@@ -93,6 +99,40 @@ async fn resolve_plugin_scope_for_track(
             TrackPluginScope::None
         }
     }
+}
+
+/// Explain a known disabled tool only to an otherwise eligible Planner.
+/// Documentation references never participate in this decision.
+pub(crate) async fn disabled_plugin_error(
+    ctx: &Arc<AppContext>,
+    identity: &crate::mcp_server::ToolCallIdentity,
+    manifest: &crate::plugin_host::Manifest,
+) -> Option<crate::mcp_server::framing::RpcError> {
+    if identity.role != crate::model::CardRole::Planner {
+        return None;
+    }
+    let track_id = identity.track_id.as_deref()?;
+    let track = ctx.repo.track_get(track_id).await.ok()??;
+    let permitted = match track.plugin_scope.as_deref() {
+        Some(owner) => owner == manifest.id && crate::forge_trust::trusted_forge_plugin(owner),
+        None => {
+            manifest.agent_tools_scope == crate::plugin_host::manifest::AgentToolsScope::Enabled
+        }
+    };
+    if !permitted {
+        return None;
+    }
+    let plugin = ctx.repo.plugin_get_by_id(&manifest.id).await.ok()??;
+    if plugin.enabled {
+        return None;
+    }
+    Some(crate::mcp_server::framing::RpcError::custom(
+        -32002,
+        format!(
+            "plugin `{}` is disabled; enable it in Settings before calling its tools",
+            manifest.id
+        ),
+    ))
 }
 
 #[cfg(test)]

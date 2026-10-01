@@ -150,6 +150,14 @@ async fn assistant_token_cannot_call_denied_tools_by_name() {
         let error = resp
             .get("error")
             .unwrap_or_else(|| panic!("`{tool}` must refuse an assistant caller, got: {resp:#?}"));
+        if matches!(*tool, "calm.track.publish" | "calm.review.round") {
+            assert_eq!(
+                error["code"].as_i64(),
+                Some(-32601),
+                "development tools outside this Track are undiscoverable: {resp:#?}"
+            );
+            continue;
+        }
         assert_eq!(
             error["code"].as_i64(),
             Some(-32602),

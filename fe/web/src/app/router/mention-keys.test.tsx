@@ -43,7 +43,7 @@ describe('Enter in the new-track sentence while the @ menu is open', () => {
     const onSubmit = vi.fn();
     render(<Form search={() => Promise.resolve([])} onSubmit={onSubmit} />);
     await userEvent.type(field(), ' fix @zz');
-    await screen.findByText('Nothing in this area matches');
+    await screen.findByText('No matches');
     await userEvent.keyboard('{Enter}');
     expect(onSubmit).toHaveBeenCalledWith({ message: ' fix @zz' });
     expect(field().textContent).toBe(' fix @zz');
@@ -53,7 +53,7 @@ describe('Enter in the new-track sentence while the @ menu is open', () => {
     const onSubmit = vi.fn();
     render(<Form search={() => Promise.resolve([])} onSubmit={onSubmit} submitBlocked />);
     await userEvent.type(field(), 'fix @zz');
-    await screen.findByText('Nothing in this area matches');
+    await screen.findByText('No matches');
     await userEvent.keyboard('{Enter}');
     expect(onSubmit).not.toHaveBeenCalled();
     expect(field().textContent).toBe('fix @zz');

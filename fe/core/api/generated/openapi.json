@@ -3430,6 +3430,16 @@
           "204": {
             "description": "Plugin uninstalled"
           },
+          "400": {
+            "description": "A compiled component can be disabled, not uninstalled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Plugin not found",
             "content": {
@@ -4685,6 +4695,50 @@
           },
           "404": {
             "description": "Unknown template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/track-templates/{id}/plugin-guides": {
+      "get": {
+        "tags": [
+          "tracks"
+        ],
+        "operationId": "get_template_plugin_guides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default plugin documentation references",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplatePluginGuide"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Template not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9669,9 +9723,14 @@
           "enabled",
           "state",
           "manifest_name",
-          "has_config"
+          "has_config",
+          "can_uninstall"
         ],
         "properties": {
+          "can_uninstall": {
+            "type": "boolean",
+            "description": "False for compiled components; they can be disabled but not removed."
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -10713,6 +10772,22 @@
             ]
           },
           "key": {
+            "type": "string"
+          }
+        }
+      },
+      "TemplatePluginGuide": {
+        "type": "object",
+        "description": "Documentation included by a template, independently of plugin enablement.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
             "type": "string"
           }
         }

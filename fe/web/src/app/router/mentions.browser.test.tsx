@@ -27,7 +27,7 @@ const CANDIDATES: MentionCandidates = {
   blocks: [{ label: 'Rollback', block_id: 'b_1a2b', track_title: 'Deploy notes', track_id: 'w9', insert: BLOCK_INSERT }],
 };
 
-function mount(path: string, storedText: string | null = null) {
+function mount(path: string, storedText: string | null = null, pluginDescription = 'Develop issues and publish changes.') {
   const requests: ApiRequest[] = [];
   const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
   const transport: ApiTransportPort = { send(request) {
@@ -35,6 +35,11 @@ function mount(path: string, storedText: string | null = null) {
     if (request.path.startsWith('/api/areas/c1/mentions?q=bob')) return Promise.resolve(ok({ tags: [], tracks: [], blocks: [] }));
     if (request.path.startsWith('/api/areas/c1/mentions?')) return Promise.resolve(ok(CANDIDATES));
     if (request.method === 'POST' && request.path === '/api/tracks') return new Promise<ApiTransportResponse>(() => undefined);
+    if (request.path === '/api/plugins') return Promise.resolve(ok([{
+      id: 'dev.example', version: '1', enabled: false, state: 'disabled',
+      manifest_name: 'development', manifest_description: pluginDescription,
+      has_config: false, can_uninstall: false,
+    }]));
     if (request.path === '/api/areas') return Promise.resolve(ok([AREA]));
     if (request.path === '/api/areas/c1/tracks') return Promise.resolve(ok([TRACK]));
     if (request.path === '/api/tracks/w1') return Promise.resolve(ok({ track: TRACK, can_reopen: false, can_close: true, cards: [PLANNER_CARD], overlays: [] }));
@@ -112,7 +117,7 @@ it('asks for recommendations on a bare @, blocks first', async () => {
   await userEvent.keyboard('@');
   await expect.element(menu().getByRole('option', { name: /部署/ })).toBeVisible();
   expect(mentionReads()).toEqual(['/api/areas/c1/mentions?q=&track=w1']);
-  expect(await groupOrder()).toEqual(['Blocks', 'Tracks', 'Tags']);
+  expect(await groupOrder()).toEqual(['Blocks', 'Tracks', 'Tags', 'Plugins']);
   /* The first row is the one Enter takes. */
   expect(menu().getByRole('option', { selected: true }).element().textContent).toBe('RollbackDeploy notes');
 });
@@ -155,7 +160,7 @@ it('keeps the / command in the Planner conversation', async () => {
 });
 
 it.each([
-  ['@', 'ask @bob', 'Nothing in this area matches'],
+  ['@', 'ask @bob', 'No matches'],
   ['/', 'check /tmp/x', 'No command by that name'],
 ])('sends over an empty %s menu once and keeps the Planner drawer open', async (_, text, empty) => {
   await page.viewport(1440, 900);
@@ -204,16 +209,15 @@ it('keeps aria-multiline off both trigger-bearing fields through mount, typing a
   await expectComboboxWithoutMultiline('What this track should do');
 });
 
-it('offers no @ menu in a track\'s assistant conversation', async () => {
-  const { mentionReads } = mount('/track/w1');
+it('offers disabled plugin documentation in an assistant conversation without area report access', async () => {
+  const { requests, mentionReads } = mount('/track/w1');
   await openConversation(/Conversation Side chat/);
   await userEvent.keyboard('@de');
-  /* Longer than the source's own delay: a menu that was coming would have asked by now. */
-  await new Promise((resolve) => { setTimeout(resolve, 400); });
-  /* Astryx keeps an empty, closed listbox in the tree; what matters is that nothing opened. */
-  expect(document.querySelector('[role="option"]')).toBeNull();
-  await expect.element(page.getByRole('combobox', { name: 'Message' })).toHaveAttribute('aria-expanded', 'false');
+  await expect.element(menu().getByRole('option', { name: /development/ })).toBeVisible();
+  await userEvent.keyboard('{Enter}');
+  await expect.element(page.getByRole('combobox', { name: 'Message' })).toHaveTextContent('development');
   expect(mentionReads()).toEqual([]);
+  expect(requests.some(request => request.method !== 'GET' && request.path.includes('/plugins'))).toBe(false);
 });
 
 it('offers @ in the new-track sentence, lets Enter pick, and creates with the insert in the first message', async () => {
@@ -243,4 +247,39 @@ it('offers @ in the new-track sentence, lets Enter pick, and creates with the in
   await expect.poll(() => requests.filter((request) => request.method === 'POST' && request.path === '/api/tracks').length).toBe(1);
   const created = requests.find((request) => request.method === 'POST' && request.path === '/api/tracks')!.body as { first_message: string };
   expect(created.first_message).toBe(`Continue ${BLOCK_INSERT}\u00A0`);
+});
+
+it('includes plugin documentation in a new conversation first message without report reads', async () => {
+  const { requests, mentionReads } = mount('/track/w1');
+  await openConversation(/Conversation Side chat/);
+  await userEvent.keyboard('/new');
+  await expect.element(page.getByRole('listbox', { name: 'Commands' }).getByRole('option')).toBeVisible();
+  await userEvent.keyboard('{Enter}');
+  const field = page.getByRole('combobox', { name: 'Message' });
+  await field.click();
+  await userEvent.keyboard('@development');
+  await expect.element(menu().getByRole('option', { name: /development/ })).toBeVisible();
+  await userEvent.keyboard('{Enter}');
+  await userEvent.keyboard('{Enter}');
+  await expect.poll(() => requests.find(request => request.method === 'POST' && request.path === '/api/tracks/w1/conversations')).toBeDefined();
+  const sent = requests.find(request => request.method === 'POST' && request.path === '/api/tracks/w1/conversations');
+  expect(JSON.stringify(sent?.body)).toContain('Develop issues and publish changes.');
+  expect(JSON.stringify(sent?.body)).toContain('documentation only');
+  expect(mentionReads()).toEqual([]);
+  expect(requests.some(request => request.method !== 'GET' && request.path.includes('/plugins'))).toBe(false);
+});
+
+it('shows the plugin name for a long guide and sends the complete description', async () => {
+  await page.viewport(1440, 900);
+  const description = 'Develop issues and publish changes. ' + 'A detailed guide for working on repository issues. '.repeat(6);
+  const { requests } = mount('/track/w1', null, description);
+  await openConversation(/Conversation Planner chat/);
+  await userEvent.keyboard('@development');
+  await expect.element(menu().getByRole('option', { name: /development/ })).toBeVisible();
+  await menu().getByRole('option', { name: /development/ }).click();
+  const field = page.getByRole('combobox', { name: 'Message' });
+  await expect.poll(() => field.element().querySelector('[data-astryx-token]')?.textContent).toBe('development');
+  await userEvent.keyboard('{Enter}');
+  await expect.poll(() => requests.find(request => request.method === 'POST' && request.path.endsWith('/planner/input'))).toBeDefined();
+  expect(JSON.stringify(requests.find(request => request.method === 'POST' && request.path.endsWith('/planner/input'))?.body)).toContain(description.trim());
 });

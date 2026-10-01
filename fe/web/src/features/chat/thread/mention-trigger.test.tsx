@@ -118,8 +118,8 @@ describe('createMentionSource', () => {
 });
 
 describe('mentionToken', () => {
-  it('serializes to the server insert and shows the short chip', () => {
-    expect(mentionToken(BLOCK)).toEqual({ value: BLOCK.insert, label: 'Deploy notes › Rollback' });
+  it('serializes exactly the server insert', () => {
+    expect(mentionToken(BLOCK).value).toBe(BLOCK.insert);
   });
 });
 
@@ -219,7 +219,7 @@ describe('the @ menu in the real composer', () => {
     expect(onSend).toHaveBeenLastCalledWith('check /tmp/x');
 
     await userEvent.type(field(), 'ask @bob');
-    await screen.findByText('Nothing in this area matches');
+    await screen.findByText('No matches');
     expect(fireEvent.keyDown(field(), { key: 'Tab' })).toBe(true);
     await userEvent.keyboard('{Enter}');
     expect(onSend).toHaveBeenLastCalledWith('ask @bob');
@@ -230,7 +230,7 @@ describe('the @ menu in the real composer', () => {
     const search = vi.fn<MentionSearch>((query) => Promise.resolve(query === 'zz' ? [TAG] : []));
     render(<MentionComposer search={search} onSend={onSend} />);
     await userEvent.type(field(), 'ask @bob');
-    await screen.findByText('Nothing in this area matches');
+    await screen.findByText('No matches');
     await userEvent.keyboard('{Enter}');
     expect(onSend).toHaveBeenLastCalledWith('ask @bob');
     await waitFor(() => { expect(field().getAttribute('aria-expanded')).toBe('false'); });
@@ -292,7 +292,7 @@ describe('the @ menu in the real composer', () => {
   it('shows the empty text when the search fails', async () => {
     render(<MentionComposer search={() => Promise.reject(new Error('offline'))} onSend={vi.fn()} />);
     await userEvent.type(field(), '@x');
-    expect(await screen.findByText('Nothing in this area matches')).toBeTruthy();
+    expect(await screen.findByText('No matches')).toBeTruthy();
   });
 
   it('keeps the / command beside it', async () => {
