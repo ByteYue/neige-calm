@@ -720,7 +720,7 @@ async fn opencode_rest_prepared_recovery_retires_real_queued_batch_without_post(
         &mut tx,
         &runtime.id,
         Some(serde_json::to_value(snapshot).unwrap()),
-        1,
+        chrono::Utc::now().timestamp_millis(),
     )
     .await
     .unwrap();
