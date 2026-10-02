@@ -175,7 +175,6 @@ async fn native_request(State(native): State<Native>, request: Request) -> Respo
     }
     if path == format!("/session/{SESSION}/message") && method == "POST" {
         let id = input["messageID"].as_str().unwrap();
-        let text = input["parts"][0]["text"].as_str().unwrap();
         let at = state.messages.len() as i64 + 10;
         if state.lost {
             state.busy = true;
@@ -185,9 +184,7 @@ async fn native_request(State(native): State<Native>, request: Request) -> Respo
             )
                 .into_response();
         }
-        let mut persisted = user(id, text, at);
-        persisted["parts"] = input["parts"].clone();
-        state.messages.push(persisted);
+        state.messages.push(persisted_user(&input, at));
         let result = assistant(
             &format!("msg_reply_{}", state.messages.len()),
             id,
@@ -202,20 +199,21 @@ async fn native_request(State(native): State<Native>, request: Request) -> Respo
         return axum::Json(result).into_response();
     }
     if path == format!("/session/{SESSION}/message") {
+        let messages = ordered_messages(&state.messages);
         if state.invalid_cursor {
             let mut headers = HeaderMap::new();
             headers.insert("x-next-cursor", "same".parse().unwrap());
-            return (headers, axum::Json(state.messages.clone())).into_response();
+            return (headers, axum::Json(messages.clone())).into_response();
         }
-        if state.messages.len() > 2 && !query.contains_key("before") {
+        if messages.len() > 2 && !query.contains_key("before") {
             let mut headers = HeaderMap::new();
             headers.insert("x-next-cursor", "older".parse().unwrap());
-            return (headers, axum::Json(state.messages[2..].to_vec())).into_response();
+            return (headers, axum::Json(messages[2..].to_vec())).into_response();
         }
         return axum::Json(if query.contains_key("before") {
-            state.messages[..2].to_vec()
+            messages[..2].to_vec()
         } else {
-            state.messages.clone()
+            messages.clone()
         })
         .into_response();
     }
@@ -780,11 +778,15 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
     stack.shutdown().await;
 }
 
-#[path = "support/opencode_existing_registry.rs"]
-mod registry_tests;
 #[path = "support/opencode_existing_capabilities.rs"]
 mod capability_tests;
-#[path = "support/opencode_existing_transcript.rs"]
-mod transcript_assertions;
+#[path = "support/opencode_existing_registry.rs"]
+mod registry_tests;
 #[path = "support/opencode_existing_returns.rs"]
 mod returns_tests;
+#[path = "support/opencode_existing_transcript.rs"]
+mod transcript_assertions;
+
+#[path = "support/opencode_existing_native.rs"]
+mod native_fixture;
+use native_fixture::{ordered_messages, persisted_user};

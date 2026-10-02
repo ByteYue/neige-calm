@@ -26,6 +26,18 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
+    pub(crate) fn native_error(info: &Value) -> Option<Self> {
+        let error = info.get("error").filter(|error| !error.is_null())?;
+        if error["name"] == "MessageAbortedError" {
+            return Some(Self::Interrupted);
+        }
+        Some(Self::Failed(
+            error["data"]["message"]
+                .as_str()
+                .unwrap_or("OpenCode reported a native error")
+                .into(),
+        ))
+    }
     pub(crate) fn status(&self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -248,16 +260,8 @@ impl TurnProjection {
         if !info["time"]["completed"].is_number() {
             return None;
         }
-        if let Some(error) = info.get("error").filter(|e| !e.is_null()) {
-            if error["name"].as_str() == Some("MessageAbortedError") {
-                return Some(Outcome::Interrupted);
-            }
-            return Some(Outcome::Failed(
-                error["data"]["message"]
-                    .as_str()
-                    .unwrap_or("OpenCode reported a native error")
-                    .into(),
-            ));
+        if let Some(outcome) = Outcome::native_error(info) {
+            return Some(outcome);
         }
         // Pinned prompt.loop continues after any local tool call, including a provider's
         // stop finish, so its settled tool output must reach the next model request first.
@@ -325,11 +329,16 @@ impl TurnProjection {
     }
 
     fn is_assistant(&self, message: &Value) -> bool {
-        message["info"]["role"].as_str() == Some("assistant")
-            && (message["info"]["parentID"].as_str() == Some(&self.message)
-                || self.return_anchor.as_ref().is_some_and(|anchor| {
-                    message["info"]["id"].as_str() == Some(&anchor.assistant_id)
-                }))
+        if message["info"]["role"] != "assistant" {
+            return false;
+        }
+        match &self.return_anchor {
+            Some(anchor) => anchor
+                .assistant_ids
+                .iter()
+                .any(|id| message["info"]["id"].as_str() == Some(id)),
+            None => message["info"]["parentID"].as_str() == Some(&self.message),
+        }
     }
     pub(crate) fn usage(&self, messages: &[Value]) -> Notification {
         let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();

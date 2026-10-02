@@ -9,7 +9,36 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReturnAnchor {
     pub(crate) assistant_id: String,
+    pub(crate) assistant_ids: Vec<String>,
     pub(crate) internal_user_ids: Vec<String>,
+}
+
+fn original<'a>(submission: &OpenCodeSubmission, messages: &'a [Value]) -> Option<&'a Value> {
+    if submission.input_json["messageID"].as_str() != Some(&submission.native_message_id) {
+        return None;
+    }
+    let matching: Vec<_> = messages
+        .iter()
+        .filter(|m| m["info"]["id"].as_str() == Some(&submission.native_message_id))
+        .collect();
+    if matching.len() != 1 {
+        return None;
+    }
+    let original = matching[0];
+    if original["info"]["role"] != "user"
+        || original["info"]["sessionID"].as_str() != Some(&submission.native_session_id)
+    {
+        return None;
+    }
+    let actual = original["parts"].as_array()?;
+    let expected = submission.input_json["parts"].as_array()?;
+    if actual.len() != expected.len() || actual.iter().zip(expected).any(|(actual, expected)| {
+        actual["type"] != "text" || actual["type"] != expected["type"] || actual["text"] != expected["text"]
+            || actual["text"].as_str().is_none() || actual["id"].as_str().is_none()
+            // The native protocol mints omitted part IDs. Explicit client IDs stay exact.
+            || expected.get("id").is_some_and(|id| actual.get("id") != Some(id))
+    }) { return None; }
+    Some(original)
 }
 
 pub(crate) fn validate(
@@ -19,42 +48,42 @@ pub(crate) fn validate(
 ) -> Option<(ReturnAnchor, Outcome)> {
     let info = &returned["info"];
     let id = info["id"].as_str()?;
-    if info["role"].as_str() != Some("assistant")
+    if info["role"] != "assistant"
         || info["sessionID"].as_str() != Some(&submission.native_session_id)
         || !info["time"]["completed"].is_number()
     {
         return None;
     }
-    let first = messages
-        .iter()
-        .position(|m| m["info"]["id"].as_str() == Some(&submission.native_message_id))?;
-    let last = messages
-        .iter()
-        .position(|m| m["info"]["id"].as_str() == Some(id))?;
-    if last <= first || &messages[last] != returned {
+    let original = original(submission, messages)?;
+    let start = original["info"]["time"]["created"].as_i64()?;
+    let end = info["time"]["created"].as_i64()?;
+    if end < start
+        || messages
+            .iter()
+            .filter(|m| m["info"]["id"].as_str() == Some(id))
+            .count()
+            != 1
+        || messages
+            .iter()
+            .find(|m| m["info"]["id"].as_str() == Some(id))?
+            != returned
+    {
         return None;
     }
-    let original = &messages[first];
-    if original["info"]["role"].as_str() != Some("user") {
-        return None;
-    }
-    let actual: Vec<_> = original["parts"]
-        .as_array()?
+    // UUID client IDs are unrelated to native ascending IDs. Include the entire
+    // admitted timestamp bucket, including assistants/users sorting before the UUID.
+    let window: Vec<_> = messages
         .iter()
-        .filter(|p| p["type"] == "text")
-        .map(|p| (&p["id"], &p["text"]))
+        .filter(|m| {
+            m["info"]["id"] != original["info"]["id"]
+                && m["info"]["time"]["created"]
+                    .as_i64()
+                    .is_some_and(|at| at >= start && at <= end)
+        })
         .collect();
-    let expected: Vec<_> = submission.input_json["parts"]
-        .as_array()?
-        .iter()
-        .map(|p| (&p["id"], &p["text"]))
-        .collect();
-    if actual != expected {
-        return None;
-    }
-    let window = &messages[first + 1..=last];
     let users: Vec<_> = window
         .iter()
+        .copied()
         .filter(|m| m["info"]["role"] == "user")
         .collect();
     let mut internal_user_ids = Vec::new();
@@ -64,14 +93,17 @@ pub(crate) fn validate(
         if users.len() != 2 {
             return None;
         }
-        let compaction = users[0];
-        let continuation = users[1];
+        let compaction = users.iter().copied().find(|m| {
+            m["parts"].as_array().is_some_and(|parts| {
+                parts.len() == 1 && parts[0]["type"] == "compaction" && parts[0]["auto"] == true
+            })
+        })?;
+        let continuation = users
+            .iter()
+            .copied()
+            .find(|m| m["info"]["id"] != compaction["info"]["id"])?;
         let compaction_id = compaction["info"]["id"].as_str()?;
         let continuation_id = continuation["info"]["id"].as_str()?;
-        let parts = compaction["parts"].as_array()?;
-        if parts.len() != 1 || parts[0]["type"] != "compaction" || parts[0]["auto"] != true {
-            return None;
-        }
         let parts = continuation["parts"].as_array()?;
         if parts.len() != 1
             || parts[0]["type"] != "text"
@@ -82,25 +114,16 @@ pub(crate) fn validate(
         }
         let bridge: Vec<_> = window
             .iter()
+            .copied()
             .filter(|m| m["info"]["parentID"].as_str() == Some(compaction_id))
             .collect();
-        if bridge.len() != 1
-            || bridge[0]["info"]["summary"] != true
-            || bridge[0]["info"]["mode"] != "compaction"
-            || bridge[0]["info"]["finish"] != "stop"
+        if bridge.len() != 1 || bridge[0]["info"]["summary"] != true
+            || bridge[0]["info"]["mode"] != "compaction" || bridge[0]["info"]["finish"] != "stop"
             || !bridge[0]["info"]["time"]["completed"].is_number()
-            || window
-                .iter()
-                .position(|m| m["info"]["id"] == compaction["info"]["id"])?
-                >= window
-                    .iter()
-                    .position(|m| m["info"]["id"] == bridge[0]["info"]["id"])?
-            || window
-                .iter()
-                .position(|m| m["info"]["id"] == bridge[0]["info"]["id"])?
-                >= window
-                    .iter()
-                    .position(|m| m["info"]["id"] == continuation["info"]["id"])?
+            // These two native transitions have no parent link. A timestamp tie
+            // cannot establish their causal order, even if sorted IDs look plausible.
+            || start >= compaction["info"]["time"]["created"].as_i64()?
+            || bridge[0]["info"]["time"]["created"].as_i64()? >= continuation["info"]["time"]["created"].as_i64()?
         {
             return None;
         }
@@ -111,13 +134,23 @@ pub(crate) fn validate(
         return None;
     }
     let mut tool_error = None;
-    for message in window.iter().filter(|m| m["info"]["role"] == "assistant") {
+    let mut assistant_ids = Vec::new();
+    for message in window {
+        if message["info"]["role"] == "user" {
+            continue;
+        }
+        if message["info"]["role"] != "assistant"
+            || !message["info"]["time"]["completed"].is_number()
+        {
+            return None;
+        }
         let parent = message["info"]["parentID"].as_str()?;
         if parent != submission.native_message_id
             && !internal_user_ids.iter().any(|id| id == parent)
         {
             return None;
         }
+        assistant_ids.push(message["info"]["id"].as_str()?.to_owned());
         for part in message["parts"].as_array()? {
             if part["type"] == "tool" {
                 match part["state"]["status"].as_str()? {
@@ -135,13 +168,8 @@ pub(crate) fn validate(
             }
         }
     }
-    let outcome = if let Some(error) = info.get("error").filter(|e| !e.is_null()) {
-        Outcome::Failed(
-            error["data"]["message"]
-                .as_str()
-                .unwrap_or("OpenCode native loop failed")
-                .into(),
-        )
+    let outcome = if let Some(outcome) = Outcome::native_error(info) {
+        outcome
     } else {
         match info["finish"].as_str()? {
             "stop" => Outcome::Completed,
@@ -152,6 +180,7 @@ pub(crate) fn validate(
     Some((
         ReturnAnchor {
             assistant_id: id.into(),
+            assistant_ids,
             internal_user_ids,
         },
         outcome,
@@ -159,15 +188,19 @@ pub(crate) fn validate(
 }
 
 /// Without a synchronous anchor, only the original uninterrupted user turn can
-/// provide terminal evidence. Compaction and concurrent input cannot be guessed.
+/// provide terminal evidence. Include equal-time users regardless of sorted ID.
 pub(crate) fn uninterrupted_original(submission: &OpenCodeSubmission, messages: &[Value]) -> bool {
-    let Some(first) = messages
-        .iter()
-        .position(|m| m["info"]["id"].as_str() == Some(&submission.native_message_id))
-    else {
+    let Some(original) = original(submission, messages) else {
         return false;
     };
-    !messages[first + 1..]
-        .iter()
-        .any(|m| m["info"]["role"] == "user")
+    let Some(start) = original["info"]["time"]["created"].as_i64() else {
+        return false;
+    };
+    !messages.iter().any(|m| {
+        m["info"]["role"] == "user"
+            && m["info"]["id"] != original["info"]["id"]
+            && m["info"]["time"]["created"]
+                .as_i64()
+                .is_some_and(|at| at >= start)
+    })
 }
