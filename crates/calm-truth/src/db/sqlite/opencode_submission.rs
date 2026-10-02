@@ -103,7 +103,7 @@ pub async fn opencode_submission_prepare(
         ));
     }
     let fingerprint = blake3::hash(input.as_bytes()).to_hex().to_string();
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_immediate_tx(pool).await?;
     let existing = sqlx::query(concat!(
         "SELECT * FROM opencode_submissions WHERE scope_id = ?1 ",
         "AND native_session_id = ?2 AND client_id = ?3"
@@ -218,7 +218,7 @@ pub async fn opencode_submission_settle(
             "OpenCode settlement requires a terminal state and evidence",
         ));
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_immediate_tx(pool).await?;
     let row = sqlx::query("SELECT * FROM opencode_submissions WHERE id = ?1")
         .bind(id)
         .fetch_optional(&mut *tx)
