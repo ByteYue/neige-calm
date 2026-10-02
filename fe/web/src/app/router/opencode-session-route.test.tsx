@@ -5,12 +5,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ApiRequest, ApiTransportResponse } from '../../../../core/api/types.ts';
 import { createUnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
+import { queryKeys } from '../providers/queries.ts';
 import { ThemeProvider } from '../theme/public.tsx';
 import { createAppRouter } from './public.tsx';
 import { bootTestCardRuntime } from './test-card-runtime.ts';
 
 beforeEach(() => { vi.stubGlobal('scrollTo', vi.fn()); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 const AREA = { id: 'a', name: 'Operations', color: '#000', sort: 1, kind: 'user', created_at: 1, updated_at: 1 };
 const TRACK = { id: 'w', area_id: 'a', title: 'ETL', sort: 1, cwd: '/srv/neige', created_at: 1, updated_at: 1 };
 const ROW = { id: 'attached', trackId: 'w', title: 'iFood progress', kind: 'track-opencode', state: 'idle', updatedAt: 2, lastTurnCompletedAt: null };
@@ -24,6 +25,7 @@ const CONNECT = '/api/tracks/w/opencode-conversations';
 const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
 
 function mount(options: { bound?: Partial<typeof BOUND> | null; existing?: boolean;
+  runRead?: () => ApiTransportResponse;
   connect?: (request: ApiRequest) => Promise<ApiTransportResponse> } = {}) {
   const requests: ApiRequest[] = [];
   let connected = options.existing === true;
@@ -40,6 +42,7 @@ function mount(options: { bound?: Partial<typeof BOUND> | null; existing?: boole
       if (options.connect) return options.connect(request);
       connected = true; return { ...ok(ROW), status: 201 };
     }
+    if (request.path.endsWith('/planner/run') && options.runRead) return options.runRead();
     if (request.path.endsWith('/planner/run')) return ok({ card_id: ROW.id, worker_session_id: 'runtime',
       phase: options.bound?.status === 'running' ? 'turn_running' : 'idle', model: 'deepseek/flash', reasoning_effort: null,
       blocked_reason: null, supports_steer: false,
@@ -155,3 +158,39 @@ it('retains the exact connection request and key after a lost response and Track
   expect(second?.headers).toEqual(first?.headers);
   expect(requests.filter(request => request.path.endsWith('/planner/input'))).toHaveLength(0);
 });
+
+
+it.each(['unavailable', 'running', 'initial failure'] as const)(
+  'refreshes %s native status with unchanged history and stops polling after close', async initial => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let status: 'unavailable' | 'running' | 'initial failure' | 'idle' = initial;
+    const { requests, client } = mount({ existing: true, runRead: () => {
+      if (status === 'initial failure') return { status: 503, statusText: 'Unavailable', body: { error: 'OpenCode connection unavailable' } };
+      return ok({ card_id: ROW.id, worker_session_id: 'runtime', phase: status === 'running' ? 'turn_running' : 'idle',
+        model: 'deepseek/flash', reasoning_effort: null, blocked_reason: null, supports_steer: false, pending: [],
+        attached_session: { connection_id: 'ops', label: BOUND.label, session_id: BOUND.session_id, directory: BOUND.directory,
+          model: BOUND.model, status, can_submit: status === 'idle', can_stop: false } });
+    } });
+    fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
+    await screen.findByText('Original ETL output');
+    await waitFor(() => expect(requests.filter(request => request.path.endsWith('/planner/run'))).toHaveLength(1));
+    if (initial === 'initial failure') {
+      await waitFor(() => expect(client.getQueryState(queryKeys.plannerRun(ROW.id))?.status).toBe('error'));
+    } else {
+      await waitFor(() => expect(screen.getByRole('note', { name: 'Connected OpenCode session' }).textContent)
+        .toContain(initial === 'running' ? 'Observing' : 'unavailable'));
+    }
+    expect(screen.getByRole('combobox', { name: 'Message' }).getAttribute('contenteditable')).toBe('false');
+    const historyReads = requests.filter(request => request.path.includes('/harness/items')).length;
+    status = 'idle';
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Message' }).getAttribute('contenteditable')).toBe('true'));
+    expect(screen.getByRole('note', { name: 'Connected OpenCode session' }).textContent).toContain('Ready to continue');
+    expect(requests.filter(request => request.path.includes('/harness/items'))).toHaveLength(historyReads);
+    expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Close conversation' }));
+    const runReads = requests.filter(request => request.path.endsWith('/planner/run')).length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(6200); });
+    expect(requests.filter(request => request.path.endsWith('/planner/run'))).toHaveLength(runReads);
+  },
+);

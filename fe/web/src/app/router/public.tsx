@@ -272,6 +272,8 @@ function withRememberedTitle(
   };
 }
 
+const ATTACHED_SESSION_STATUS_POLL_MS = 3000;
+
 export function useConversationStore(
   transport: ApiTransportPort,
   unauthorized: UnauthorizedChannel,
@@ -291,7 +293,12 @@ export function useConversationStore(
   const history = useInfiniteQuery({
     ...harnessItemsQueryOptions(transport, cardId, unauthorized), enabled: scope !== null,
   });
-  const run = useQuery({ ...plannerRunQueryOptions(transport, cardId, unauthorized), enabled: scope !== null });
+  const requiresAttachedSession = scope?.kind === 'track-opencode';
+  const run = useQuery({
+    ...plannerRunQueryOptions(transport, cardId, unauthorized), enabled: scope !== null,
+    // Native liveness can change without a transcript event, including recovery after a failed first read.
+    refetchInterval: requiresAttachedSession ? ATTACHED_SESSION_STATUS_POLL_MS : false,
+  });
   /* The catalog rides alongside the run query: the trigger has to render the chosen
        model's name, and `planner-run` gives only its slug. */
   const modelCatalog = useQuery({
@@ -299,7 +306,6 @@ export function useConversationStore(
   });
   const phase = run.data?.phase ?? null;
   const attachedSession = run.data?.attached_session ?? null;
-  const requiresAttachedSession = scope?.kind === 'track-opencode';
   const attachmentBlocksInput = requiresAttachedSession && (attachedSession === null || !attachedSession.can_submit);
   const canStop = requiresAttachedSession ? attachedSession?.can_stop === true : true;
   const stalled = phase === 'wedged';

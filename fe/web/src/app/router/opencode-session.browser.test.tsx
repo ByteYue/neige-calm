@@ -15,7 +15,7 @@ const SESSION = 'ses_f044556f2fferyPFhTwDGFJz97';
 const DIRECTORY = '/home/operator/very-long-project-directory/operations/etl-and-audit';
 const ROW = { id: 'external', trackId: 'w', title: 'iFood progress', kind: 'track-opencode', state: 'running', updatedAt: 2, lastTurnCompletedAt: null };
 
-function mount(existing = false) {
+function mount(existing = false, nativeStatus: () => 'running' | 'idle' | 'unavailable' = () => 'running') {
   const requests: ApiRequest[] = [];
   let connected = existing;
   const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
@@ -34,10 +34,10 @@ function mount(existing = false) {
     if (request.path === '/api/tracks/w/conversations') return ok(connected ? [ROW] : []);
     if (request.path === '/api/opencode/connections') return ok({ connections: [{ id: 'ops', label: 'Crawler operations', directory: DIRECTORY }] });
     if (request.path === '/api/tracks/w/opencode-conversations') { connected = true; return { ...ok(ROW), status: 201 }; }
-    if (request.path.endsWith('/planner/run')) return ok({ card_id: ROW.id, worker_session_id: 'r', phase: 'turn_running',
+    if (request.path.endsWith('/planner/run')) return ok({ card_id: ROW.id, worker_session_id: 'r', phase: nativeStatus() === 'running' ? 'turn_running' : 'idle',
       model: 'deepseek/flash', reasoning_effort: null, blocked_reason: null, supports_steer: false,
       attached_session: { connection_id: 'ops', label: 'Crawler operations', session_id: SESSION, directory: DIRECTORY,
-        model: 'deepseek/flash', status: 'running', can_submit: false, can_stop: false } });
+        model: 'deepseek/flash', status: nativeStatus(), can_submit: nativeStatus() === 'idle', can_stop: false } });
     if (request.path.includes('/harness/items')) return ok([{
       id: 1, worker_session_id: 'r', card_id: ROW.id, track_id: 'w', thread_id: SESSION, turn_id: null,
       turn_error_text: null, item_uuid: 'output', item_type: 'agentMessage', method: 'item/completed',
@@ -97,3 +97,20 @@ it.each([1280, 390])('reopens a persisted native card through Conversations with
   expect(document.documentElement.scrollWidth).toBe(width);
   expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
 });
+
+
+it.each(['unavailable', 'running'] as const)('refreshes silent %s to ready without changing history or reloading', async initial => {
+  let status: 'unavailable' | 'running' | 'idle' = initial;
+  const requests = mount(true, () => status);
+  await page.getByRole('button', { name: /^Conversation iFood progress/ }).click();
+  await expect.element(page.getByText('Original iFood progress output')).toBeVisible();
+  await expect.element(page.getByRole('combobox', { name: 'Message' })).toHaveAttribute('contenteditable', 'false');
+  await expect.element(page.getByRole('note', { name: 'Connected OpenCode session' }))
+    .toHaveTextContent(initial === 'running' ? 'Observing' : 'unavailable');
+  const historyReads = requests.filter(request => request.path.includes('/harness/items')).length;
+  status = 'idle';
+  await expect.element(page.getByRole('combobox', { name: 'Message' })).toHaveAttribute('contenteditable', 'true');
+  await expect.element(page.getByRole('note', { name: 'Connected OpenCode session' })).toHaveTextContent('Ready to continue');
+  expect(requests.filter(request => request.path.includes('/harness/items'))).toHaveLength(historyReads);
+  expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
+}, 10000);
