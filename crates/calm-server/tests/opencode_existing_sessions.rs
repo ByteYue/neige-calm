@@ -787,6 +787,8 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
 
 #[path = "support/opencode_existing_capabilities.rs"]
 mod capability_tests;
+#[path = "support/opencode_existing_native.rs"]
+mod native_fixture;
 #[path = "support/opencode_existing_persistence_race.rs"]
 mod persistence_race_tests;
 #[path = "support/opencode_existing_registry.rs"]
@@ -795,6 +797,4 @@ mod registry_tests;
 mod returns_tests;
 #[path = "support/opencode_existing_transcript.rs"]
 mod transcript_assertions;
-#[path = "support/opencode_existing_native.rs"]
-mod native_fixture;
 use native_fixture::{ordered_messages, persisted_user};
