@@ -785,7 +785,7 @@ impl ProviderAdapter for ClaudeWorkerAdapter {
             &payload.goal,
             &payload.context,
             payload.acceptance_criteria.as_deref(),
-            plan.access,
+            plan.reader.as_ref(),
         );
         let command_line = build_claude_worker_command_line(
             &self.codex.claude_bin,

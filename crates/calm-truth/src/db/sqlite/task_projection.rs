@@ -1620,10 +1620,10 @@ async fn project_tasks_from_verdicts_tx(
             r#"INSERT INTO tasks(
                    id,track_id,key,kind,goal,context_json,acceptance_criteria,cwd,
                    depends_on_json,priority,gate_json,status,declared_by,spawn,
-                   decl_ready,decl_released_by_user,created_at_ms,updated_at_ms,access
+                   decl_ready,decl_released_by_user,created_at_ms,updated_at_ms,access,head,base
                ) VALUES(
                    ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',?12,?13,
-                   ?14,?15,?16,?16,?17
+                   ?14,?15,?16,?16,?17,?18,?19
                )
                ON CONFLICT(id) DO UPDATE SET
                    kind=excluded.kind,
@@ -1637,6 +1637,8 @@ async fn project_tasks_from_verdicts_tx(
                    declared_by=excluded.declared_by,
                    spawn=excluded.spawn,
                    access=excluded.access,
+                   head=excluded.head,
+                   base=excluded.base,
                    decl_ready=excluded.decl_ready,
                    decl_released_by_user=excluded.decl_released_by_user,
                    updated_at_ms=excluded.updated_at_ms
@@ -1653,6 +1655,8 @@ async fn project_tasks_from_verdicts_tx(
                      OR tasks.declared_by IS NOT excluded.declared_by
                      OR tasks.spawn IS NOT excluded.spawn
                      OR tasks.access IS NOT excluded.access
+                     OR tasks.head IS NOT excluded.head
+                     OR tasks.base IS NOT excluded.base
                      OR tasks.decl_ready IS NOT excluded.decl_ready
                      OR tasks.decl_released_by_user IS NOT excluded.decl_released_by_user
                  )"#,
@@ -1674,6 +1678,8 @@ async fn project_tasks_from_verdicts_tx(
         .bind(i64::from(declaration.released_by_user))
         .bind(now)
         .bind(declaration.access.as_str())
+        .bind(&declaration.head)
+        .bind(&declaration.base)
         .execute(&mut **tx)
         .await?;
         if result.rows_affected() != 0 {
@@ -2355,6 +2361,29 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
         outcome
+    }
+
+    /// #1933: while a reader is pending, its `head` and `base` follow its block, as `access` does.
+    #[tokio::test]
+    async fn a_pending_readers_declared_commits_follow_its_block() {
+        let (repo, track) = setup().await;
+        for commit in ["a".repeat(40), "b".repeat(40)] {
+            let block = task_block(
+                0,
+                json!({"key": "review", "kind": "claude", "goal": "review", "ready": true,
+                       "declared_by": calm_types::report_blocks::tasks::PLANNER_DECLARATION_AUTHOR,
+                       "access": "read_only", "head": commit, "base": commit}),
+            );
+            project_blocks(&repo, &track, &[block]).await;
+            let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT status, head, base FROM tasks WHERE track_id = ?1 AND key = 'review'",
+            )
+            .bind(&track)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+            assert_eq!(row, ("pending".into(), Some(commit.clone()), Some(commit)));
+        }
     }
 
     /// Negative half of a pair: asserts the *value* (zero events in both orders),
