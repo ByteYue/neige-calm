@@ -65,6 +65,12 @@ Neige Planner policy. Its native directory is shown explicitly and can differ
 from the track's workspace: the track groups the conversation, while the
 operator's connection registration declares its execution directory.
 
+Continuation explicitly preserves the original native agent, provider, model
+and variant. This increment accepts text messages. Native permission and
+question requests remain with the native client; Neige does not automatically
+reject or answer them. Stop controls are unavailable for attached sessions in
+this increment, including while a Neige-originated request runs.
+
 Neige observes an external turn without adopting it as a Neige submission. A
 foreign running turn blocks new input. Native status belongs to the connected
 server's memory; another process sharing the database does not share that turn.
