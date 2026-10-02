@@ -30,8 +30,6 @@ use crate::session_projection_repo::WorkerSessionState;
 use crate::state::{AppState, RouteState, WorkerState};
 use calm_truth::session_projection_row::LAST_TURN_COMPLETED_MS_SUBQUERY;
 
-/// The `kind` every row of this list carries.
-
 pub fn router() -> Router<AppState> {
     Router::new().route(
         "/api/tracks/{track_id}/conversations",
