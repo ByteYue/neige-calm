@@ -95,6 +95,13 @@ deleting the attachment, restarting Neige or losing its connection does not
 abort the external turn, reject its pending interactive requests, stop its
 server or tool processes, or delete its native history.
 
+The pinned native auto-compaction bridge can finish through an exact synchronous
+response matched to the complete original submission window. Native permission
+rejection can likewise end the turn as a failure without Neige answering it.
+Unmarked replay, concurrent user input, unsupported compaction sequences, or a
+lost compaction response remain unknown. Keep the attachment to retain its
+reconciliation path; deleting it does not clear that uncertainty.
+
 An ordinary OpenCode TUI may have no externally reachable HTTP listener. Such a
 running turn cannot be transferred by loading its session ID in a second
 process. For shared access, run an authenticated loopback server with the
