@@ -34,7 +34,7 @@ function outcome(status: ConversationTurnOutcome['status']): ConversationTurnOut
 
 describe('tool groups alongside quiet syncs and turn outcomes', () => {
   it('keeps quiet tools inside their own disclosure without joining ordinary groups across it', () => {
-    const { container } = render(<ChatThread cards={{}} stalled={false} conversation={conversation} turns={[
+    const { container } = render(<ChatThread canContinue={false} cards={{}} stalled={false} conversation={conversation} turns={[
       activity('before-1'), activity('before-2'), wake,
       activity('quiet-1'), activity('quiet-2'), outcome('completed'),
       { id: 'you', author: 'you', text: 'Continue', atMs: 4 },
@@ -57,7 +57,7 @@ describe('tool groups alongside quiet syncs and turn outcomes', () => {
   });
 
   it('keeps one live mark on the quiet summary even when its running tools are revealed', () => {
-    const { container } = render(<ChatThread cards={{}} stalled={false} conversation={conversation} pending turns={[
+    const { container } = render(<ChatThread canContinue={false} cards={{}} stalled={false} conversation={conversation} pending turns={[
       wake, activity('quiet-done'), activity('quiet-running', 'running'),
     ]} />);
     const fold = container.querySelector<HTMLDetailsElement>('[data-nc-turn="quiet-sync"]')!;
@@ -69,7 +69,7 @@ describe('tool groups alongside quiet syncs and turn outcomes', () => {
   });
 
   it.each(['completed', 'failed', 'interrupted'] as const)('treats a %s outcome as a tool-run boundary', (status) => {
-    const { container } = render(<ChatThread cards={{}} stalled={false} conversation={conversation} turns={[
+    const { container } = render(<ChatThread canContinue={false} cards={{}} stalled={false} conversation={conversation} turns={[
       activity('before-1'), activity('before-2'), outcome(status), activity('after-1'), activity('after-2'),
     ]} />);
     const toolGroups = screen.getAllByRole('group', { name: '2 tool calls' });
@@ -79,6 +79,7 @@ describe('tool groups alongside quiet syncs and turn outcomes', () => {
     expect(toolGroups[1].textContent).toContain('after-2');
     expect(toolGroups[1].textContent).not.toContain('before-1');
     expect(container.querySelector('[data-nc-turn="outcome"]')?.getAttribute('data-nc-turn-outcome') ?? null)
-      .toBe(status === 'completed' ? null : status);
+      // Historical outcomes still separate the two tool runs without extra status rows.
+      .toBeNull();
   });
 });

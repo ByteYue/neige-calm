@@ -33,7 +33,7 @@ import {
 } from '../../../../../core/domain/conversation.ts';
 import { QuietSyncFold } from './quiet-sync.tsx';
 import styles from './thread.module.css';
-import { ThreadStatusNotice, StopStatusNotice } from './status-notice.tsx';
+import { CurrentStatusNotice } from './outcome-notice.tsx';
 import type { ConversationStopFeedback } from '../../../../../core/domain/conversation-stop.ts';
 import {
   ToolCallGroup, toolCallGroupShowsRunning, untouchedToolCallGroup, useToolCallFocus, withDetailOpen,
@@ -56,12 +56,17 @@ export type ChatThreadProps = Readonly<{
   /** The runtime reason is separate from the persisted terminal transcript. */
   stalledReason?: string | null;
   stopFeedback?: ConversationStopFeedback | null;
+  /** The caller declares composer availability; a transcript outcome cannot authorize sends. */
+  canContinue: boolean;
 }>;
 
-export function ChatThread({ conversation, turns, pending = false, cards, stalled, stalledReason, stopFeedback = null }: ChatThreadProps) {
+export function ChatThread({ conversation, turns, pending = false, cards, stalled, stalledReason, stopFeedback = null, canContinue }: ChatThreadProps) {
   /* The live mark is the sender's pending send or the kernel's verdict — never `conversation.state`, which sits at `turn_pending`/`running` long after a turn ended. The local wedge outranks both. */
   const live = !stalled && (pending || cardActivityOf({ cards }, conversation.id) === 'working');
   const lastTurn = turns[turns.length - 1];
+  const currentOutcome = lastTurn?.author === 'turn' ? lastTurn : null;
+  const currentMeta = <CurrentStatusNotice outcome={currentOutcome} canContinue={canContinue} live={live}
+    stalled={stalled} stalledReason={stalledReason ?? null} feedback={stopFeedback} />;
   const endRef = useRef<HTMLDivElement | null>(null);
   /** The box every marker lookup starts from. Not `.thread` itself: the stylesheet's `> * + *` rules space that element's children. */
   const frameRef = useRef<HTMLDivElement | null>(null);
@@ -94,7 +99,7 @@ export function ChatThread({ conversation, turns, pending = false, cards, stalle
   };
   /* Where focus goes when the element under it goes; held on the transcript's element, which outlives every run's. */
   const focus = useToolCallFocus(
-    transcriptGroups.filter(({ entry }) => entry.author !== 'turn' || entry.status !== 'completed'),
+    transcriptGroups.filter(({ entry }) => entry.author !== 'turn'),
     (activities) => activities.map(toolCallOf),
     (key) => groupUi.get(key) ?? untouchedToolCallGroup(),
   );
@@ -221,41 +226,8 @@ export function ChatThread({ conversation, turns, pending = false, cards, stalle
         </div>
       );
     }
-    if (turn.author === 'turn') {
-      /* Completed turns are silent anchors. Interrupted and failed turns share
-         one metadata row; the backend's readable reason lives in its disclosure. */
-      if (turn.status === 'completed') return null;
-      const hasReason = turn.text !== undefined && turn.text.trim() !== '';
-      const hint = turn.status === 'failed' ? outcomeHintText(turn.code, turn.rawStatus) : null;
-      const hasHint = hint !== null;
-      const label = turn.status === 'interrupted' ? 'Response interrupted' : 'Failed';
-      const guidance = turn.status === 'interrupted' && last && !live && !stalled;
-      const heading = (
-        <span className={styles.outcomeHeader}>
-          <span className={styles.outcomeStatusLabel}>{label}</span>
-          {guidance && <>{' '}<span className={styles.outcomeGuidance} data-nc-interruption-guidance="">Send a message to continue.</span></>}
-        </span>
-      );
-      return (
-        <div
-          key={turn.id}
-          className={styles.outcome}
-          data-nc-entry={key}
-          data-nc-turn="outcome"
-          data-nc-turn-outcome={turn.status}
-        >
-          <ThreadStatusNotice heading={heading}>
-            {hasReason && <p className={styles.outcomeReason} data-nc-turn-outcome-message="" title={turn.message}>{turn.text}</p>}
-            {hasHint && <p className={styles.outcomeReason} data-nc-turn-outcome-hint="">{hint}</p>}
-            {!hasReason && !hasHint && (
-              <p className={styles.outcomeReason} data-nc-turn-outcome-fallback="">
-                {turn.status === 'failed' ? 'The model provider is temporarily unavailable.' : 'No interruption details are available.'}
-              </p>
-            )}
-          </ThreadStatusNotice>
-        </div>
-      );
-    }
+    // Outcomes retain their grouping boundary; only the current metadata row paints status.
+    if (turn.author === 'turn') return null;
     const opens = opensExchange(turns, index);
     return (
       <div
@@ -314,6 +286,7 @@ export function ChatThread({ conversation, turns, pending = false, cards, stalle
         <p className={styles.emptyLead}>{live ? 'The agent is working.' : 'Nothing said yet.'}</p>
         <p className={styles.emptyHint}>{live ? 'Messages will appear here.' : 'Write below and it starts here.'}</p>
         {live && <ActivityIndicator state="working" motion="thinking" />}
+        {currentMeta}
       </div>
     );
   }
@@ -378,16 +351,7 @@ export function ChatThread({ conversation, turns, pending = false, cards, stalle
         )}
         {/* The drawer's one accessible "in motion" fact: every indicator is decorative. It sits after the placeholder because the stylesheet spaces `.thread`'s children by adjacency (`.exchange + *`). */}
         {live && <VisuallyHidden>{activityLabelOf('working')}</VisuallyHidden>}
-        {stalled && (
-          <div className={styles.outcome}>
-            <ThreadStatusNotice heading={<span className={styles.outcomeHeader}>
-              <span className={styles.outcomeStatusLabel}>Conversation paused</span>
-            </span>}>
-              <p className={styles.outcomeReason}>{stalledReason ?? 'This conversation is stuck.'}</p>
-            </ThreadStatusNotice>
-          </div>
-        )}
-        {!stalled && stopFeedback !== null && <StopStatusNotice feedback={stopFeedback} />}
+        {currentMeta}
         <div ref={endRef} aria-hidden="true" />
       </div>
     </div>
@@ -405,18 +369,9 @@ const ACTIVE_MARKER_SLACK_PX = 4;
 /** How far from the bottom still counts as reading the newest turn: 2.6 lines of the reply's 24.75px line box. */
 const FOLLOW_BOTTOM_SLACK_PX = 64;
 
-/** One plain sentence for the `codexErrorInfo` values a reader can act on; every other code is shown as the token codex sent. */
-const FAILURE_HINTS: Readonly<Record<string, string>> = Object.freeze({
-  contextWindowExceeded: 'The conversation no longer fits in the model’s context window.',
-  usageLimitExceeded: 'The usage limit for this account has been reached.',
-  rateLimitExceeded: 'Requests are being rate-limited; try again in a moment.',
-  serverOverloaded: 'The model provider is overloaded; try again in a moment.',
-});
 
-function outcomeHintText(code: string | undefined, rawStatus: string | undefined): string | null {
-  const hint = code === undefined || code.trim() === '' ? null : (FAILURE_HINTS[code] ?? code);
-  return hint ?? (rawStatus === undefined ? null : `Ended with status “${rawStatus}”`);
-}
+
+
 
 function exchangesOf(turns: readonly TranscriptEntry[]): readonly Exchange[] {
   const found: Exchange[] = [];
