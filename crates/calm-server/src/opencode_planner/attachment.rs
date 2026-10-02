@@ -16,6 +16,7 @@ use std::{
 use utoipa::ToSchema;
 
 pub const PAYLOAD_KEY: &str = "opencode_attachment";
+pub use calm_types::opencode_connections::{ConnectionSummary, ConnectionsResponse};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,16 +201,6 @@ impl Binding {
             .map(|value| serde_json::from_value(value.clone()).map_err(CalmError::from))
             .transpose()
     }
-}
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct ConnectionSummary {
-    pub id: String,
-    pub label: String,
-    pub directory: String,
-}
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct ConnectionsResponse {
-    pub connections: Vec<ConnectionSummary>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
