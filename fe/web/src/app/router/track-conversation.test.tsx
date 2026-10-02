@@ -128,7 +128,7 @@ function ok(body: unknown): ApiTransportResponse {
 
 /* The shapes are schema-checked by the transport; an off-schema body is refused before any test can observe anything. */
 const inputAccepted = () => ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r' });
-const runIdle = () => ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'idle', model: null, reasoning_effort: null, blocked_reason: null });
+const runIdle = () => ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'idle', model: null, reasoning_effort: null, blocked_reason: null });
 
 function created(body: unknown): ApiTransportResponse {
   return { status: 201, statusText: 'Created', body };
@@ -172,7 +172,7 @@ function setup(reply?: Reply, storage?: UiPreferenceStorage, recovery?: Recovery
       if (request.path.includes(HISTORY_PATH)) return ok([]);
       /* Both card endpoints echo the card in the path, as the kernel does; a fixed id
          would be a trap for the first case that reads the field. */
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: pathCardId(request.path), worker_session_id: 'r', phase: 'idle', model: null, reasoning_effort: null, blocked_reason: null });
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: pathCardId(request.path), worker_session_id: 'r', phase: 'idle', model: null, reasoning_effort: null, blocked_reason: null });
       /* An off-schema body is refused by the transport and the optimistic echo rolled back. */
       if (request.path.endsWith('/planner/input')) return ok({ card_id: pathCardId(request.path), worker_session_id: 'r' });
       if (request.path === '/api/settings') return ok({});
@@ -688,7 +688,7 @@ describe('track conversations', () => {
     '[F4] never labels the %s working-turn submission as queued, including after reopen', async (outcome) => {
       const text = `Keep ${outcome} queued attempt`;
       const { requests } = setup((request) => {
-        if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
+        if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
         if (request.path.endsWith('/planner/input')) {
           if (outcome === 'unknown') throw new Error('response dropped');
           return failure(429, 'rate_limited', 'Wait a moment');
@@ -715,7 +715,7 @@ describe('track conversations', () => {
     let resolve!: (response: ApiTransportResponse) => void;
     const held = new Promise<ApiTransportResponse>((answer) => { resolve = answer; });
     const { requests } = setup((request) => {
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
       if (request.path.endsWith('/planner/input')) return held;
       return undefined;
     });
@@ -736,7 +736,7 @@ describe('track conversations', () => {
     let attempts = 0;
     let rows: ReturnType<typeof harnessMessage>[] = [];
     const { client, requests } = setup((request) => {
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
       if (request.path.includes(HISTORY_PATH)) return ok(rows);
       if (request.path.endsWith('/planner/input')) {
         attempts += 1;
@@ -959,7 +959,7 @@ describe('track conversations', () => {
     let resolve!: (response: ApiTransportResponse) => void;
     const pending = new Promise<ApiTransportResponse>((done) => { resolve = done; });
     const { client, requests } = setup((request) => {
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id,
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id,
         worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null });
       if (request.path.includes(HISTORY_PATH)) return ok(rows);
       if (request.path.endsWith('/planner/interrupt')) return pending;
@@ -990,7 +990,7 @@ describe('track conversations', () => {
       turn_id: 'previous-turn', method: 'turn/completed',
       params: JSON.stringify({ id: 'previous-turn', status: 'completed', error: null }) };
     const { client, requests } = setup((request) => {
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id,
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id,
         worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
       if (request.path.includes(HISTORY_PATH)) return ok(change === 'load earlier' ? [current] : [current, historical]);
       if (request.path.endsWith('/planner/interrupt')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', stopped: true });
@@ -1009,7 +1009,7 @@ describe('track conversations', () => {
 
   it.each(['issuing_turn', 'turn_running'])('shows an unconfirmed stop receipt without inventing a terminal result (%s)', async (phase) => {
     const { requests } = setup((request) => {
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id,
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id,
         worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null });
       if (request.path.endsWith('/planner/interrupt')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', stopped: false });
       return undefined;
@@ -1031,7 +1031,7 @@ describe('track conversations', () => {
   it('shows a failed stop request through the native status row and permits a manual retry', async () => {
     let stops = 0;
     setup((request) => {
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id,
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id,
         worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null });
       if (request.path.endsWith('/planner/interrupt')) {
         stops += 1;
@@ -1054,7 +1054,7 @@ describe('track conversations', () => {
   it('shows the unconfirmed stop reason once and blocks further sends', async () => {
     const reason = 'The stop request timed out before the model confirmed that this turn had stopped.';
     const { requests } = setup((request) => request.path.endsWith('/planner/run')
-      ? ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'wedged', model: null,
+      ? ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase: 'wedged', model: null,
         reasoning_effort: null, blocked_reason: reason }) : undefined);
     fireEvent.click(await screen.findByRole('button', { name: /Conversation Assistant/ }));
     const disclosure = await screen.findByRole('button', { name: 'Conversation paused', expanded: false });
@@ -1073,7 +1073,7 @@ describe('track conversations', () => {
     let phase = 'turn_running';
     const { client, requests } = setup((request) => {
       if (request.path === CONVERSATIONS) return ok([assistantRow({ state: 'turn_pending' })]);
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null });
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null });
       return undefined;
     });
     fireEvent.click(await screen.findByRole('button', { name: /Conversation Assistant/ }));
@@ -1096,7 +1096,7 @@ describe('track conversations', () => {
   it('[F6] stops promising queued delivery after the harness becomes wedged', async () => {
     let phase = 'turn_running';
     const { client, requests } = setup((request) => request.path.endsWith('/planner/run')
-      ? ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null }) : undefined);
+      ? ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null }) : undefined);
     fireEvent.click(await screen.findByRole('button', { name: 'Conversation Assistant' }));
     await screen.findByRole('button', { name: 'Stop' });
     await typeInto(messageField(), 'Queued before the stall');
@@ -1118,7 +1118,7 @@ describe('track conversations', () => {
     const held = new Promise<ApiTransportResponse>((resolve) => { release = resolve; });
     const { client } = setup((request) => {
       if (request.path.endsWith('/planner/input')) return held;
-      if (request.path.endsWith('/planner/run')) return ok({ card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null });
+      if (request.path.endsWith('/planner/run')) return ok({ supports_steer: true, card_id: ASSISTANT_CARD.id, worker_session_id: 'r', phase, model: null, reasoning_effort: null, blocked_reason: null });
       return undefined;
     });
     fireEvent.click(await screen.findByRole('button', { name: 'Conversation Assistant' }));

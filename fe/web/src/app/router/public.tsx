@@ -1,3 +1,7 @@
+import { useOpenCodeConnection } from '../providers/opencode-connections.tsx';
+import { ConnectOpenCodeDialog } from '../../features/track/opencode-session/connect.tsx';
+import { AttachedSessionNotice } from '../../features/planner/attached-session.tsx';
+import { Button as AstryxButton } from '@astryxdesign/core/Button';
 import { transcriptRowToTurnOutcome } from '../../../../core/domain/conversation.ts';
 import { useConversationStop } from '../conversations/stop.ts';
 import type { ConversationStopFeedback } from '../../../../core/domain/conversation-stop.ts';
@@ -128,6 +132,8 @@ import { useCompactViewport } from '../../ui/viewport/public.ts';
 export const APP_BASEPATH = '/next';
 
 type ConversationStore = Readonly<{
+  attachedSession: import('../../../../core/domain/conversation.ts').AttachedOpenCodeSession | null;
+  canStop: boolean;
   conversations: readonly Conversation[];
   /** Messages *and* the actions between them, in the order they happened. */
   turnsOf: (conversationId: string) => readonly TranscriptEntry[];
@@ -143,7 +149,7 @@ type ConversationStore = Readonly<{
   /** Queued messages that exist but carry no id to address them by. */
   pendingQueueOverflow: number;
   deleteQueuedEntry: (entry: PendingQueueEntry) => Promise<PlannerQueueWriteOutcome>;
-  /** Hand a queued entry to the running turn; `undefined` outside `turn_running`, and that is the whole gate. */
+  /** Hand a queued entry to the running turn; `undefined` unless the running backend declares steering support. */
   steerQueuedEntry: ((entry: PendingQueueEntry) => Promise<PlannerQueueWriteOutcome>) | undefined;
   historyReady: boolean;
   historyLoading: boolean;
@@ -292,6 +298,10 @@ export function useConversationStore(
     ...modelCatalogQueryOptions(transport, { kind: 'card', cardId }, unauthorized), enabled: scope !== null,
   });
   const phase = run.data?.phase ?? null;
+  const attachedSession = run.data?.attached_session ?? null;
+  const requiresAttachedSession = scope?.kind === 'track-opencode';
+  const attachmentBlocksInput = requiresAttachedSession && (attachedSession === null || !attachedSession.can_submit);
+  const canStop = requiresAttachedSession ? attachedSession?.can_stop === true : true;
   const stalled = phase === 'wedged';
   /* `pendingQueueIds` is the visibility judgement for the echoes below: an entry the
        queue region is drawing must not also be drawn in the transcript. */
@@ -425,7 +435,7 @@ export function useConversationStore(
   );
   const working = phase === 'issuing_turn' || phase === 'turn_running';
   const stop = useConversationStop({
-    cardId, canStop: working && !stalled,
+    cardId, canStop: working && !stalled && canStop,
     responseEnded: phase === 'idle' || phase === 'turn_completed',
     historyKnown: history.data !== undefined,
     newestRowId: items.reduce((latest, row) => Math.max(latest, row.id), 0),
@@ -498,7 +508,7 @@ export function useConversationStore(
   const send = async (
     _conversationId: string, text: string, attachments: readonly PlannerAttachment[] = [],
   ): Promise<SendOutcome> => {
-    if (_conversationId !== cardId || stalled || sendingRef.current || !registry.tryBeginSend(cardId)) return 'not-sent';
+    if (attachmentBlocksInput || _conversationId !== cardId || stalled || sendingRef.current || !registry.tryBeginSend(cardId)) return 'not-sent';
     sendingRef.current = true;
     setSending(true);
     setActionError(null);
@@ -626,7 +636,7 @@ export function useConversationStore(
     });
   /* On a steer's `done` the entry is forgotten but its echo is NOT retired: a steer
        delivers the sentence, and the kernel's transcript row reconciles the echo. */
-  const steerQueuedEntry = phase === 'turn_running'
+  const steerQueuedEntry = phase === 'turn_running' && run.data?.supports_steer === true
     ? (entry: PendingQueueEntry) =>
       mutations.steerQueued(entry.entry_id, entry.rev).then((outcome) => {
         if (outcome.kind === 'done') forgetQueuedEntry(entry);
@@ -641,9 +651,10 @@ export function useConversationStore(
     isOptimisticConversationTurn(turn) && !turn.queued;
   const hasUnreconciledSend = echoes.some(awaitsReconciliation)
     || registry.turnsOf(cardId).some(awaitsReconciliation);
-  const sendBlocked = stalled || (failedSend !== null && failedSend.delivery !== 'refused') || sending || sendingAcrossMounts || hasUnreconciledSend;
+  const sendBlocked = attachmentBlocksInput || stalled || (failedSend !== null && failedSend.delivery !== 'refused') || sending || sendingAcrossMounts || hasUnreconciledSend;
   const displayedFailure = failedSend === null ? null : { ...failedSend.echo, queued: false };
   return {
+    attachedSession, canStop,
     conversations,
     turnsOf: (conversationId) => conversation?.id === conversationId
       ? displayedFailure === null || matchingSendMessage ? transcript
@@ -675,7 +686,7 @@ export function useConversationStore(
         void send(cardId, failedSend.echo.text, failedSend.echo.attachments);
       }
     },
-    send: (conversationId, text, attachments) => failedSend === null || failedSend.delivery === 'refused'
+    send: (conversationId, text, attachments) => !attachmentBlocksInput && (failedSend === null || failedSend.delivery === 'refused')
       ? send(conversationId, text, attachments) : Promise.resolve('not-sent'),
     attachmentsSupported: run.data?.attachments_supported ?? false,
     contextUsage: run.data?.token_usage ?? null,
@@ -996,7 +1007,7 @@ function useConversationPanel(
     if (open === null) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!store.working || store.stopping) return;
+      if (!store.canStop || !store.working || store.stopping) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
       const region = target.closest('[role="complementary"]');
@@ -1322,6 +1333,7 @@ function useConversationPanel(
           </>
         ) : open === null ? undefined : (
           <>
+            {store.attachedSession !== null && <AttachedSessionNotice session={store.attachedSession} />}
             {store.historyError !== null && (
               <ChatFooterNotice>
                 <ChatFooterError message={store.historyError} />
@@ -1426,7 +1438,7 @@ function useConversationPanel(
               sendAdornment={<ContextRing usage={store.contextUsage} />}
               /* `stopping` keeps Stop shown while the interrupt is in flight; `interrupt()`
                                already refuses a second one. */
-              onStop={store.working || store.stopping ? store.interrupt : undefined}
+              onStop={store.canStop && (store.working || store.stopping) ? store.interrupt : undefined}
               onNewConversation={startAnother}
               mentionTrigger={mentionTrigger}
               /* The kernel reads the selection when it hands a batch to codex, so a change
@@ -1450,7 +1462,7 @@ function useConversationPanel(
                     provider={scopeProvider}
                     selection={store.model}
                     onChange={store.setModel}
-                    isDisabled={!store.historyReady}
+                    isDisabled={!store.historyReady || scope?.kind === 'track-opencode'}
                   />
                 </HStack>
               )}
@@ -1900,6 +1912,7 @@ function TrackRouteBody({
   useReadReceipt('track', track.id, track.activityAt ?? 0);
   const trackMutations = useTrackMutations(transport, unauthorized);
   const conversationMutations = useTrackConversationMutations(transport, track.id, unauthorized);
+  const openCodeConnection = useOpenCodeConnection(transport, unauthorized, track.id);
   const openMobileSection = useOpenMobileSection();
   const mobileHeaderActionsHost = useMobileHeaderActionsHost();
   const mobileHeaderTitleHost = useMobileHeaderTitleHost();
@@ -1999,7 +2012,8 @@ function TrackRouteBody({
          * comparison rests on, and written the other way it would be a tautology. */
         return row === undefined ? null : {
           id: row.trackId,
-          provider: plannerCard !== undefined && row.id === plannerCard.id ? plannerProviderOf(plannerCard.payload) : 'codex',
+          provider: plannerCard !== undefined && row.id === plannerCard.id ? plannerProviderOf(plannerCard.payload)
+            : row.kind === 'track-opencode' ? 'opencode' : 'codex',
           title: trackTitle, cardId: row.id, cardTitle: row.title,
           updatedAt: row.updatedAt, kind: row.kind, state: row.state,
         };
@@ -2366,7 +2380,8 @@ function TrackRouteBody({
           />
         )
         : undefined}
-      conversationList={chat.list}
+      conversationList={<>{chat.list}<AstryxButton label="Connect OpenCode session" size="sm" variant="ghost"
+        onClick={openCodeConnection.show} /></>}
       conversationAction={chat.action}
       onStartConversation={chat.startConversation}
       conversationOpen={chat.isOpen}
@@ -2386,6 +2401,7 @@ function TrackRouteBody({
       })}
     />
     </TrackStage>
+    <ConnectOpenCodeDialog {...openCodeConnection.dialog} />
     {/* Keyed by kind: switching kinds is a different form, and a shared mount
         would carry the previous kind's typed values into it. */}
     <Dialog

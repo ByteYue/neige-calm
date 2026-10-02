@@ -247,7 +247,7 @@ describe('track conversations', () => {
 /* Every kind says who owns its `state`, and the table is total. */
 describe('CONVERSATION_STATE_SOURCE', () => {
   const KINDS: readonly ConversationKind[] = [
-    'terminal', 'codex', 'claude', 'shared-spec', 'track-assistant',
+    'terminal', 'codex', 'claude', 'shared-spec', 'track-assistant', 'track-opencode',
   ];
 
   it('decides every kind, and only those', () => {
@@ -257,7 +257,7 @@ describe('CONVERSATION_STATE_SOURCE', () => {
 
   it('names the listed kinds as the server\'s to report', () => {
     expect(KINDS.filter((kind) => CONVERSATION_STATE_SOURCE[kind] === 'server'))
-      .toEqual(['track-assistant']);
+      .toEqual(['track-assistant', 'track-opencode']);
   });
 });
 
