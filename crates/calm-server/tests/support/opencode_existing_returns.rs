@@ -50,7 +50,7 @@ pub(super) async fn reply(
     let result = if matches!(kind, Reply::Denied) {
         let mut message = assistant("msg_denied", &original, "", 14, true);
         message["info"]["finish"] = json!("tool-calls");
-        message["parts"] = json!([{"id":"prt_denied","type":"tool","tool":"bash","state":{"status":"error","input":{"command":"audit"},"error":"Permission rejected by native operator","time":{"start":13,"end":14}}}]);
+        message["parts"] = json!([{"id":"prt_denied","type":"tool","tool":"calm_calm_terminal_open","state":{"status":"error","input":{"command":"audit"},"error":"Permission rejected by native operator","time":{"start":13,"end":14}}}]);
         message
     } else {
         let mut continuation = user("msg_continue", "Continue", 13);
@@ -139,9 +139,15 @@ async fn native_compaction_return_projects_final_once_across_restart() {
 
 #[tokio::test]
 async fn externally_denied_native_loop_finishes_failed_without_control() {
-    let (fixture, stack, _card) = start(Reply::Denied).await;
+    let (fixture, stack, card) = start(Reply::Denied).await;
     fixture.native.0.lock().unwrap().release.notify_one();
     wait_state(&stack, "failed").await;
+    let items = stack.items(&card).await.to_string();
+    assert!(
+        items.contains("dynamicToolCall"),
+        "External tool must keep native identity: {items}"
+    );
+    assert!(items.contains("calm_calm_terminal_open"));
     assert_eq!(fixture.posts().len(), 1);
     stack.shutdown().await;
 }

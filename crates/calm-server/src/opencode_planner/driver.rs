@@ -63,7 +63,12 @@ async fn run(
                 })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut projection = TurnProjection::new(
+    let make_projection = if shared.attachment.is_some() {
+        TurnProjection::new_external
+    } else {
+        TurnProjection::new
+    };
+    let mut projection = make_projection(
         submission.thread_id.clone(),
         submission.id.clone(),
         submission.native_message_id.clone(),
