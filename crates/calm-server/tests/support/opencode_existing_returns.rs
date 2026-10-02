@@ -142,12 +142,27 @@ async fn externally_denied_native_loop_finishes_failed_without_control() {
     let (fixture, stack, card) = start(Reply::Denied).await;
     fixture.native.0.lock().unwrap().release.notify_one();
     wait_state(&stack, "failed").await;
-    let items = stack.items(&card).await.to_string();
+    stack.wait_text(&card, "prt_denied").await;
+    let items = stack.items(&card).await;
+    let native_tool_rows: Vec<_> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["item_uuid"] == "prt_denied")
+        .collect();
+    assert!(!native_tool_rows.is_empty());
     assert!(
-        items.contains("dynamicToolCall"),
+        native_tool_rows
+            .iter()
+            .all(|row| row["item_type"] == "dynamicToolCall"),
         "External tool must keep native identity: {items}"
     );
-    assert!(items.contains("calm_calm_terminal_open"));
+    assert!(native_tool_rows.iter().all(|row| {
+        row["params"]
+            .as_str()
+            .unwrap()
+            .contains("calm_calm_terminal_open")
+    }));
     assert_eq!(fixture.posts().len(), 1);
     stack.shutdown().await;
 }
