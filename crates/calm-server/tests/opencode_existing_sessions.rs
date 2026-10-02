@@ -416,6 +416,7 @@ async fn attach_imports_history_tracks_changes_and_never_submits() {
     let fixture = Fixture::new().await;
     let stack = Stack::boot(&fixture).await;
     let track = stack.track(&fixture).await;
+    let mut events = stack.state.events.subscribe();
     let card = stack.attach(&track, "attach").await;
     stack.wait_text(&card, "original progress").await;
     stack.wait_submit(&card).await;
@@ -436,7 +437,14 @@ async fn attach_imports_history_tracks_changes_and_never_submits() {
     assert_eq!(stack.attach(&track, "another-key").await, card);
     let count = stack.items(&card).await.as_array().unwrap().len();
     tokio::time::sleep(Duration::from_millis(700)).await;
-    assert_eq!(stack.items(&card).await.as_array().unwrap().len(), count);
+    let rows = stack.items(&card).await;
+    assert_eq!(rows.as_array().unwrap().len(), count);
+    transcript_assertions::assert_item_announcements(&mut events, &rows, &card, &track);
+    assert_eq!(
+        stack.run(&card).await["phase"],
+        "idle",
+        "passive history must not adopt a native turn into the Harness FSM"
+    );
     fixture.native.0.lock().unwrap().messages[1]["parts"][0]["text"] =
         json!("progress changed externally");
     stack.wait_text(&card, "progress changed externally").await;
@@ -764,6 +772,7 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
 
 #[path = "support/opencode_existing_registry.rs"]
 mod registry_tests;
-
 #[path = "support/opencode_existing_capabilities.rs"]
 mod capability_tests;
+#[path = "support/opencode_existing_transcript.rs"]
+mod transcript_assertions;

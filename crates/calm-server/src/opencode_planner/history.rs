@@ -9,6 +9,7 @@ use super::{
 use crate::{
     codex_appserver::Notification,
     error::{CalmError, Result},
+    harness::transcript::{ItemMetadata, TranscriptItem, TranscriptOwner},
 };
 use serde_json::Value;
 use std::{
@@ -214,7 +215,6 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
     Ok(())
 }
 
-#[allow(deprecated)]
 async fn persist_item(shared: &Shared, notification: &Notification) -> Result<()> {
     let Notification::Item { method, params } = notification else {
         return Ok(());
@@ -227,76 +227,42 @@ async fn persist_item(shared: &Shared, notification: &Notification) -> Result<()
     let id = item["id"].as_str();
     let kind = item["type"].as_str();
     let serialized = serde_json::to_string(params)?;
-    let upgraded = if kind == Some("userMessage") && method == "item/completed" {
-        if let (Some(client), Some(id)) = (item["clientId"].as_str(), id) {
-            shared
-                .params
-                .repo
-                .transcript_projection_upgrade(
-                    &shared.params.card_id,
-                    client,
-                    turn,
-                    id,
-                    &serialized,
-                )
-                .await?
-        } else {
-            None
-        }
-    } else {
-        None
+    let owner = TranscriptOwner {
+        repo: shared.params.repo.as_ref(),
+        events: &shared.params.events,
+        write: shared.params.write.clone(),
+        worker_session_id: &shared.params.worker_session_id,
+        card_id: &shared.params.card_id,
+        track_id: &shared.params.track_id,
     };
-    let db_id = if let Some(id) = upgraded {
-        id
-    } else {
-        shared
-            .params
-            .repo
-            .harness_item_insert(
-                &shared.params.worker_session_id,
-                &shared.params.card_id,
-                &shared.params.track_id,
-                thread,
-                turn,
-                id,
-                kind,
-                method,
-                &serialized,
-                None,
-            )
-            .await?
+    let row = TranscriptItem {
+        thread_id: thread,
+        metadata: ItemMetadata {
+            turn_id: turn,
+            item_uuid: id,
+            item_type: kind,
+            method,
+        },
+        params_json: &serialized,
+        legacy_segments_json: None,
+        projection_client_id: item["clientId"].as_str(),
     };
+    let db_id = owner.record(&row).await?;
     let track = shared
         .params
         .repo
         .track_get(&shared.params.track_id)
         .await?
         .ok_or_else(|| CalmError::NotFound("Native history Track was deleted".into()))?;
-    shared
-        .params
-        .repo
-        .log_pure_event(
-            crate::ids::ActorId::Kernel,
+    owner
+        .announce(
             crate::event::EventScope::Card {
                 card: shared.params.card_id.clone().into(),
                 track: track.id,
                 area: track.area_id,
             },
-            None,
-            &shared.params.events,
-            shared.params.write.role_cache(),
-            shared.params.write.area_cache(),
-            crate::event::Event::HarnessItemAdded {
-                worker_session_id: shared.params.worker_session_id.clone(),
-                card_id: shared.params.card_id.clone().into(),
-                track_id: shared.params.track_id.clone().into(),
-                item_db_id: db_id,
-                item_uuid: id.map(str::to_owned),
-                item_type: kind.map(str::to_owned),
-                turn_id: turn.map(str::to_owned),
-                method: method.clone(),
-            },
+            db_id,
+            &row.metadata,
         )
-        .await?;
-    Ok(())
+        .await
 }

@@ -12,6 +12,7 @@ pub mod snapshot;
 pub mod state;
 pub mod submission_recovery;
 pub mod token_usage;
+pub(crate) mod transcript;
 pub(crate) mod turn_outcome;
 
 use std::collections::{HashSet, VecDeque};
