@@ -30,9 +30,6 @@ use crate::session_projection_repo::WorkerSessionState;
 use crate::state::{AppState, RouteState, WorkerState};
 use calm_truth::session_projection_row::LAST_TURN_COMPLETED_MS_SUBQUERY;
 
-/// The `kind` every row of this list carries.
-const TRACK_CONVERSATION_KIND: &str = "track-assistant";
-
 pub fn router() -> Router<AppState> {
     Router::new().route(
         "/api/tracks/{track_id}/conversations",
@@ -284,6 +281,7 @@ async fn load_track_conversation_summaries(
                   json_extract(c.payload, '$.side_source_card_id') AS source_card_id,
                   c.track_id                              AS track_id,
                   c.title                                AS title,
+                  CASE WHEN c.role = 'worker' THEN 'track-opencode' ELSE 'track-assistant' END AS kind,
                   ws.state                               AS state,
                   COALESCE(ws.updated_at_ms, c.updated_at) AS updated_at,
                   {LAST_TURN_COMPLETED_MS_SUBQUERY}       AS last_turn_completed_at
@@ -298,9 +296,9 @@ async fn load_track_conversation_summaries(
                                           inner_ws.id DESC
                                  LIMIT 1)
             WHERE c.track_id = ?1
-              AND c.role = ?2
               AND c.kind = 'codex'
-              AND json_extract(c.payload, '$.harness_profile') = ?3
+              AND ((c.role = ?2 AND json_extract(c.payload, '$.harness_profile') = ?3)
+                   OR (c.role = 'worker' AND json_extract(c.payload, '$.harness_profile') = 'plain_chat' AND json_extract(c.payload, '$.opencode_attachment.session_id') IS NOT NULL))
               AND (?4 IS NULL OR c.id = ?4)
             ORDER BY updated_at DESC, c.id"#
     );
@@ -322,6 +320,7 @@ struct TrackConversationRow {
     id: String,
     track_id: String,
     title: Option<String>,
+    kind: String,
     state: Option<String>,
     updated_at: i64,
     last_turn_completed_at: Option<i64>,
@@ -341,7 +340,7 @@ impl TryFrom<TrackConversationRow> for TrackConversationSummary {
             id: row.id,
             track_id: row.track_id,
             title: row.title,
-            kind: TRACK_CONVERSATION_KIND.to_string(),
+            kind: row.kind,
             state,
             updated_at: row.updated_at,
             last_turn_completed_at: row.last_turn_completed_at,

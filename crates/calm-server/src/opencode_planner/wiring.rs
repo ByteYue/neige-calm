@@ -17,6 +17,8 @@ use std::sync::Arc;
 pub struct OpenCodePlannerWiring {
     pub host: Arc<OpenCodePlannerHost>,
     pub plugin: Arc<PluginHost>,
+    pub events: crate::event::EventBus,
+    pub write: crate::state::WriteContext,
 }
 pub struct OpenCodePlannerRow<'a> {
     pub worker_session_id: &'a str,
@@ -35,16 +37,29 @@ impl OpenCodePlannerWiring {
             .track_get(row.track_id)
             .await?
             .ok_or_else(|| CalmError::NotFound(format!("track {}", row.track_id)))?;
-        let cwd = std::path::PathBuf::from(track.workspace.agent_cwd());
-        let mut instructions =
+        let card = repo
+            .card_get(row.card_id)
+            .await?
+            .ok_or_else(|| CalmError::NotFound("OpenCode card".into()))?;
+        let binding = super::attachment::Binding::from_payload(&card.payload)?;
+        let cwd = binding
+            .as_ref()
+            .map(|binding| binding.directory.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from(track.workspace.agent_cwd()));
+        let mut instructions = if binding.is_some() {
+            String::new()
+        } else {
             crate::operation::planner_harness_start_adapter::planner_instructions(
                 repo.as_ref(),
                 &self.plugin,
                 row.track_id,
                 row.card_id,
             )
-            .await?;
-        instructions.push_str(&workspace_instructions(&cwd)?);
+            .await?
+        };
+        if binding.is_none() {
+            instructions.push_str(&workspace_instructions(&cwd)?);
+        }
         let settings = crate::routes::settings::load_settings(repo.as_ref()).await?;
         let proxy = crate::proxy_env::resolved_proxy_env_pairs(
             settings.http_proxy.as_deref(),
@@ -66,6 +81,8 @@ impl OpenCodePlannerWiring {
                 prior_total_tokens: row.prior_total_tokens,
                 repo,
                 seals,
+                events: self.events.clone(),
+                write: self.write.clone(),
             })
             .await?,
         ))
@@ -76,6 +93,11 @@ impl OpenCodePlannerWiring {
     pub fn unconfigured_for_test(repo: Arc<dyn Repo>) -> Self {
         let route: Arc<dyn crate::db::RouteRepo> = repo;
         Self {
+            events: crate::event::EventBus::new(),
+            write: crate::state::WriteContext::new(
+                crate::card_role_cache::CardRoleCache::new(),
+                crate::track_area_cache::TrackAreaCache::new(),
+            ),
             host: Arc::new(OpenCodePlannerHost::unconfigured_scratch().expect("OpenCode host")),
             plugin: Arc::new(PluginHost::new_full(
                 Arc::new(crate::plugin_host::PluginRegistry::empty()),

@@ -60,6 +60,7 @@ impl OpenCodePlannerConfig {
 #[derive(Debug)]
 pub struct OpenCodePlannerHost {
     config: Option<OpenCodePlannerConfig>,
+    pub(crate) connections: std::collections::HashMap<String, Arc<super::attachment::Connection>>,
     pub instance: MarkerInstance,
     pub instructions_dir: PathBuf,
     pub mcp_shim: PathBuf,
@@ -102,6 +103,7 @@ impl OpenCodePlannerHost {
         );
         Ok(Self {
             config,
+            connections: Default::default(),
             instance,
             instructions_dir,
             mcp_shim,

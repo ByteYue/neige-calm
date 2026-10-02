@@ -109,3 +109,54 @@ async fn opencode_migration_preserves_rows_self_references_and_all_inbound_links
         assert_eq!(result.is_ok(), accepted, "OpenCode {mode}/{contract}");
     }
 }
+
+#[tokio::test]
+async fn attached_opencode_migration_preserves_all_references_and_extends_executor_only() {
+    let mut db = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    db.ensure_migrations_table().await.unwrap();
+    apply_through(&mut db, 129).await;
+    sqlx::raw_sql(include_str!("fixtures/opencode_migration_before.sql"))
+        .execute(&mut db)
+        .await
+        .unwrap();
+    apply_through(&mut db, 131).await;
+    let before = snapshot(&mut db).await;
+    apply_through(&mut db, 132).await;
+    assert_eq!(snapshot(&mut db).await, before);
+    for (table, column) in [
+        ("cards", "session_id"),
+        ("tracks", "root_session_id"),
+        ("worker_flow_items", "worker_session_id"),
+    ] {
+        let value: String = sqlx::query_scalar(&format!("SELECT {column} FROM {table}"))
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+        assert_eq!(value, "s");
+    }
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for (id, mode, contract, accepted) in [
+        ("oc-p", "resumable", "planner", true),
+        ("oc-e", "resumable", "executor", true),
+        ("oc-v", "resumable", "validator", false),
+        ("oc-x", "ephemeral", "executor", false),
+    ] {
+        let result=sqlx::query(concat!(
+            "INSERT INTO worker_sessions(id,track_id,provider,mode,contract,state,created_at_ms,updated_at_ms) ",
+            "VALUES(?1,'t','opencode',?2,?3,'idle',1,1)"
+        )).bind(id).bind(mode).bind(contract).execute(&mut db).await;
+        assert_eq!(result.is_ok(), accepted, "{mode}/{contract}");
+    }
+}

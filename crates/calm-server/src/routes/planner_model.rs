@@ -119,6 +119,9 @@ pub(crate) async fn set_planner_model(
             "card {id} is not a planner codex card",
         )));
     }
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Err(CalmError::Conflict("An attached OpenCode conversation follows its native agent/model/variant; change them in its original controller".into()));
+    }
     let claude = crate::harness::profile::PlannerBinding::from_card(&card, role)
         .is_some_and(|binding| binding.provider == AgentProvider::Claude);
 

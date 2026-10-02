@@ -60,6 +60,14 @@ async fn worker_session_track_id_for_card_tx(
 fn runtime_init_session_identity(
     init: &WorkerSessionInit,
 ) -> WorkerSessionProjectionResult<(WorkerProviderKind, SessionMode, WorkerContract)> {
+    if init.kind == WorkerSessionKind::OpenCodeCard {
+        if init.agent_provider != Some(AgentProvider::OpenCode) {
+            return Err(runtime_message(
+                "An attached OpenCode runtime must explicitly name its native provider",
+            ));
+        }
+        return Ok(derive_session_identity(&init.kind));
+    }
     if init.kind != WorkerSessionKind::SharedPlanner {
         if init.agent_provider == Some(AgentProvider::OpenCode) {
             return Err(runtime_message(

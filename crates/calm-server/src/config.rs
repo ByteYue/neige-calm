@@ -40,6 +40,10 @@ pub struct Config {
     #[arg(long)]
     pub opencode_planner_config: Option<PathBuf>,
 
+    /// Registered existing OpenCode servers on IPv4 loopback; a JSON connections catalog.
+    #[arg(long)]
+    pub opencode_connections_config: Option<PathBuf>,
+
     /// Unix socket used to ask calm-proc-supervisor to fork session daemons.
     /// Defaults to `<CALM_DATA_DIR>/proc-supervisor.sock`.
     #[arg(long, env = "CALM_PROC_SUPERVISOR_SOCK")]

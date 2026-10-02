@@ -185,6 +185,7 @@ impl Fx {
     ) -> String {
         let provider = match kind {
             WorkerSessionKind::ClaudeCard => Some(AgentProvider::Claude),
+            WorkerSessionKind::OpenCodeCard => Some(AgentProvider::OpenCode),
             WorkerSessionKind::CodexCard | WorkerSessionKind::SharedPlanner => {
                 Some(AgentProvider::Codex)
             }

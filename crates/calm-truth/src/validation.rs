@@ -34,6 +34,7 @@ pub const SERVER_OWNED_CARD_PAYLOAD_KEYS: [&str; 4] = [
     PLANNER_TEMPLATE_CONTEXT_PAYLOAD_KEY,
     PLANNER_PROVIDER_PAYLOAD_KEY,
     SIDE_SOURCE_CARD_PAYLOAD_KEY,
+    "opencode_attachment",
 ];
 
 /// Whether a stored value of a server-owned key is the shape the kernel mints (and so is kept
@@ -44,7 +45,7 @@ pub fn server_owned_value_is_sticky(key: &str, value: &Value) -> bool {
         // corruption, not erase it and silently drop the working method.
         PLANNER_TEMPLATE_CONTEXT_PAYLOAD_KEY => true,
         // Creation-owned identity stays immutable, including a corrupt stored value.
-        PLANNER_PROVIDER_PAYLOAD_KEY | SIDE_SOURCE_CARD_PAYLOAD_KEY => true,
+        PLANNER_PROVIDER_PAYLOAD_KEY | SIDE_SOURCE_CARD_PAYLOAD_KEY | "opencode_attachment" => true,
         TERMINAL_SIGNALS_PAYLOAD_KEY => value.as_bool() == Some(true),
         _ => false,
     }

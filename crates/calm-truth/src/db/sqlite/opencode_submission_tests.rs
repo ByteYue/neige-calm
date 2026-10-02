@@ -46,7 +46,10 @@ async fn bind(repo: &SqlxRepo, card: &str, worker: &str, native: &str) {
 }
 
 async fn setup() -> (SqlxRepo, String, OpenCodeSubmissionIntent) {
-    let repo = fresh_repo().await;
+    setup_in(fresh_repo().await).await
+}
+
+async fn setup_in(repo: SqlxRepo) -> (SqlxRepo, String, OpenCodeSubmissionIntent) {
     let mut tx = repo.pool().begin().await.unwrap();
     let card = create_card_in_tx(&repo, &mut tx, "opencode-journal", "codex").await;
     tx.commit().await.unwrap();
@@ -246,5 +249,91 @@ async fn opencode_journal_requires_matching_live_native_authority_before_send() 
             .await
             .unwrap(),
         "superseded runtime cannot acquire send permission"
+    );
+}
+
+async fn competing_writer_setup() -> (tempfile::TempDir, SqlxRepo, OpenCodeSubmissionIntent) {
+    let directory = tempfile::tempdir().unwrap();
+    let repo = SqlxRepo::open(&format!(
+        "sqlite://{}",
+        directory.path().join("journal.db").display()
+    ))
+    .await
+    .unwrap();
+    let (repo, _, intent) = setup_in(repo).await;
+    (directory, repo, intent)
+}
+
+#[tokio::test]
+async fn opencode_prepare_waits_for_competing_kernel_writer_before_reading_intent() {
+    let (_directory, repo, intent) = competing_writer_setup().await;
+    let mut writer = begin_immediate_tx(repo.pool()).await.unwrap();
+    sqlx::query("UPDATE worker_sessions SET last_activity_ms=2 WHERE id=?1")
+        .bind(&intent.worker_session_id)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let pool = repo.pool().clone();
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let mut prepare = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        opencode_submission_prepare(&pool, &intent).await
+    });
+    started.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut prepare)
+            .await
+            .is_err(),
+        "admission must wait at BEGIN instead of failing a deferred read-to-write upgrade"
+    );
+    writer.commit().await.unwrap();
+    assert_eq!(prepare.await.unwrap().unwrap().state, State::Prepared);
+}
+
+#[tokio::test]
+async fn opencode_settle_waits_for_competing_kernel_writer_before_reading_receipt() {
+    let (_directory, repo, intent) = competing_writer_setup().await;
+    opencode_submission_prepare(repo.pool(), &intent)
+        .await
+        .unwrap();
+    assert!(
+        opencode_submission_claim_prepared(repo.pool(), &intent.id, 2)
+            .await
+            .unwrap()
+    );
+    let mut writer = begin_immediate_tx(repo.pool()).await.unwrap();
+    sqlx::query("UPDATE worker_sessions SET last_activity_ms=3 WHERE id=?1")
+        .bind(&intent.worker_session_id)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let card = intent.card_id.clone();
+    let pool = repo.pool().clone();
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let mut settlement = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        opencode_submission_settle(
+            &pool,
+            &intent.id,
+            State::Completed,
+            &json!({"status":"completed"}),
+            4,
+        )
+        .await
+    });
+    started.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut settlement)
+            .await
+            .is_err(),
+        "settlement must wait at BEGIN instead of losing known completion to writer contention"
+    );
+    writer.commit().await.unwrap();
+    settlement.await.unwrap().unwrap();
+    assert!(
+        opencode_submission_get_unresolved_by_card(repo.pool(), &card)
+            .await
+            .unwrap()
+            .is_none()
     );
 }

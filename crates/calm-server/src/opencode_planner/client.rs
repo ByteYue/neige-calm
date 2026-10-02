@@ -24,6 +24,15 @@ pub(crate) struct Client {
     directory: PathBuf,
 }
 
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("port", &self.port)
+            .field("directory", &self.directory)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Client {
     pub(crate) fn new(port: u16, password: &str, directory: &Path) -> Self {
         Self {
