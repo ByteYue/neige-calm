@@ -105,6 +105,10 @@ export type ChannelVerdict = { role: string, verdict: ChannelVerdictKind, };
 
 export type ChannelVerdictKind = "approved" | "changes_requested";
 
+export type ConnectionSummary = { id: string, label: string, directory: string, };
+
+export type ConnectionsResponse = { connections: Array<ConnectionSummary>, };
+
 /**
  * Why a Git delivery produced no candidate. Every value has exactly one producer (D2 code table).
  */
@@ -731,7 +735,7 @@ export type VerifyTargetEvidence = { "kind": "refused", cwd: string, before: Sam
  */
 export type WorkerSessionId = string;
 
-export type WorkerSessionKind = "terminal" | "codex" | "claude" | "shared-spec";
+export type WorkerSessionKind = "terminal" | "codex" | "claude" | "opencode" | "shared-spec";
 
 export type WorkerSessionProjection = { id: string, card_id: string, kind: WorkerSessionKind, agent_provider: AgentProvider | null, status: WorkerSessionState, terminal_run_id: string | null, thread_id: string | null, session_id: string | null, active_turn_id: string | null, handle_state_json: unknown | null, created_at_ms: number, updated_at_ms: number, completed_at_ms: number | null, 
 /**

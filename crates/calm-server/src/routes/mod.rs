@@ -21,6 +21,7 @@ pub mod codex_cards;
 pub mod conversations_shared;
 pub mod fs;
 pub mod models;
+pub mod opencode_conversations;
 pub mod overlays;
 pub mod planner_input;
 pub mod planner_model;
@@ -61,6 +62,7 @@ pub fn protected_router() -> Router<AppState> {
         .merge(tracks::router())
         .merge(activity_dismissals::router())
         .merge(track_conversations::router())
+        .merge(opencode_conversations::router())
         .merge(track_previews::router())
         .merge(track_report_blocks::router())
         .merge(track_report_series::router())

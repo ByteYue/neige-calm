@@ -1,0 +1,11 @@
+@layer features {
+  .form {
+    color: var(--text);
+    font-family: var(--font-sans);
+    min-inline-size: 0;
+  }
+
+  .directory {
+    overflow-wrap: anywhere;
+  }
+}

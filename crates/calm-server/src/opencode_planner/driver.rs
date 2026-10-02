@@ -63,7 +63,12 @@ async fn run(
                 })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut projection = TurnProjection::new(
+    let make_projection = if shared.attachment.is_some() {
+        TurnProjection::new_external
+    } else {
+        TurnProjection::new
+    };
+    let mut projection = make_projection(
         submission.thread_id.clone(),
         submission.id.clone(),
         submission.native_message_id.clone(),
@@ -127,6 +132,9 @@ async fn run(
     let mut native_return = None;
     let mut denial = None;
     loop {
+        if shared.state().shutting_down && shared.attachment.is_some() {
+            return Ok(());
+        }
         if *cancelled.borrow() && stop_until.is_none() {
             stop_until = Some(tokio::time::Instant::now() + Duration::from_secs(5));
             // A failed abort is ambiguous too; the bounded process sweep below still runs.
@@ -155,11 +163,18 @@ async fn run(
             }
         }
         let observation = async {
-            if let Some(rejected) = reject_pending(&shared, &client, &native, submission).await? {
+            if shared.attachment.is_none()
+                && let Some(rejected) =
+                    reject_pending(&shared, &client, &native, submission).await?
+            {
                 // Retain a confirmed control receipt even if the following snapshot fails.
                 denial = Some(rejected);
             }
-            snapshot(&client, &native, submission).await
+            if shared.attachment.is_some() {
+                super::history::messages(&client, &native).await
+            } else {
+                snapshot(&client, &native, submission).await
+            }
         };
         let observed = if let Some(until) = stop_until {
             tokio::time::timeout_at(until, observation)
@@ -177,17 +192,55 @@ async fn run(
         };
         match observed {
             Ok(messages) => {
-                for frame in projection.snapshot(&messages) {
-                    shared.send(frame);
-                }
-                let outcome = projection.outcome(&messages).or_else(|| {
-                    match (native_return.as_ref(), denial.as_deref()) {
-                        (Some(response), Some(reason)) => {
-                            projection.denied_loop_return(&messages, response, &native, reason)
+                let borrowed_outcome = if shared.attachment.is_some() {
+                    match native_return.as_ref() {
+                        Some(response) if response["info"]["time"]["completed"].is_number() => {
+                            if let Some((anchor, outcome)) =
+                                super::native_return::validate(submission, &messages, response)
+                            {
+                                // Exact returned frame must also agree with the native message endpoint.
+                                let exact = client
+                                    .get(&format!(
+                                        "/session/{native}/message/{}",
+                                        anchor.assistant_id
+                                    ))
+                                    .await?;
+                                if exact != *response {
+                                    return Err(CalmError::Conflict("OpenCode returned message differs from its native snapshot".into()));
+                                }
+                                projection.return_anchor = Some(anchor);
+                                Some(outcome)
+                            } else {
+                                return Err(CalmError::Conflict("OpenCode returned loop cannot be correlated through supported native evidence".into()));
+                            }
+                        }
+                        _ if send.0.is_none()
+                            && super::native_return::uninterrupted_original(
+                                submission, &messages,
+                            ) =>
+                        {
+                            projection.outcome(&messages)
                         }
                         _ => None,
                     }
-                });
+                } else {
+                    None
+                };
+                for frame in projection.snapshot(&messages) {
+                    shared.send(frame);
+                }
+                let outcome = if shared.attachment.is_some() {
+                    borrowed_outcome
+                } else {
+                    projection.outcome(&messages).or_else(|| {
+                        match (native_return.as_ref(), denial.as_deref()) {
+                            (Some(response), Some(reason)) => {
+                                projection.denied_loop_return(&messages, response, &native, reason)
+                            }
+                            _ => None,
+                        }
+                    })
+                };
                 if let Some(outcome) = outcome {
                     return settle(&shared, submission, &projection, &outcome, &messages).await;
                 }

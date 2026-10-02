@@ -133,8 +133,9 @@ impl ProviderAdapter for PlannerHarnessShutdownAdapter {
         // A registered harness is shut down first, whatever a row read would say; its backend names its provider.
         if let Some(harness) = self.harness_registry.remove(&worker_session_id) {
             let provider = harness.provider();
+            let owned = harness.owns_provider_process();
             harness.shutdown().await?;
-            if provider == AgentProvider::OpenCode {
+            if provider == AgentProvider::OpenCode && owned {
                 crate::opencode_planner::lifecycle::stop_session(
                     self.repo.as_ref(),
                     &self.opencode_host,
@@ -166,6 +167,9 @@ impl ProviderAdapter for PlannerHarnessShutdownAdapter {
                 && runtime.agent_provider == Some(AgentProvider::Claude)
             {
                 self.stop_claude_planner(&worker_session_id).await;
+                return Ok(SpawnOutcome::Ready(SpawnHandle::NoOp));
+            }
+            if runtime.kind == WorkerSessionKind::OpenCodeCard {
                 return Ok(SpawnOutcome::Ready(SpawnHandle::NoOp));
             }
             let Some(thread_id) = runtime.thread_id.as_deref() else {

@@ -79,6 +79,15 @@ impl PlannerBackend {
         }
     }
 
+    /// Control authority is declared by the provider session before the kernel
+    /// records an interrupt intent or arms a completion deadline.
+    pub fn supports_interrupt(&self) -> bool {
+        match self {
+            Self::Codex(_) | Self::Claude(_) => true,
+            Self::OpenCode(session) => session.supports_interrupt(),
+        }
+    }
+
     pub async fn turn_steer(
         &self,
         thread_id: &str,

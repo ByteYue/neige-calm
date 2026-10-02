@@ -260,6 +260,7 @@ pub(crate) fn derive_session_identity(
             WorkerProviderKind::Codex
         }
         WorkerSessionKind::ClaudeCard => WorkerProviderKind::Claude,
+        WorkerSessionKind::OpenCodeCard => WorkerProviderKind::OpenCode,
     };
     let mode = match provider {
         WorkerProviderKind::Codex | WorkerProviderKind::OpenCode => SessionMode::Resumable,
@@ -525,10 +526,14 @@ pub async fn session_insert_tx(
     session: WorkerSession,
 ) -> Result<WorkerSession> {
     if session.provider == WorkerProviderKind::OpenCode
-        && session.contract != WorkerContract::Planner
+        && (session.mode != SessionMode::Resumable
+            || !matches!(
+                session.contract,
+                WorkerContract::Planner | WorkerContract::Executor
+            ))
     {
         return Err(CalmError::Conflict(
-            "OpenCode requires the planner contract",
+            "OpenCode requires a resumable planner or executor contract",
         ));
     }
     let handle_state_json = session

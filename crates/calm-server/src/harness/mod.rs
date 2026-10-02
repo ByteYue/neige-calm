@@ -12,6 +12,7 @@ pub mod snapshot;
 pub mod state;
 pub mod submission_recovery;
 pub mod token_usage;
+pub(crate) mod transcript;
 pub(crate) mod turn_outcome;
 
 use std::collections::{HashSet, VecDeque};
@@ -149,6 +150,16 @@ pub async fn spawn_recovered_harness(
                 );
                 return Ok(RecoveryOutcome::Skipped);
             }
+        }
+    } else if runtime.kind == WorkerSessionKind::OpenCodeCard {
+        match role.and_then(|role| profile::PlannerBinding::from_card(&card, role)) {
+            Some(binding)
+                if binding.provider == AgentProvider::OpenCode
+                    && binding.profile == profile::HarnessProfile::PlainChat =>
+            {
+                AgentProvider::OpenCode
+            }
+            _ => return Ok(RecoveryOutcome::Skipped),
         }
     } else {
         AgentProvider::Codex
@@ -321,7 +332,12 @@ pub async fn spawn_recovered_harness(
         snapshot,
     });
     Ok(match install_or_shutdown(reservation, handle).await? {
-        Some(handle) => RecoveryOutcome::Installed(handle),
+        Some(handle) => {
+            // Recovery can retire a durable receipt without another driver notification.
+            // Publish the installed owner's checkpoint for transcript and lifecycle readers.
+            handle.persist_snapshot().await?;
+            RecoveryOutcome::Installed(handle)
+        }
         None => RecoveryOutcome::Skipped,
     })
 }
@@ -457,7 +473,8 @@ pub enum BootRows {
 
 /// A Claude Planner row: recovered at boot whatever the Codex daemon does, never by the deferred pass.
 fn is_independent_planner_row(runtime: &WorkerSessionProjection) -> bool {
-    runtime.kind == WorkerSessionKind::SharedPlanner
+    (runtime.kind == WorkerSessionKind::SharedPlanner
+        || runtime.kind == WorkerSessionKind::OpenCodeCard)
         && matches!(
             runtime.agent_provider,
             Some(AgentProvider::Claude | AgentProvider::OpenCode)

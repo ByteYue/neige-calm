@@ -219,6 +219,11 @@ impl Fixture {
             proxy: vec![],
             prior_total_tokens: 10,
             seals: SharedCodexAppServer::new_stub(repo.clone()),
+            events: crate::event::EventBus::new(),
+            write: crate::state::WriteContext::new(
+                crate::card_role_cache::CardRoleCache::new(),
+                crate::track_area_cache::TrackAreaCache::new(),
+            ),
             repo,
         })
         .await

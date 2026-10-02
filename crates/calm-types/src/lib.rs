@@ -16,6 +16,7 @@ pub mod mentions;
 pub mod mobile_access;
 pub mod model;
 pub mod observation;
+pub mod opencode_connections;
 pub mod planner_attachment;
 pub mod proposal;
 pub mod report_blocks;

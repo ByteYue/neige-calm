@@ -90,13 +90,13 @@
   kind: capability
   family: input-path
   statement: >
-    A message typed during a healthy running or stopping turn must still be posted. After its
+    A message typed in a managed conversation during a healthy running or stopping turn must still be posted. After its
     POST is acknowledged, `kernelQueuesInput` classifies its queued echo without letting
     `hasUnreconciledSend` lock the composer. Pending, rejected, or uncertain submissions must not
     claim to be queued. A known wedged harness blocks new submissions and offers recovery while
     retaining existing words; queued entries must no longer promise delivery from that harness.
   why: >
-    `POST /planner/input` never reads the phase: it folds the text into the harness pending queue
+    For managed conversations, `POST /planner/input` never reads the phase: it folds the text into the harness pending queue
     and `can_issue_turn()` (`harness/state.rs`) starts a turn only from `Idle`/`TurnCompleted`.
     Two client-side beliefs about that fact can each kill the conversation. Refusing to send while
     a turn runs discarded the message in silence (#1505's original symptom: the composer's guard
@@ -113,7 +113,7 @@
     remains recovery evidence rather than an acknowledged queue entry.
     The new front end's counterpart to the legacy `E2E-CAP-SPECCHAT-012` (`You · queued`), which
     stays `migration: pending` against `web/e2e`.
-  source: fe/web/src/app/router/public.tsx:408-421,496-527,638-642
+  source: fe/web/src/app/router/public.tsx:425-437,514-559,652-660
   # A table over the whole phase enum: for each of the eight, whether the marker appears, whether
   # the composer stays open, and whether a second message can be sent. The predicate itself is
   # tabulated a second time at the platform-independent tier

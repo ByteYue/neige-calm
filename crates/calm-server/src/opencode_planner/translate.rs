@@ -3,6 +3,7 @@ use crate::codex_appserver::Notification;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub(crate) struct TurnProjection {
     pub(crate) thread: String,
     pub(crate) turn: String,
@@ -14,6 +15,7 @@ pub(crate) struct TurnProjection {
     original_text: Vec<String>,
     user_emitted: bool,
     mcp_names: HashMap<String, String>,
+    pub(crate) return_anchor: Option<super::native_return::ReturnAnchor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,18 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
+    pub(crate) fn native_error(info: &Value) -> Option<Self> {
+        let error = info.get("error").filter(|error| !error.is_null())?;
+        if error["name"] == "MessageAbortedError" {
+            return Some(Self::Interrupted);
+        }
+        Some(Self::Failed(
+            error["data"]["message"]
+                .as_str()
+                .unwrap_or("OpenCode reported a native error")
+                .into(),
+        ))
+    }
     pub(crate) fn status(&self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -57,7 +71,29 @@ impl TurnProjection {
             original_text,
             user_emitted: false,
             mcp_names,
+            return_anchor: None,
         })
+    }
+    pub(crate) fn new_external(
+        thread: String,
+        turn: String,
+        message: String,
+        client_id: String,
+        original_text: Vec<String>,
+        cwd: String,
+        prior_tokens: i64,
+    ) -> crate::error::Result<Self> {
+        let mut projection = Self::new(
+            thread,
+            turn,
+            message,
+            client_id,
+            original_text,
+            cwd,
+            prior_tokens,
+        )?;
+        projection.mcp_names.clear();
+        Ok(projection)
     }
     pub(crate) fn started(&self) -> Notification {
         Notification::TurnStarted {
@@ -70,7 +106,12 @@ impl TurnProjection {
             Outcome::Failed(message) => json!({"message":message}),
             _ => Value::Null,
         };
-        json!({"id":self.turn,"status":outcome.status(),"error":error})
+        let mut value = json!({"id":self.turn,"status":outcome.status(),"error":error});
+        if let Some(anchor) = &self.return_anchor {
+            value["nativeReturnAnchor"] =
+                serde_json::to_value(anchor).expect("native return anchor");
+        }
+        value
     }
     pub(crate) fn completed(&self, outcome: &Outcome) -> Notification {
         Notification::TurnCompleted {
@@ -83,8 +124,7 @@ impl TurnProjection {
         for message in messages {
             let info = &message["info"];
             let ours = info["id"].as_str() == Some(&self.message);
-            let assistant = info["role"].as_str() == Some("assistant")
-                && info["parentID"].as_str() == Some(&self.message);
+            let assistant = self.is_assistant(message);
             if !ours && !assistant {
                 continue;
             }
@@ -122,7 +162,8 @@ impl TurnProjection {
                     let at = part["time"]["end"]
                         .as_i64()
                         .or(part["time"]["start"].as_i64())
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                        .or(info["time"]["created"].as_i64())
+                        .unwrap_or(0);
                     let (item, finished) = match part["type"].as_str() {
                         Some("text") => (
                             json!({"id":id,"type":"agentMessage","text":part["text"]}),
@@ -201,13 +242,7 @@ impl TurnProjection {
         (item, finished)
     }
     pub(crate) fn outcome(&self, messages: &[Value]) -> Option<Outcome> {
-        let assistants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| {
-                m["info"]["role"].as_str() == Some("assistant")
-                    && m["info"]["parentID"].as_str() == Some(&self.message)
-            })
-            .collect();
+        let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();
         if assistants.iter().any(|m| {
             m["parts"].as_array().is_some_and(|parts| {
                 parts.iter().any(|p| {
@@ -225,16 +260,8 @@ impl TurnProjection {
         if !info["time"]["completed"].is_number() {
             return None;
         }
-        if let Some(error) = info.get("error").filter(|e| !e.is_null()) {
-            if error["name"].as_str() == Some("MessageAbortedError") {
-                return Some(Outcome::Interrupted);
-            }
-            return Some(Outcome::Failed(
-                error["data"]["message"]
-                    .as_str()
-                    .unwrap_or("OpenCode reported a native error")
-                    .into(),
-            ));
+        if let Some(outcome) = Outcome::native_error(info) {
+            return Some(outcome);
         }
         // Pinned prompt.loop continues after any local tool call, including a provider's
         // stop finish, so its settled tool output must reach the next model request first.
@@ -274,13 +301,7 @@ impl TurnProjection {
         {
             return None;
         }
-        let assistants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| {
-                m["info"]["role"].as_str() == Some("assistant")
-                    && m["info"]["parentID"].as_str() == Some(&self.message)
-            })
-            .collect();
+        let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();
         let latest = assistants.iter().max_by_key(|m| {
             (
                 m["info"]["time"]["created"].as_i64().unwrap_or(0),
@@ -307,14 +328,20 @@ impl TurnProjection {
         tool_error.then(|| Outcome::Failed(reason.into()))
     }
 
+    fn is_assistant(&self, message: &Value) -> bool {
+        if message["info"]["role"] != "assistant" {
+            return false;
+        }
+        match &self.return_anchor {
+            Some(anchor) => anchor
+                .assistant_ids
+                .iter()
+                .any(|id| message["info"]["id"].as_str() == Some(id)),
+            None => message["info"]["parentID"].as_str() == Some(&self.message),
+        }
+    }
     pub(crate) fn usage(&self, messages: &[Value]) -> Notification {
-        let assistants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| {
-                m["info"]["role"].as_str() == Some("assistant")
-                    && m["info"]["parentID"].as_str() == Some(&self.message)
-            })
-            .collect();
+        let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();
         let total = assistants
             .iter()
             .fold(0i64, |sum, m| sum.saturating_add(message_tokens(m)));

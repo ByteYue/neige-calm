@@ -131,6 +131,9 @@ pub(crate) async fn quiesce_shared_card_active_turn(
     cs: &CodexShellState,
     card: &Card,
 ) -> Result<Option<String>> {
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Ok(None);
+    }
     let active_runtime = repo
         .session_projection_active_for_card(&card.id.to_string())
         .await?;
@@ -692,6 +695,11 @@ pub struct GetPlannerRunResponse {
     pub pending_overflow: u32,
     /// Whether this card can take image attachments: its provider must support images and its workspace must be managed. Uses the upload and input admission predicates in `planner_attachments`.
     pub attachments_supported: bool,
+    /// Whether queued input can join this provider's active turn.
+    pub supports_steer: bool,
+    /// A borrowed native session, absent for managed conversations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached_session: Option<crate::opencode_planner::attachment::AttachedSession>,
 }
 
 /// One addressable user entry from the harness pending queue.
@@ -862,6 +870,7 @@ pub(crate) async fn send_planner_input(
     // `_recovery_guard` holds the per-card recovery lock until end of scope, so a concurrent `/planner/reset` can't supersede the just-recovered runtime before the observe/audit below.
     let (runtime, harness, _recovery_guard) =
         ensure_live_planner_harness(&s, &w, &cs, &card.id, actor.as_str() == "user").await?;
+    harness.check_external_submission().await?;
     let track = s
         .repo
         .track_get(card.track_id.as_str())
@@ -1090,6 +1099,12 @@ pub(crate) async fn interrupt_planner_card(
         .ok_or_else(dormant)?;
     let harness = s.harness.get(&runtime.id).ok_or_else(dormant)?;
 
+    if harness.attached_session().is_some() {
+        return Err(CalmError::Conflict(
+            "Stop is unavailable for an attached OpenCode session; use its original controller"
+                .into(),
+        ));
+    }
     let phase = harness.snapshot().await.phase;
     // Dispatch for IssuingTurn too (best-effort), but only TurnRunning reports `stopped: true`.
     let dispatch = matches!(
@@ -1179,6 +1194,29 @@ pub(crate) async fn get_planner_run(
         pending: Vec::new(),
         pending_overflow: 0,
         attachments_supported,
+        supports_steer: crate::harness::profile::PlannerBinding::from_card(&card, role)
+            .is_some_and(|binding| {
+                binding.provider == crate::session_projection_repo::AgentProvider::Codex
+            }),
+        attached_session: crate::opencode_planner::attachment::Binding::from_payload(
+            &card.payload,
+        )?
+        .map(|binding| {
+            let connection = s.opencode_planner.resolve_binding(&binding);
+            crate::opencode_planner::attachment::AttachedSession {
+                connection_id: binding.connection_id.clone(),
+                label: connection
+                    .as_ref()
+                    .map(|connection| connection.config.label.clone())
+                    .unwrap_or_else(|_| binding.connection_id.clone()),
+                session_id: binding.session_id,
+                directory: binding.directory.display().to_string(),
+                status: crate::opencode_planner::attachment::AttachedStatus::Unavailable,
+                can_submit: false,
+                can_stop: false,
+                model: None,
+            }
+        }),
     };
     let Some(runtime) = s
         .repo
@@ -1217,14 +1255,22 @@ pub(crate) async fn get_planner_run(
     // One snapshot read for both fields, so phase and usage come from the same instant.
     let snapshot = harness.snapshot().await;
     let (pending, pending_overflow) = page_pending_entries(&card.id, &snapshot.pending_entries());
+    let attached_session = harness.attached_session();
+    let external_block=attached_session.as_ref().filter(|session|!session.can_submit).map(|session|match session.status {
+        crate::opencode_planner::attachment::AttachedStatus::Running=>"The existing OpenCode session is running. Observe its progress; continue after it settles.",
+        crate::opencode_planner::attachment::AttachedStatus::Unavailable=>"The existing OpenCode server is unavailable. History is retained; reconnect to its original server.",
+        _=>"The original OpenCode outcome is being checked. No prompt will be resent.",
+    }.to_string());
     Ok(Json(GetPlannerRunResponse {
+        supports_steer: harness.supports_steer(),
+        attached_session,
         attachments_supported,
         card_id: card.id,
         worker_session_id: Some(runtime.id.clone()),
         phase: Some(snapshot.phase),
         model: selection.model,
         reasoning_effort: selection.reasoning_effort,
-        blocked_reason: harness.issuance_block().await,
+        blocked_reason: harness.issuance_block().await.or(external_block),
         token_usage: snapshot
             .token_usage
             .as_ref()
@@ -1296,7 +1342,19 @@ async fn ensure_live_planner_harness(
     }
     // A recovered harness can't issue turns without its backend; surface that instead of spawning a silently-wedged task.
     // A Claude Planner needs its config and its pinned binary, not the shared app-server (#1791 §4.1 row 11).
-    if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
+    if runtime.kind == crate::session_projection_repo::WorkerSessionKind::OpenCodeCard {
+        // The attached adapter resolves and fences its registered native connection; no
+        // managed profile or shared Codex daemon is required to restore this observer.
+        crate::opencode_planner::attachment::Binding::from_payload(
+            &s.repo
+                .card_get(card_id.as_str())
+                .await?
+                .ok_or_else(dormant)?
+                .payload,
+        )?
+        .map(|binding| s.opencode_planner.resolve_binding(&binding))
+        .transpose()?;
+    } else if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
         && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::Claude)
     {
         s.claude_planner.check_ready().await?;
@@ -1389,6 +1447,9 @@ async fn reset_planner_card_shared(
     actor: Actor,
     card: Card,
 ) -> Result<ResetPlannerCardResponse> {
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Err(CalmError::Conflict("An attached OpenCode conversation retains its original session; disconnect it instead of resetting".into()));
+    }
     // Reset takes the SAME per-card lock as `/planner/input` lazy recovery, or a reset racing a registry-miss Send could resurrect the reset-away session. Deadlock-free: neither adapter re-enters `planner_recovery_locks`.
     let _recovery_guard = lock_card(&s.planner_recovery_locks, card.id.as_str()).await;
     let active_runtime = s
