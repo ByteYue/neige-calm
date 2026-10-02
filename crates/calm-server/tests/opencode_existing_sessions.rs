@@ -17,6 +17,7 @@ use calm_server::{
 };
 use clap::Parser;
 use http_body_util::BodyExt;
+use native_fixture::{ordered_messages, persisted_user};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -418,7 +419,6 @@ async fn owner(mut request: Request, next: axum::middleware::Next) -> Response {
     });
     next.run(request).await
 }
-
 #[tokio::test]
 async fn attach_imports_history_tracks_changes_and_never_submits() {
     let fixture = Fixture::new().await;
@@ -784,17 +784,17 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
     assert!(fixture.posts().is_empty());
     stack.shutdown().await;
 }
-
 #[path = "support/opencode_existing_capabilities.rs"]
 mod capability_tests;
 #[path = "support/opencode_existing_native.rs"]
 mod native_fixture;
 #[path = "support/opencode_existing_persistence_race.rs"]
 mod persistence_race_tests;
+#[path = "support/opencode_existing_recovery_checkpoint.rs"]
+mod recovery_checkpoint_tests;
 #[path = "support/opencode_existing_registry.rs"]
 mod registry_tests;
 #[path = "support/opencode_existing_returns.rs"]
 mod returns_tests;
 #[path = "support/opencode_existing_transcript.rs"]
 mod transcript_assertions;
-use native_fixture::{ordered_messages, persisted_user};

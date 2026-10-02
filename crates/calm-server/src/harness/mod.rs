@@ -332,7 +332,12 @@ pub async fn spawn_recovered_harness(
         snapshot,
     });
     Ok(match install_or_shutdown(reservation, handle).await? {
-        Some(handle) => RecoveryOutcome::Installed(handle),
+        Some(handle) => {
+            // Recovery can retire a durable receipt without another driver notification.
+            // Publish the installed owner's checkpoint for transcript and lifecycle readers.
+            handle.persist_snapshot().await?;
+            RecoveryOutcome::Installed(handle)
+        }
         None => RecoveryOutcome::Skipped,
     })
 }
