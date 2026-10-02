@@ -105,6 +105,10 @@ export type ChannelVerdict = { role: string, verdict: ChannelVerdictKind, };
 
 export type ChannelVerdictKind = "approved" | "changes_requested";
 
+export type ConnectionSummary = { id: string, label: string, directory: string, };
+
+export type ConnectionsResponse = { connections: Array<ConnectionSummary>, };
+
 /**
  * Why a Git delivery produced no candidate. Every value has exactly one producer (D2 code table).
  */
