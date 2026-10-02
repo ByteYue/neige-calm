@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { CardEntry } from '../registry.js';
 import { createCardRegistry } from '../registry.js';
 import type { CodexCard } from './codex.ts';
-import { CODEX_CARD_ENTRY, isPlainChatPayload } from './codex.ts';
+import { CODEX_CARD_ENTRY } from './codex.ts';
+import { isPlainChatPayload } from './plain-chat.ts';
 import { partitionTrackCards } from './headless-filter.js';
 import { registerAvailableBuiltinCards } from './register.js';
 
@@ -63,13 +64,13 @@ describe('CODEX_CARD_ENTRY', () => {
     registerAvailableBuiltinCards(registry);
     expect(registry.resolve({
       id: 'chat1', kind: 'codex', payload: { schemaVersion: 1, harness_profile: 'plain_chat' },
-    })).toBeNull();
+    })?.type).toBe('plain-chat');
     const { visible, unknown } = partitionTrackCards(registry, [
       wire('chat1', 'codex', { schemaVersion: 1, harness_profile: 'plain_chat' }),
       wire('k-codex', 'codex', { terminal_id: 't1' }),
     ]);
     expect(visible.map((slot) => slot.wire.id)).toEqual(['k-codex']);
-    expect(unknown.map((slot) => slot.wire.id)).toEqual(['chat1']);
+    expect(unknown.map((slot) => slot.wire.id)).toEqual([]);
   });
 
   it('[INV-CHAT-016] reads only the exact plain-chat marker', () => {

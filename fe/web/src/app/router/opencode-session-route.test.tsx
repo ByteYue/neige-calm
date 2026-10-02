@@ -16,6 +16,10 @@ const TRACK = { id: 'w', area_id: 'a', title: 'ETL', sort: 1, cwd: '/srv/neige',
 const ROW = { id: 'attached', trackId: 'w', title: 'iFood progress', kind: 'track-opencode', state: 'idle', updatedAt: 2, lastTurnCompletedAt: null };
 const BOUND = { connection_id: 'ops', label: 'Crawler operations', session_id: 'ses_existing', directory: '/srv/crawler',
   model: 'deepseek/flash', status: 'idle', can_submit: true, can_stop: false };
+const NATIVE_CARD = { id: ROW.id, track_id: 'w', kind: 'codex', title: ROW.title, sort: 1, role: 'worker',
+  payload: { schemaVersion: 1, harness_profile: 'plain_chat', opencode_attachment: { connection_id: 'ops',
+    generation: 1, port: 4096, directory: BOUND.directory, session_id: BOUND.session_id } },
+  deletable: true, created_at: 1, updated_at: 2 };
 const CONNECT = '/api/tracks/w/opencode-conversations';
 const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
 
@@ -29,7 +33,7 @@ function mount(options: { bound?: Partial<typeof BOUND> | null; existing?: boole
     if (request.path === '/api/areas') return ok([AREA]);
     if (request.path === '/api/areas/a/tracks') return ok([TRACK]);
     if (request.path === '/api/overlays?entity_kind=track') return ok([]);
-    if (request.path === '/api/tracks/w') return ok({ track: TRACK, cards: [], overlays: [], can_close: true, can_reopen: false });
+    if (request.path === '/api/tracks/w') return ok({ track: TRACK, cards: connected ? [NATIVE_CARD] : [], overlays: [], can_close: true, can_reopen: false });
     if (request.path === '/api/tracks/w/conversations') return ok(connected ? [ROW] : []);
     if (request.path === '/api/opencode/connections') return ok({ connections: [{ id: 'ops', label: BOUND.label, directory: BOUND.directory }] });
     if (request.path === CONNECT) {
@@ -84,21 +88,22 @@ it('connects through the Track panel and opens original history without sending 
 
 it('reopens a persisted native conversation without connecting or sending again', async () => {
   const { requests } = mount({ existing: true });
-  fireEvent.click((await screen.findAllByRole('button', { name: /iFood progress/ }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
   await screen.findByText('Original ETL output');
   expect(screen.getByRole('note', { name: 'Connected OpenCode session' }).textContent).toContain('ses_existing');
   expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
+  expect(document.querySelector('[data-nc-card-inventory] [data-nc-row="attached"]')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Close conversation' }));
   expect(requests.filter(request => request.method === 'DELETE' || request.path.endsWith('/planner/interrupt'))).toHaveLength(0);
 });
 
 it('observes a foreign running turn without sending, stopping, steering or changing model', async () => {
   const { requests } = mount({ existing: true, bound: { status: 'running', can_submit: false } });
-  fireEvent.click((await screen.findAllByRole('button', { name: /iFood progress/ }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
   await screen.findByText('Original ETL output');
   expect(screen.getByRole('note', { name: 'Connected OpenCode session' }).textContent).toContain('Observing');
   expect(screen.getByRole('combobox', { name: 'Message' }).getAttribute('contenteditable')).toBe('false');
-  expect(screen.queryByRole('button', { name: 'Stop', exact: true })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Say it now' })).toBeNull();
   expect(screen.getByRole('button', { name: /^Model:/ }).hasAttribute('disabled')).toBe(true);
   expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
@@ -107,7 +112,7 @@ it('observes a foreign running turn without sending, stopping, steering or chang
 
 it('continues an idle bound conversation through the existing input endpoint', async () => {
   const { requests } = mount({ existing: true });
-  fireEvent.click((await screen.findAllByRole('button', { name: /iFood progress/ }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
   await screen.findByText('Original ETL output');
   const field = screen.getByRole('combobox', { name: 'Message' });
   expect(field.getAttribute('contenteditable')).toBe('true');
@@ -123,10 +128,10 @@ it('continues an idle bound conversation through the existing input endpoint', a
 
 it('blocks continuation when the bound native-session metadata has not been read', async () => {
   mount({ existing: true, bound: null });
-  fireEvent.click((await screen.findAllByRole('button', { name: /iFood progress/ }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
   await screen.findByText('Original ETL output');
   expect(screen.getByRole('combobox', { name: 'Message' }).getAttribute('contenteditable')).toBe('false');
-  expect(screen.queryByRole('button', { name: 'Stop', exact: true })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull();
 });
 
 it('retains the exact connection request and key after a lost response and Track navigation', async () => {

@@ -15,9 +15,9 @@ const SESSION = 'ses_f044556f2fferyPFhTwDGFJz97';
 const DIRECTORY = '/home/operator/very-long-project-directory/operations/etl-and-audit';
 const ROW = { id: 'external', trackId: 'w', title: 'iFood progress', kind: 'track-opencode', state: 'running', updatedAt: 2, lastTurnCompletedAt: null };
 
-function mount() {
+function mount(existing = false) {
   const requests: ApiRequest[] = [];
-  let connected = false;
+  let connected = existing;
   const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
   const area = { id: 'a', name: 'Operations', color: '#000', sort: 1, kind: 'user', created_at: 1, updated_at: 1 };
   const track = { id: 'w', area_id: 'a', title: 'ETL', sort: 1, cwd: '/srv/neige', created_at: 1, updated_at: 1 };
@@ -26,7 +26,10 @@ function mount() {
     requests.push(request);
     if (request.path === '/api/areas') return ok([area]);
     if (request.path === '/api/areas/a/tracks') return ok([track]);
-    if (request.path === '/api/tracks/w') return ok({ track, cards: [], overlays: [], can_close: true, can_reopen: false });
+    if (request.path === '/api/tracks/w') return ok({ track, cards: connected ? [{ id: ROW.id, track_id: 'w', kind: 'codex', title: ROW.title, sort: 1, role: 'worker',
+      payload: { schemaVersion: 1, harness_profile: 'plain_chat', opencode_attachment: { connection_id: 'ops',
+        generation: 1, port: 4096, directory: DIRECTORY, session_id: SESSION } },
+      deletable: true, created_at: 1, updated_at: 2 }] : [], overlays: [], can_close: true, can_reopen: false });
     if (request.path === '/api/overlays?entity_kind=track') return ok([]);
     if (request.path === '/api/tracks/w/conversations') return ok(connected ? [ROW] : []);
     if (request.path === '/api/opencode/connections') return ok({ connections: [{ id: 'ops', label: 'Crawler operations', directory: DIRECTORY }] });
@@ -77,4 +80,20 @@ it.each([1280, 390])('connects and observes original history with a readable nat
   expect(requests.find(request => request.path === '/api/tracks/w/opencode-conversations')?.body)
     .toEqual({ connection_id: 'ops', session_id: SESSION });
   expect(requests.filter(request => request.path.endsWith('/planner/input'))).toHaveLength(0);
+});
+
+
+it.each([1280, 390])('reopens a persisted native card through Conversations without a dead card row (%ipx)', async width => {
+  await page.viewport(width, 844);
+  const requests = mount(true);
+  if (width < 600) {
+    await page.getByRole('button', { name: 'Track actions' }).click();
+    await page.getByRole('menuitem', { name: 'Conversations', exact: true }).click();
+  }
+  await page.getByRole('button', { name: /^Conversation iFood progress/ }).click();
+  await expect.element(page.getByText('Original iFood progress output')).toBeVisible();
+  expect(document.querySelector('[data-nc-card-inventory] [data-nc-row="external"]')).toBeNull();
+  await expect.element(page.getByRole('note', { name: 'Connected OpenCode session' })).toHaveTextContent(SESSION);
+  expect(document.documentElement.scrollWidth).toBe(width);
+  expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
 });

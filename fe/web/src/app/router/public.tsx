@@ -34,7 +34,7 @@ import type {
   BoardHostItem, CardAddMenuEntry, CardHost, CardRegistry,
 } from '../../systems/cards/public.js';
 import {
-  cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, partitionTrackCards,
+  cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, isPlainChatPayload, partitionTrackCards,
 } from '../../systems/cards/public.js';
 import { mintIdempotencyKey } from './idempotency-key.ts';
 import footerStyles from './composer-footer.module.css';
@@ -1844,11 +1844,11 @@ function TrackRoute({ transport, unauthorized, cardRuntime, recentFiles }: {
     [detailData],
   );
   /* The card Today asked for, if this track has it and it is a conversation card at
-   * all — BOTH conversation markers, not just the planner one. A fail-safe with no
+   * all — the declared planner, assistant and plain-chat profiles. A fail-safe with no
    * live producer. */
   const requestedCard = detail.data?.cards.find((card) => card.id === registry.requestedOpenId
     && card.kind === 'codex'
-    && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload)));
+    && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload) || isPlainChatPayload(card.payload)));
   const detailMatchesRoute = trackId !== undefined && detail.data?.track.id === trackId;
   useEffect(() => {
     if (registry.requestedOpenId === null || detail.isLoading || detail.isFetching) return;

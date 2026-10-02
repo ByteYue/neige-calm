@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ApiTransportPort } from '../../../../core/api/types.ts';
 import type { UnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
@@ -12,6 +12,8 @@ import { ApiError, OfflineSubmissionError, queryKeys, runOperation } from './que
 /** App composition: typed operations, request lease, query reconciliation and conversation selection. */
 export function useOpenCodeConnection(transport: ApiTransportPort, unauthorized: UnauthorizedChannel, trackId: string) {
   const registry = useConversationRegistry();
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const store = registry.connectionDrafts;
   const draft = useSyncExternalStore(store.subscribe, () => store.get(trackId));
   const [open, setOpen] = useState(false);
@@ -22,7 +24,8 @@ export function useOpenCodeConnection(transport: ApiTransportPort, unauthorized:
     client.setQueryData<Conversation[]>(queryKeys.trackConversations(trackId), current =>
       [...(current ?? []).filter(candidate => candidate.id !== row.id), row]);
     void client.invalidateQueries({ queryKey: queryKeys.trackConversations(trackId) }).catch(() => undefined);
-    registry.requestOpen(row.id);
+    // A completed request still belongs to its Track after navigation, but its open intent does not.
+    if (mounted.current) registry.requestOpen(row.id);
   };
   const submit = () => {
     const current = store.get(trackId);
