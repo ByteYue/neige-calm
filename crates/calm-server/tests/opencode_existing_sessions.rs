@@ -32,6 +32,7 @@ struct NativeState {
     messages: Vec<Value>,
     busy: bool,
     lost: bool,
+    hold: bool,
     invalid_cursor: bool,
     version: &'static str,
     requests: Vec<Value>,
@@ -72,6 +73,7 @@ impl Fixture {
             ],
             busy: false,
             lost: false,
+            hold: false,
             invalid_cursor: false,
             version: "1.18.34",
             requests: vec![],
@@ -181,8 +183,11 @@ async fn native_request(State(native): State<Native>, request: Request) -> Respo
             id,
             "fresh audit progress",
             at + 1,
-            true,
+            !state.hold,
         );
+        if state.hold {
+            state.busy = true;
+        }
         state.messages.push(result.clone());
         return axum::Json(result).into_response();
     }
@@ -759,3 +764,6 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
 
 #[path = "support/opencode_existing_registry.rs"]
 mod registry_tests;
+
+#[path = "support/opencode_existing_capabilities.rs"]
+mod capability_tests;

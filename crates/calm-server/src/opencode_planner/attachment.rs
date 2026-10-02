@@ -296,6 +296,9 @@ impl super::session::OpenCodePlannerSession {
             && !self.shared.state().shutting_down;
         Some(metadata)
     }
+    pub fn supports_interrupt(&self) -> bool {
+        !self.is_attached()
+    }
     pub fn is_attached(&self) -> bool {
         self.shared.attachment.is_some()
     }

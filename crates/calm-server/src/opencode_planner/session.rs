@@ -393,24 +393,30 @@ impl OpenCodePlannerSession {
             input["system"] = json!(shared.params.instructions);
         }
         input["model"] = json!({"providerID":provider,"modelID":model});
-        if let Some(messages) = native_messages {
-            if let Some(info) = messages
-                .iter()
-                .rev()
-                .find(|message| message["info"]["role"].as_str() == Some("user"))
-                .map(|message| &message["info"])
+        if let Some(session) = native_info.as_ref() {
+            let previous = native_messages
+                .as_ref()
+                .and_then(|messages| {
+                    messages
+                        .iter()
+                        .rev()
+                        .find(|message| message["info"]["role"].as_str() == Some("user"))
+                })
+                .map(|message| &message["info"]);
+            if let Some(agent) = session["agent"]
+                .as_str()
+                .or_else(|| previous.and_then(|info| info["agent"].as_str()))
             {
-                let session = native_info.as_ref().expect("attached native info");
-                if let Some(agent) = session["agent"].as_str().or(info["agent"].as_str()) {
-                    input["agent"] = json!(agent);
-                }
-                if let Some(variant) = session["model"]["variant"]
-                    .as_str()
-                    .or(info["variant"].as_str())
-                    .or(info["model"]["variant"].as_str())
-                {
-                    input["variant"] = json!(variant);
-                }
+                input["agent"] = json!(agent);
+            }
+            if let Some(variant) = session["model"]["variant"].as_str().or_else(|| {
+                previous.and_then(|info| {
+                    info["variant"]
+                        .as_str()
+                        .or(info["model"]["variant"].as_str())
+                })
+            }) {
+                input["variant"] = json!(variant);
             }
         } else if let Some(effort) = &selection.effort {
             input["variant"] = json!(effort);

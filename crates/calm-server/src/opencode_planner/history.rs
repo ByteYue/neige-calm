@@ -1,7 +1,7 @@
 //! Read-only snapshot synchronization for borrowed sessions. It never admits, aborts,
 //! answers an interaction, changes native configuration, or creates a journal receipt.
 use super::{
-    attachment::{AttachedStatus, latest_model, native_status},
+    attachment::{AttachedStatus, latest_model, native_status, session_model},
     client::Client,
     session::Shared,
     translate::TurnProjection,
@@ -110,7 +110,19 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
     let thread = row
         .thread_id
         .ok_or_else(|| CalmError::Conflict("OpenCode attachment thread is missing".into()))?;
-    shared.native_session(&client, &thread).await?;
+    if row.agent_session_id.as_deref() != Some(binding.session_id.as_str()) {
+        return Err(CalmError::Conflict(
+            "OpenCode observer native owner binding changed".into(),
+        ));
+    }
+    let native = client
+        .get(&format!("/session/{}", binding.session_id))
+        .await?;
+    super::session_input::validate_native_session(
+        &native,
+        &binding.session_id,
+        &binding.directory,
+    )?;
     let messages = messages(&client, &binding.session_id).await?;
     let status = native_status(&client, &binding.session_id).await?;
     if shared.state().shutting_down {
@@ -196,7 +208,7 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
         .as_mut()
     {
         metadata.status = status;
-        metadata.model = latest_model(&messages);
+        metadata.model = session_model(&native).or_else(|| latest_model(&messages));
         metadata.can_submit = status == AttachedStatus::Idle;
     }
     Ok(())

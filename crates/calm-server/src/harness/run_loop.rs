@@ -921,6 +921,22 @@ impl PlannerHarness {
         Ok((old_phase, tag))
     }
 
+    /// Fixtures advance an actual running turn past the configured duration and invoke
+    /// the production watchdog, preserving its native correlation and permissions.
+    #[cfg(feature = "fixtures")]
+    pub async fn expire_turn_duration_for_test(&self) -> Result<()> {
+        let mut state = self.inner.state.lock().await;
+        let HarnessState::TurnRunning { started_at, .. } = &mut *state else {
+            return Err(CalmError::Conflict(
+                "Fixture requires an actual running turn".into(),
+            ));
+        };
+        *started_at =
+            Instant::now() - self.inner.config.max_turn_duration - Duration::from_millis(1);
+        drop(state);
+        watchdog_tick(&self.inner).await
+    }
+
     /// Permanently stop this harness from issuing turns; in replay mode the app-server is a stub
     /// and `turn_start` always fails.
     #[cfg(feature = "fixtures")]
@@ -3725,6 +3741,9 @@ async fn issue_interrupt_for_turn(
     target_turn_id: String,
     reason: String,
 ) -> Result<()> {
+    if !inner.backend.supports_interrupt() {
+        return Ok(());
+    }
     let Some(thread_id) = inner.thread_id.read().await.clone() else {
         return Ok(());
     };
