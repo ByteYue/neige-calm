@@ -447,7 +447,14 @@ async fn attach_imports_history_tracks_changes_and_never_submits() {
     tokio::time::sleep(Duration::from_millis(700)).await;
     let rows = stack.items(&card).await;
     assert_eq!(rows.as_array().unwrap().len(), count);
-    transcript_assertions::assert_item_announcements(&mut events, &rows, &card, &track);
+    transcript_assertions::assert_item_announcements(
+        &mut events,
+        &rows,
+        &card,
+        &track,
+        transcript_assertions::ItemEventScope::BoundCard,
+        transcript_assertions::ItemSelection::All,
+    );
     assert_eq!(
         stack.run(&card).await["phase"],
         "idle",
@@ -780,13 +787,14 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
 
 #[path = "support/opencode_existing_capabilities.rs"]
 mod capability_tests;
+#[path = "support/opencode_existing_persistence_race.rs"]
+mod persistence_race_tests;
 #[path = "support/opencode_existing_registry.rs"]
 mod registry_tests;
 #[path = "support/opencode_existing_returns.rs"]
 mod returns_tests;
 #[path = "support/opencode_existing_transcript.rs"]
 mod transcript_assertions;
-
 #[path = "support/opencode_existing_native.rs"]
 mod native_fixture;
 use native_fixture::{ordered_messages, persisted_user};

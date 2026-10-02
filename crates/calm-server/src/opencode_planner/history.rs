@@ -9,7 +9,10 @@ use super::{
 use crate::{
     codex_appserver::Notification,
     error::{CalmError, Result},
-    harness::transcript::{ItemMetadata, TranscriptItem, TranscriptOwner},
+    harness::{
+        HarnessSnapshot,
+        transcript::{ItemMetadata, TranscriptItem, TranscriptOwner, live_turn_pending},
+    },
 };
 use serde_json::Value;
 use std::{
@@ -151,6 +154,12 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
             }
         }
     }
+    let snapshot = row
+        .handle_state_json
+        .and_then(HarnessSnapshot::parse_known)
+        .ok_or_else(|| {
+            CalmError::Conflict("OpenCode history owner has no supported Harness snapshot".into())
+        })?;
     for user in messages
         .iter()
         .filter(|message| message["info"]["role"].as_str() == Some("user"))
@@ -159,10 +168,16 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
         if internal_users.contains(id) {
             continue;
         }
+        let receipt = receipts.iter().find(|(native, _, _, _)| native == id);
+        if let Some((_, turn, client, _)) = receipt
+            && live_turn_pending(&snapshot, row.active_turn_id.as_deref(), turn, client)
+        {
+            // The live consumer persists item frames before its completion checkpoint.
+            // Do not advance this projection's cache until that durable handoff occurs.
+            continue;
+        }
         if !projections.contains_key(id) {
-            let (turn, client) = receipts
-                .iter()
-                .find(|(native, _, _, _)| native == id)
+            let (turn, client) = receipt
                 .map(|(_, turn, client, _)| (turn.clone(), client.clone()))
                 .unwrap_or_else(|| {
                     (
