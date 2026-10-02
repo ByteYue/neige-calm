@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { cardSchema, runtimeKindSchema } from './schemas.ts';
+import { cardSchema, runtimeKindSchema } from './schemas.js';
 
 it('decodes the declared OpenCode executor runtime on an attached conversation card', () => {
   const card = cardSchema.parse({
