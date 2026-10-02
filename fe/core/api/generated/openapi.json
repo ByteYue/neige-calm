@@ -3144,6 +3144,26 @@
         }
       }
     },
+    "/api/opencode/connections": {
+      "get": {
+        "tags": [
+          "opencode"
+        ],
+        "operationId": "list_connections",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/overlays": {
       "get": {
         "tags": [
@@ -6902,6 +6922,95 @@
         }
       }
     },
+    "/api/tracks/{track_id}/opencode-conversations": {
+      "post": {
+        "tags": [
+          "opencode"
+        ],
+        "operationId": "attach_conversation",
+        "parameters": [
+          {
+            "name": "track_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Required stable attachment request key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachOpenCodeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackConversationSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/tracks/{track_id}/terminal-cards": {
       "post": {
         "tags": [
@@ -7316,6 +7425,72 @@
           }
         }
       },
+      "AttachOpenCodeBody": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "session_id"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AttachedSession": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "label",
+          "session_id",
+          "directory",
+          "status",
+          "can_submit",
+          "can_stop"
+        ],
+        "properties": {
+          "can_stop": {
+            "type": "boolean"
+          },
+          "can_submit": {
+            "type": "boolean"
+          },
+          "connection_id": {
+            "type": "string"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttachedStatus"
+          }
+        }
+      },
+      "AttachedStatus": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "running",
+          "unavailable",
+          "unknown"
+        ]
+      },
       "AttachmentId": {
         "type": "string",
         "description": "`<uuid-v4>.<ext>` — an attachment's id *and* its file name. The only constructor is\n[`AttachmentId::parse`] and `Deserialize` goes through the same gate."
@@ -7677,7 +7852,7 @@
               "object",
               "null"
             ],
-            "description": "Replaces the stored payload. A payload carrying a server-owned key is refused with 400:\n`terminal_signals`, `template_context`, `planner_provider`. Every kernel-minted server-owned value the card already carries is kept."
+            "description": "Replaces the stored payload. A payload carrying a server-owned key is refused with 400:\n`terminal_signals`, `template_context`, `planner_provider`, `opencode_attachment`. Every kernel-minted server-owned value the card already carries is kept."
           },
           "sort": {
             "type": [
@@ -7831,6 +8006,39 @@
               "$ref": "#/components/schemas/ReasoningEffortOption"
             },
             "description": "The efforts a selection of this model may carry: Codex's options, or the Claude CLI's\n`supportedEffortLevels` (empty when it declares none, and then only `null` is accepted)."
+          }
+        }
+      },
+      "ConnectionSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "directory"
+        ],
+        "properties": {
+          "directory": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "ConnectionsResponse": {
+        "type": "object",
+        "required": [
+          "connections"
+        ],
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectionSummary"
+            }
           }
         }
       },
@@ -8487,9 +8695,21 @@
           "card_id",
           "pending",
           "pending_overflow",
-          "attachments_supported"
+          "attachments_supported",
+          "supports_steer"
         ],
         "properties": {
+          "attached_session": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AttachedSession",
+                "description": "A borrowed native session, absent for managed conversations."
+              }
+            ]
+          },
           "attachments_supported": {
             "type": "boolean",
             "description": "Whether this card can take image attachments: its provider must support images and its workspace must be managed. Uses the upload and input admission predicates in `planner_attachments`."
@@ -8541,6 +8761,10 @@
               "null"
             ],
             "description": "The chosen reasoning effort, or `null` for the default. Same source as `model`."
+          },
+          "supports_steer": {
+            "type": "boolean",
+            "description": "Whether queued input can join this provider's active turn."
           },
           "token_usage": {
             "oneOf": [
@@ -12734,6 +12958,7 @@
           "terminal",
           "codex",
           "claude",
+          "opencode",
           "shared-spec"
         ]
       },
