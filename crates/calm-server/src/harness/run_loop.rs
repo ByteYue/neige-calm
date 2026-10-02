@@ -773,6 +773,24 @@ impl PlannerHarness {
 
     /// Why this conversation's queue is not draining, or `None`. `None` does NOT mean waiting is
     /// the right answer.
+    pub fn owns_provider_process(&self) -> bool {
+        !matches!(&self.inner.backend,PlannerBackend::OpenCode(session) if session.is_attached())
+    }
+    pub fn supports_steer(&self) -> bool {
+        self.inner.backend.supports_steer()
+    }
+    pub fn attached_session(&self) -> Option<crate::opencode_planner::attachment::AttachedSession> {
+        match &self.inner.backend {
+            PlannerBackend::OpenCode(session) => session.attached_session(),
+            _ => None,
+        }
+    }
+    pub async fn check_external_submission(&self) -> Result<()> {
+        if let PlannerBackend::OpenCode(session) = &self.inner.backend {
+            session.check_can_submit().await?;
+        }
+        Ok(())
+    }
     pub async fn issuance_block(&self) -> Option<String> {
         self.inner.issuance_block.lock().await.clone()
     }
@@ -1324,7 +1342,7 @@ async fn handle_steer(
     // runs as the next turn.
     if !inner.backend.supports_steer() {
         return Ok(Err(SteerRefused::NotTaken {
-            message: "this Planner's provider (Claude) cannot take messages into a running \
+            message: "this conversation's provider cannot take messages into a running \
                       turn; it stays queued"
                 .into(),
             phase,
@@ -2488,6 +2506,13 @@ async fn resolve_model_selection_for_issue(
             }
         },
         PlannerBackend::OpenCode(session) => {
+            if session.is_attached() {
+                let metadata = session.attached_session();
+                return Ok(TurnModelSelection {
+                    model: metadata.and_then(|metadata| metadata.model),
+                    effort: None,
+                });
+            }
             session.host().configured().map_err(|error| {
                 IssuanceRefusal::needs_a_choice(
                     error.to_string(),

@@ -139,7 +139,7 @@ pub async fn opencode_submission_prepare(
             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'prepared',?12,?12
             FROM worker_sessions ws
             WHERE ws.id = ?2 AND ws.card_id = ?3 AND ws.thread_id = ?6
-              AND ws.agent_session_id = ?7 AND ws.provider = 'opencode' AND ws.contract = 'planner'
+              AND ws.agent_session_id = ?7 AND ws.provider = 'opencode' AND (ws.contract = 'planner' OR (ws.contract = 'executor' AND EXISTS (SELECT 1 FROM cards c WHERE c.id = ws.card_id AND c.kind = 'codex' AND c.role = 'worker' AND json_extract(c.payload, '$.harness_profile') = 'plain_chat' AND json_extract(c.payload, '$.opencode_attachment.session_id') = ws.agent_session_id)))
               AND ws.state IN ('starting','running','idle','turn_pending')"#,
     ).bind(&intent.id).bind(&intent.worker_session_id).bind(&intent.card_id).bind(&intent.scope_id)
         .bind(intent.generation).bind(&intent.thread_id).bind(&intent.native_session_id)
@@ -170,7 +170,7 @@ pub async fn opencode_submission_claim_prepared(
             WHERE id = ?1 AND state = 'prepared'
               AND EXISTS (SELECT 1 FROM worker_sessions ws
                   WHERE ws.id = opencode_submissions.worker_session_id
-                    AND ws.provider = 'opencode' AND ws.contract = 'planner'
+                    AND ws.provider = 'opencode' AND (ws.contract = 'planner' OR (ws.contract = 'executor' AND EXISTS (SELECT 1 FROM cards c WHERE c.id = ws.card_id AND c.kind = 'codex' AND c.role = 'worker' AND json_extract(c.payload, '$.harness_profile') = 'plain_chat' AND json_extract(c.payload, '$.opencode_attachment.session_id') = ws.agent_session_id)))
                     AND ws.card_id = opencode_submissions.card_id
                     AND ws.thread_id = opencode_submissions.thread_id
                     AND ws.agent_session_id = opencode_submissions.native_session_id

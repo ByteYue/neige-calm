@@ -127,6 +127,9 @@ async fn run(
     let mut native_return = None;
     let mut denial = None;
     loop {
+        if shared.state().shutting_down && shared.attachment.is_some() {
+            return Ok(());
+        }
         if *cancelled.borrow() && stop_until.is_none() {
             stop_until = Some(tokio::time::Instant::now() + Duration::from_secs(5));
             // A failed abort is ambiguous too; the bounded process sweep below still runs.
@@ -155,7 +158,10 @@ async fn run(
             }
         }
         let observation = async {
-            if let Some(rejected) = reject_pending(&shared, &client, &native, submission).await? {
+            if shared.attachment.is_none()
+                && let Some(rejected) =
+                    reject_pending(&shared, &client, &native, submission).await?
+            {
                 // Retain a confirmed control receipt even if the following snapshot fails.
                 denial = Some(rejected);
             }

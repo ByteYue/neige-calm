@@ -130,10 +130,12 @@ impl PlannerHarnessStartAdapter {
         }
     }
 
-    fn opencode_wiring(&self) -> OpenCodePlannerWiring {
+    fn opencode_wiring(&self, events: crate::event::EventBus) -> OpenCodePlannerWiring {
         OpenCodePlannerWiring {
             host: self.opencode_host.clone(),
             plugin: self.plugin.clone(),
+            events,
+            write: WriteContext::new(self.card_role_cache.clone(), self.track_area_cache.clone()),
         }
     }
 
@@ -1458,7 +1460,7 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
         let backend: PlannerBackend = match provider {
             AgentProvider::Codex => self.daemon.clone().into(),
             AgentProvider::OpenCode => PlannerBackend::OpenCode(
-                self.opencode_wiring()
+                self.opencode_wiring(ctx.events.clone())
                     .open_session(
                         self.repo.clone(),
                         self.daemon.clone(),

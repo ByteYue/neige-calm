@@ -18,6 +18,8 @@ pub enum WorkerSessionKind {
     CodexCard,
     #[serde(rename = "claude")]
     ClaudeCard,
+    #[serde(rename = "opencode")]
+    OpenCodeCard,
     #[serde(rename = "shared-spec")]
     SharedPlanner,
 }

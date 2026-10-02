@@ -6,6 +6,9 @@
 # #1913 bounded exception: spec/fe 59 -> 63 comes solely from the pinned
 # temporal-spec transitive dependency in fe/package-lock.json (dependency key,
 # package path and two archive URL tokens). No retired application concept is added.
+# Issue #4 bounded exception: harness_item/crates 261 -> 264 reuses the existing
+# harness_items table, Repo::harness_item_insert and Event::HarnessItemAdded for
+# imported OpenCode history. No new transcript vocabulary or parallel protocol.
 # Patterns are boundary-anchored per case; the two words' uppercase branches are deliberately
 # asymmetric (`COVE[A-Z]+` is English, `WAVE[A-Z]+` is oracle ids) and `.spec.ts` is excluded by lookahead.
 

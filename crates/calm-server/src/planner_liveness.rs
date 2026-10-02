@@ -23,8 +23,10 @@ impl WorkerProvider for OpenCodePlannerProvider {
         session: &WorkerSession,
         ctx: &SpawnCtx,
     ) -> Result<Liveness, CoreError> {
-        if session.contract == WorkerContract::Planner
-            && let Some(handle) = self.0.get(&session.id.0)
+        if matches!(
+            session.contract,
+            WorkerContract::Planner | WorkerContract::Executor
+        ) && let Some(handle) = self.0.get(&session.id.0)
             && handle.provider() == AgentProvider::OpenCode
         {
             // A registered harness owns pending input even before its native process starts.

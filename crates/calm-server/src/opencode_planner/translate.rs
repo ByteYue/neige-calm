@@ -3,6 +3,7 @@ use crate::codex_appserver::Notification;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub(crate) struct TurnProjection {
     pub(crate) thread: String,
     pub(crate) turn: String,
@@ -58,6 +59,27 @@ impl TurnProjection {
             user_emitted: false,
             mcp_names,
         })
+    }
+    pub(crate) fn new_external(
+        thread: String,
+        turn: String,
+        message: String,
+        client_id: String,
+        original_text: Vec<String>,
+        cwd: String,
+        prior_tokens: i64,
+    ) -> crate::error::Result<Self> {
+        let mut projection = Self::new(
+            thread,
+            turn,
+            message,
+            client_id,
+            original_text,
+            cwd,
+            prior_tokens,
+        )?;
+        projection.mcp_names.clear();
+        Ok(projection)
     }
     pub(crate) fn started(&self) -> Notification {
         Notification::TurnStarted {
@@ -122,7 +144,8 @@ impl TurnProjection {
                     let at = part["time"]["end"]
                         .as_i64()
                         .or(part["time"]["start"].as_i64())
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                        .or(info["time"]["created"].as_i64())
+                        .unwrap_or(0);
                     let (item, finished) = match part["type"].as_str() {
                         Some("text") => (
                             json!({"id":id,"type":"agentMessage","text":part["text"]}),

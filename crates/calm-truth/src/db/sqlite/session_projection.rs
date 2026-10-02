@@ -776,7 +776,8 @@ impl WorkerSessionProjectionRepo for SqlxRepo {
                            AND json_extract(c.payload, '$.harness_profile') = 'assistant')
                  ))
                  -- #1791 — a Claude Planner: only the Planner contract on a Planner card.
-                 OR (ws.provider IN ('claude', 'opencode') AND ws.contract = 'planner' AND c.role = 'planner'))
+                 OR (ws.provider IN ('claude', 'opencode') AND ws.contract = 'planner' AND c.role = 'planner')
+                 OR (ws.provider = 'opencode' AND ws.contract = 'executor' AND c.kind = 'codex' AND c.role = 'worker' AND json_extract(c.payload, '$.harness_profile') = 'plain_chat' AND json_extract(c.payload, '$.opencode_attachment.session_id') = ws.agent_session_id))
                  AND ws.state IN ('starting','running','idle','turn_pending')
                  AND ws.thread_id IS NOT NULL
                  AND ws.handle_state_json IS NOT NULL

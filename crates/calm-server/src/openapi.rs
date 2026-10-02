@@ -63,6 +63,8 @@ use utoipa::OpenApi;
         description = "Wire-format contract between calm-server (Rust) and web-calm (TS). Source of truth for generated TypeScript types.",
     ),
     paths(
+        crate::routes::opencode_conversations::list_connections,
+        crate::routes::opencode_conversations::attach_conversation,
         crate::builtin_plugins::calendar::routes::list,
         crate::builtin_plugins::calendar::routes::create,
         crate::builtin_plugins::calendar::routes::update,
@@ -180,6 +182,11 @@ use utoipa::OpenApi;
         crate::routes::version::get_version,
     ),
     components(schemas(
+        crate::routes::opencode_conversations::AttachOpenCodeBody,
+        crate::opencode_planner::attachment::ConnectionsResponse,
+        crate::opencode_planner::attachment::ConnectionSummary,
+        crate::opencode_planner::attachment::AttachedSession,
+        crate::opencode_planner::attachment::AttachedStatus,
         crate::mobile_access::MobileStatus,
         calm_types::mobile_access::MobileProvider,
         calm_types::tailnet::TailnetStatus,
