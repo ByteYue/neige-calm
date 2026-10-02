@@ -59,6 +59,11 @@ supplies a native session ID; it never supplies a URL, password or profile path.
 The server verifies the native identity, directory and supported version before
 binding it. Credentials remain in the operator's configuration.
 
+The native directory must be outside Neige's managed workspace root and its
+owned track worktrees and workspace leases. Those directories can be removed
+when Neige releases their owners. Multiple connections to the same directory
+and native session cannot create separate Neige controllers.
+
 The attachment uses the existing no-MCP PlainChat role. It does not replace the
 native agent, system instructions, model, permissions or MCP configuration with
 Neige Planner policy. Its native directory is shown explicitly and can differ
