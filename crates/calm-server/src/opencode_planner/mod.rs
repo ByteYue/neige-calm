@@ -9,6 +9,7 @@ mod driver;
 mod history;
 pub mod lifecycle;
 pub mod models;
+mod native_return;
 mod process;
 pub mod session;
 mod session_connection;

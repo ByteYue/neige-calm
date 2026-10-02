@@ -15,6 +15,7 @@ pub(crate) struct TurnProjection {
     original_text: Vec<String>,
     user_emitted: bool,
     mcp_names: HashMap<String, String>,
+    pub(crate) return_anchor: Option<super::native_return::ReturnAnchor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,7 @@ impl TurnProjection {
             original_text,
             user_emitted: false,
             mcp_names,
+            return_anchor: None,
         })
     }
     pub(crate) fn new_external(
@@ -92,7 +94,12 @@ impl TurnProjection {
             Outcome::Failed(message) => json!({"message":message}),
             _ => Value::Null,
         };
-        json!({"id":self.turn,"status":outcome.status(),"error":error})
+        let mut value = json!({"id":self.turn,"status":outcome.status(),"error":error});
+        if let Some(anchor) = &self.return_anchor {
+            value["nativeReturnAnchor"] =
+                serde_json::to_value(anchor).expect("native return anchor");
+        }
+        value
     }
     pub(crate) fn completed(&self, outcome: &Outcome) -> Notification {
         Notification::TurnCompleted {
@@ -105,8 +112,7 @@ impl TurnProjection {
         for message in messages {
             let info = &message["info"];
             let ours = info["id"].as_str() == Some(&self.message);
-            let assistant = info["role"].as_str() == Some("assistant")
-                && info["parentID"].as_str() == Some(&self.message);
+            let assistant = self.is_assistant(message);
             if !ours && !assistant {
                 continue;
             }
@@ -224,13 +230,7 @@ impl TurnProjection {
         (item, finished)
     }
     pub(crate) fn outcome(&self, messages: &[Value]) -> Option<Outcome> {
-        let assistants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| {
-                m["info"]["role"].as_str() == Some("assistant")
-                    && m["info"]["parentID"].as_str() == Some(&self.message)
-            })
-            .collect();
+        let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();
         if assistants.iter().any(|m| {
             m["parts"].as_array().is_some_and(|parts| {
                 parts.iter().any(|p| {
@@ -297,13 +297,7 @@ impl TurnProjection {
         {
             return None;
         }
-        let assistants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| {
-                m["info"]["role"].as_str() == Some("assistant")
-                    && m["info"]["parentID"].as_str() == Some(&self.message)
-            })
-            .collect();
+        let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();
         let latest = assistants.iter().max_by_key(|m| {
             (
                 m["info"]["time"]["created"].as_i64().unwrap_or(0),
@@ -330,14 +324,15 @@ impl TurnProjection {
         tool_error.then(|| Outcome::Failed(reason.into()))
     }
 
+    fn is_assistant(&self, message: &Value) -> bool {
+        message["info"]["role"].as_str() == Some("assistant")
+            && (message["info"]["parentID"].as_str() == Some(&self.message)
+                || self.return_anchor.as_ref().is_some_and(|anchor| {
+                    message["info"]["id"].as_str() == Some(&anchor.assistant_id)
+                }))
+    }
     pub(crate) fn usage(&self, messages: &[Value]) -> Notification {
-        let assistants: Vec<&Value> = messages
-            .iter()
-            .filter(|m| {
-                m["info"]["role"].as_str() == Some("assistant")
-                    && m["info"]["parentID"].as_str() == Some(&self.message)
-            })
-            .collect();
+        let assistants: Vec<&Value> = messages.iter().filter(|m| self.is_assistant(m)).collect();
         let total = assistants
             .iter()
             .fold(0i64, |sum, m| sum.saturating_add(message_tokens(m)));

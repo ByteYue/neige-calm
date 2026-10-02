@@ -34,6 +34,8 @@ struct NativeState {
     lost: bool,
     hold: bool,
     invalid_cursor: bool,
+    reply: Option<returns_tests::Reply>,
+    release: Arc<tokio::sync::Notify>,
     version: &'static str,
     requests: Vec<Value>,
 }
@@ -75,6 +77,8 @@ impl Fixture {
             lost: false,
             hold: false,
             invalid_cursor: false,
+            reply: None,
+            release: Arc::new(tokio::sync::Notify::new()),
             version: "1.18.34",
             requests: vec![],
         })));
@@ -129,6 +133,12 @@ async fn native_request(State(native): State<Native>, request: Request) -> Respo
         url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
             .into_owned()
             .collect();
+    if method == "POST" && path == format!("/session/{SESSION}/message") {
+        let reply = native.0.lock().unwrap().reply;
+        if let Some(reply) = reply {
+            return returns_tests::reply(native, reply, input, authorized, query).await;
+        }
+    }
     let mut state = native.0.lock().unwrap();
     state.requests.push(
         json!({"method":method,"path":path,"input":input,"directory":query.get("directory")}),
@@ -776,3 +786,5 @@ mod registry_tests;
 mod capability_tests;
 #[path = "support/opencode_existing_transcript.rs"]
 mod transcript_assertions;
+#[path = "support/opencode_existing_returns.rs"]
+mod returns_tests;

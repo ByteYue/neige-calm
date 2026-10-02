@@ -129,37 +129,47 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
     if shared.state().shutting_down {
         return Ok(());
     }
-    let active = shared
-        .state()
-        .active
-        .as_ref()
-        .map(|active| active.submission.native_message_id.clone());
+    let receipts: Vec<(String, String, String, Option<String>)> = sqlx::query_as(concat!(
+        "SELECT native_message_id,id,client_id,outcome_json FROM opencode_submissions ",
+        "WHERE scope_id=?1 AND native_session_id=?2 AND card_id=?3"
+    ))
+    .bind(&connection.scope_id)
+    .bind(&binding.session_id)
+    .bind(&shared.params.card_id)
+    .fetch_all(&shared.pool()?)
+    .await?;
+    let mut anchors = HashMap::new();
+    let mut internal_users = HashSet::new();
+    for (native_message, _, _, outcome) in &receipts {
+        if let Some(outcome) = outcome {
+            let outcome: Value = serde_json::from_str(outcome)?;
+            if let Some(anchor) = outcome.get("nativeReturnAnchor") {
+                let anchor: super::native_return::ReturnAnchor =
+                    serde_json::from_value(anchor.clone())?;
+                internal_users.extend(anchor.internal_user_ids.iter().cloned());
+                anchors.insert(native_message.clone(), anchor);
+            }
+        }
+    }
     for user in messages
         .iter()
         .filter(|message| message["info"]["role"].as_str() == Some("user"))
     {
         let id = user["info"]["id"].as_str().expect("validated message id");
-        // The submission observer is authoritative for its own currently admitted turn.
-        if active.as_deref() == Some(id) {
+        if internal_users.contains(id) {
             continue;
         }
         if !projections.contains_key(id) {
-            let receipt: Option<(String, String)> = sqlx::query_as(concat!(
-                "SELECT id,client_id FROM opencode_submissions WHERE scope_id=?1 ",
-                "AND native_session_id=?2 AND native_message_id=?3 AND card_id=?4"
-            ))
-            .bind(&connection.scope_id)
-            .bind(&binding.session_id)
-            .bind(id)
-            .bind(&shared.params.card_id)
-            .fetch_optional(&shared.pool()?)
-            .await?;
-            let (turn, client) = receipt.unwrap_or_else(|| {
-                (
-                    format!("opencode-history-{id}"),
-                    format!("opencode-history-{id}"),
-                )
-            });
+            let (turn, client) = receipts
+                .iter()
+                .find(|(native, _, _, _)| native == id)
+                .map(|(_, turn, client, _)| (turn.clone(), client.clone()))
+                .unwrap_or_else(|| {
+                    (
+                        format!("opencode-history-{id}"),
+                        format!("opencode-history-{id}"),
+                    )
+                });
             let original = user["parts"]
                 .as_array()
                 .expect("validated parts")
@@ -181,6 +191,7 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
             );
         }
         let mut candidate = projections.get(id).expect("history projection").clone();
+        candidate.return_anchor = anchors.get(id).cloned();
         for notification in candidate.snapshot(&messages) {
             if shared.state().shutting_down {
                 return Ok(());
