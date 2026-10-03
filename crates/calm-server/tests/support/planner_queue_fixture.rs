@@ -14,8 +14,8 @@ use calm_server::db::sqlite::{
 };
 use calm_server::event::EventBus;
 use calm_server::harness::{
-    HarnessConfig, HarnessPhaseTag, HarnessSnapshot, PlannerHarness, PlannerHarnessParams,
-    QueueEntry,
+    HarnessConfig, HarnessPhaseTag, HarnessRegistry, HarnessSnapshot, PlannerHarness,
+    PlannerHarnessParams, QueueEntry,
 };
 use calm_server::model::{Card, CardRole, NewArea, NewCard, NewTrack, new_id};
 use calm_server::plugin_host::{PluginHost, PluginRegistry};
@@ -45,6 +45,8 @@ async fn insert_owner_principal(
 pub struct Boot {
     pub app: axum::Router,
     pub harness: PlannerHarness,
+    /// The registry `harness` is installed in, the app's own.
+    pub registry: HarnessRegistry,
     pub planner_card: Card,
     pub worker_session_id: String,
     pub daemon: Arc<SharedCodexAppServer>,
@@ -251,6 +253,8 @@ async fn boot_inner(
         card_role_cache: role_cache,
         track_area_cache,
         backend: daemon.into(),
+        // The registry the harness is installed in, as production wires it: `GET harness/live` reads it.
+        live_replies: state.harness.live_replies().clone(),
         config: HarnessConfig {
             debounce_min_idle: Duration::from_secs(60),
             debounce_max_wait: Duration::from_secs(60),
@@ -269,6 +273,7 @@ async fn boot_inner(
     state
         .harness
         .insert(worker_session_id.clone(), harness.clone());
+    let registry = state.harness.clone();
 
     let app = routes::router()
         .layer(axum::middleware::from_fn(
@@ -282,6 +287,7 @@ async fn boot_inner(
     Boot {
         app,
         harness,
+        registry,
         planner_card,
         worker_session_id,
         daemon: daemon_handle,

@@ -1,6 +1,7 @@
 //! The Codex arm's [`PlannerEvent`]s: the app-server's daemon-wide notifications, mapped one for
-//! one (#1981 S4). Every notification maps to an event, so the run loop's thread filter and
-//! snapshot write see exactly the frames they saw before the mapping existed.
+//! one (#1981 S4). Every notification maps to an event, so the run loop's thread filter sees
+//! exactly the frames it saw before the mapping existed. The snapshot write sees them too, except
+//! a reply delta (#1923), which the run loop keeps in memory only.
 
 use serde_json::Value;
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -56,7 +57,8 @@ pub(crate) fn planner_event(notification: Notification) -> PlannerEvent {
                 phase: ItemPhase::Completed,
                 params,
             },
-            // Deltas and every other `item/*` frame are not stored.
+            "item/agentMessage/delta" => reply_delta(&params),
+            // Every other delta and `item/*` frame is not stored.
             _ => PlannerEventKind::Ignored,
         },
         Notification::Other { method, params } => match method.as_str() {
@@ -76,4 +78,26 @@ pub(crate) fn planner_event(notification: Notification) -> PlannerEvent {
         },
     };
     PlannerEvent { thread_id, kind }
+}
+
+/// `item/agentMessage/delta` carries `threadId`, `turnId`, `itemId` and `delta`, all required by
+/// the app-server schema; a frame missing one is not a delta the run loop can place.
+fn reply_delta(params: &Value) -> PlannerEventKind {
+    let field = |name: &str| {
+        params
+            .get(name)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    match (field("turnId"), field("itemId"), field("delta")) {
+        (Some(turn_id), Some(item_id), Some(delta)) => PlannerEventKind::ReplyDelta {
+            turn_id,
+            item_id,
+            delta,
+        },
+        _ => {
+            tracing::debug!("planner harness ignoring item/agentMessage/delta without its fields");
+            PlannerEventKind::Ignored
+        }
+    }
 }
