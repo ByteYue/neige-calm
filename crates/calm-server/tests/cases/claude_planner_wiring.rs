@@ -243,6 +243,62 @@ async fn without_the_flag_create_is_refused_and_a_recovered_harness_refuses() {
     assert!(stack.outcomes(&card_id).await.is_empty());
 }
 
+/// #1981 S1: a pinned CLI that reports another version is Claude's refusal, so the reader is told
+/// the reason now rather than a generic wait after the silence budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_version_mismatch_tells_the_reader_why_nothing_is_sent() {
+    let root = Root::new("exit");
+    let stack = Stack::boot(&root).await;
+    let (_, card_id) = stack.create_claude_track().await;
+    let runtime = stack.runtime(&card_id).await;
+    std::fs::write(root.fake_dir().join("version"), "2.1.279").expect("version");
+
+    let harness = stack.harness(&runtime.id);
+    let (status, _) = stack.post_input(&card_id, "hello?").await;
+    assert_eq!(status, StatusCode::OK, "the message is queued");
+    let mut block = None;
+    for _ in 0..200 {
+        block = harness.issuance_block().await;
+        if block.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let block = block.expect("the reader is told why nothing is sent");
+    assert!(block.starts_with("claude will not start a turn"), "{block}");
+    assert!(
+        block.contains(r#"--version reports "2.1.279", the config pins "2.1.280""#),
+        "{block}"
+    );
+    assert!(stack.outcomes(&card_id).await.is_empty());
+    stack.shutdown().await;
+}
+
+/// #1981 S1: a `--version` that gave no answer establishes no mismatch, so the failed attempt
+/// stays transient: the reader is not told, and the retry keeps its short pace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_version_check_without_an_answer_stays_transient() {
+    let root = Root::new("exit");
+    let stack = Stack::boot(&root).await;
+    let (_, card_id) = stack.create_claude_track().await;
+    let runtime = stack.runtime(&card_id).await;
+    root.remove_fake("claude");
+
+    let harness = stack.harness(&runtime.id);
+    let (status, _) = stack.post_input(&card_id, "hello?").await;
+    assert_eq!(status, StatusCode::OK, "the message is queued");
+    for _ in 0..200 {
+        if harness.refused_issuances_for_test() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(harness.refused_issuances_for_test() > 0, "the turn failed");
+    // A refusal sets the block before the attempt is counted.
+    assert_eq!(harness.issuance_block().await, None);
+    stack.shutdown().await;
+}
+
 /// #1830 T3: on an attached track the Claude Planner's turn runs in the track worktree, and its
 /// Edit/Write rules are confined to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
