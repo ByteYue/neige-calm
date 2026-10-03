@@ -255,7 +255,7 @@ async fn an_install_race_loser_shuts_down_promptly_and_signals_nothing() {
         .claude_planner_wiring()
         .open_session(
             repo.clone(),
-            stack.state.shared_codex_appserver.clone(),
+            stack.state.thread_seals().clone(),
             ClaudePlannerRow {
                 worker_session_id: &runtime.id,
                 card_id: &card_id,
@@ -282,7 +282,7 @@ async fn an_install_race_loser_shuts_down_promptly_and_signals_nothing() {
         events: calm_server::event::EventBus::new(),
         card_role_cache: stack.state.card_role_cache.clone(),
         track_area_cache: stack.state.track_area_cache.clone(),
-        backend: PlannerBackend::Claude(session),
+        backend: PlannerBackend::claude_for_test(session),
         config: HarnessConfig::default(),
         snapshot,
     });
