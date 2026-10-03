@@ -1,5 +1,10 @@
 # Claude Code as a second Planner backend (#1791) — design v3
 
+> **#1981 S4 (2026-10-04)**: the run loop's input is a neige-owned `PlannerEvent`, received from
+> `PlannerBackend::subscribe_events`; the Codex arm maps its `Notification`s in
+> `harness/codex_events.rs` and the Claude session builds events directly. Passages below that
+> describe one Codex-shaped `Notification` stream are marked superseded.
+>
 > **#1893 S4 (2026-10-01)**: the isolated Codex backend and its `--isolated-codex-config` are
 > deleted; the precedent cited below is history.
 >
@@ -44,7 +49,7 @@ beyond extracting the seam; worker cards; Claude for PlainChat / Assistant; stee
 | # | Decision | Round | Where |
 |---|---|---|---|
 | D1 | Seam = `enum PlannerBackend { Codex(..), Claude(..) }` for the harness; code without a harness uses the Codex daemon as today plus one free function `claude_planner::stop(worker_session_id)` | v1; narrowed r2 (no process-wide registry) | §4 |
-| D2 | The Claude backend emits **Codex-shaped `Notification`s**; `on_notification`, persistence, FE unchanged | v1 | §4.3 |
+| D2 | The Claude backend emits **Codex-shaped `Notification`s**; `on_notification`, persistence, FE unchanged (superseded by #1981 S4: both providers emit neige-owned `PlannerEvent`s; persistence and FE still unchanged) | v1 | §4.3 |
 | D3 | Provider = existing `AgentProvider`, stored as a required, server-owned, sticky card key `planner_provider` (migration backfill); required at the Planner construction boundary; persisted to the session row from the mint input | v1; fixed r1; typed r2 | §4.4 |
 | D4 | One `claude -p` process per turn; ≤ 1 per session; resident keepalive only if measured latency matters | orchestrator r1 | §5.1 |
 | D5 | Permissions are static CLI rules (`--permission-prompts none` + `--allowedTools`) | v1 | §5.3 |
@@ -79,7 +84,7 @@ beyond extracting the seam; worker cards; Claude for PlainChat / Assistant; stee
 
 ## 2. Evidence summary
 
-Companion §E1–§E3. Shaping facts: the harness consumes one Codex-shaped stream and persists the turn id
+Companion §E1–§E3. Shaping facts: the harness consumes one Codex-shaped stream (one `PlannerEvent` stream since #1981 S4) and persists the turn id
 before handling items (H4–H10, H22); session provider comes from the kind only (S12–S14); seals are a
 thread-keyed set outliving harnesses (S21, S31); production restarts signal only calm-server (S22);
 Claude's Bash runs each command in its own session and survives a `claude` SIGKILL (P-K); `-p` silently
@@ -104,7 +109,7 @@ ignores invalid settings and `system/init` does not report the sandbox.
 
 | # | Call | Site | Decision |
 |---|---|---|---|
-| 1–6 | `subscribe_notifications`, `turn_start`, `turn_steer`, `turn_interrupt`, `interrupt_active_turn`, `active_turn_id_for_thread` | run_loop `:404`, `:271`, `:1340`, `:704`/`:3640`, `:691`, `:690`/`:3601` | `PlannerBackend` |
+| 1–6 | `subscribe_notifications` (`subscribe_events` since #1981 S4), `turn_start`, `turn_steer`, `turn_interrupt`, `interrupt_active_turn`, `active_turn_id_for_thread` | run_loop `:404`, `:271`, `:1340`, `:704`/`:3640`, `:691`, `:690`/`:3601` | `PlannerBackend` |
 | 7 | seals (`seal_turn_thread_for_deletion`, `DeletionThreadSeals`, unseal on rollback) | run_loop `:658-679`; registry `:203-218`; deletion plans (S21) | **unchanged**: Claude thread ids are fresh UUIDs, so the same thread-keyed set works; the Claude session checks `turn_thread_is_sealed(thread)` before every spawn |
 | 8 | `turn_thread_is_sealed` in recovery | harness/mod `:158`, `:424` | unchanged |
 | 9 | `config_read`, `model_list` in resolution | run_loop `:2472`, `:2632` | Codex-only; the Claude arm reads the card at issue (a type check only) and asks neither Codex nor a catalog; the CLI judges the model (§5.8, #1810, #1822 6′) |
@@ -131,7 +136,7 @@ PlainChat and Assistant stay Codex everywhere.
 #[derive(Clone)]
 pub enum PlannerBackend { Codex(Arc<SharedCodexAppServer>), Claude(Arc<ClaudePlannerSession>) }
 impl PlannerBackend {
-    pub fn subscribe_notifications(&self) -> broadcast::Receiver<Notification>;
+    pub fn subscribe_events(&self) -> PlannerEvents;              // #1981 S4; was subscribe_notifications
     pub async fn turn_start(&self, thread: &str, items: Vec<InputItem>,
         selection: &TurnModelSelection, client_id: &str) -> Result<String>;
     pub fn supports_steer(&self) -> bool;                          // Claude: false
@@ -155,10 +160,13 @@ Codex arm only); `AgentProvider` already exists (`crates/calm-types/src/runtime.
 ### 4.3 Notification stream (D2)
 
 A neutral event enum would rewrite `on_notification` (~400 lines, H5–H9) and the FE converters (M10).
+(Superseded by #1981 S4: `on_notification` now takes the neutral `PlannerEvent`, whose item bodies and
+turn records stay the stored JSON, so the FE converters are unchanged.)
 Synthesis is honest: stored rows were always "the item the transcript renders" (Codex rows are filtered,
 H9; projection rows are kernel-written in the same shape, H8), every row's provider is recoverable via
 `worker_session_id`, and Claude keeps its raw record in its own session file. The Claude backend emits
-only `TurnStarted`, `TurnCompleted`, `Item{item/started|item/completed}`, `Other{thread/tokenUsage/updated}`.
+only `TurnStarted`, `TurnCompleted`, `Item` (started or completed) and `TokenUsage`; since #1981 S4 these
+are the run loop's neige-owned `PlannerEvent`s, not Codex `Notification`s.
 It writes two things itself: the durable turn outcome (`turn_outcome::record`, idempotent, H10) and
 `agent_session_id` through the existing attribution bind (`crates/calm-truth/src/db/sqlite/session_mirror.rs:420-440`).
 
@@ -595,7 +603,7 @@ capability (listed in `system/init`, unprobed).
 
 ### 5.10 Token usage
 
-On `ResultSuccess` or `ResultError` with a non-empty `usage.iterations`: emit `thread/tokenUsage/updated` `{threadId,
+On `ResultSuccess` or `ResultError` with a non-empty `usage.iterations`: emit a `TokenUsage` event `{
 tokenUsage:{last:{totalTokens: input+cache_read+cache_creation+output of the last iteration},
 total:{totalTokens: previous total + this turn}, modelContextWindow: modelUsage[init.model].contextWindow}}`;
 otherwise emit nothing (P-D, P-F3), keeping the previous reading (H11). The total is seeded from the
@@ -603,14 +611,14 @@ snapshot. KNOWN GAP: the 12k baseline is Codex-derived (Claude's fixed prefix ~1
 
 ## 6. Mapping
 
-### 6.1 Claude record → notification → stored item
+### 6.1 Claude record → event → stored item
 
 Envelope `{threadId, turnId, item, startedAtMs | completedAtMs}`. Ids: `tool_use.id` for tools,
 `<record uuid>:<block index>` for text/thinking.
 
-| Claude record | Notification | Stored `item` |
+| Claude record | `PlannerEvent` | Stored `item` |
 |---|---|---|
-| our line written | `TurnStarted{turn:{id}}` (handled after `turn_start` returns) | — |
+| our line written | `TurnStarted{turn_id}` (handled after `turn_start` returns) | — |
 | `UserReplay` (our uuid) | `item/completed` `userMessage` | `{id, clientId, content:[text, localImage…]}` → upgrades the projection (H8) |
 | `UserReplay` of `<local-command-stdout>`, `UserText`, `system/*`, `stream_event`, `rate_limit_event`, `command_lifecycle`, `tool_use ToolSearch` | none | — |
 | `thinking` / `text` block | started + completed `reasoning` / `agentMessage` | `{content:[],summary:[]}` / `{text}` |
@@ -638,7 +646,7 @@ A recorded cause wins over the event that follows it; otherwise the first event 
 | — | spawn / write fails before `Ok` | **no turn** (projection deleted, batch re-buffered) | — |
 
 An interrupted turn emits `TurnCompleted` by `settle_by` (§5.1: interrupt + 22 s), inside the harness's 30 s budget; Claude never emits
-`ThreadStatusChanged`, so `Wedged(systemError)` does not apply.
+`ThreadSystemError`, so `Wedged(systemError)` does not apply.
 Tool items still open at settlement are completed as `failed` (`close_open`): Codex item statuses have no
 interrupted variant, and the turn row carries `interrupted`.
 
