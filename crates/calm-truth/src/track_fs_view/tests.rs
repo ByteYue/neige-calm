@@ -386,6 +386,18 @@ fn failed_run_markdown_retains_structured_terminal_output_evidence() {
 }
 
 #[test]
+fn run_markdown_points_at_the_worker_cards_conversation() {
+    let markdown = run_markdown(&run_with_verdict_and_events());
+    assert!(
+        markdown.contains(
+            "- Worker card: [card-worker](../cards/card-worker/.payload.json), \
+             [conversation](../cards/card-worker/conversation.md)\n"
+        ),
+        "{markdown}"
+    );
+}
+
+#[test]
 fn project_runs_real_requested_event_wins_over_dispatch_record() {
     let write = fallback_write();
     let requested = track_scoped(
@@ -734,6 +746,64 @@ fn worker_flow_markdown_renders_command_execution_statuses() {
         md.contains("- ran `dangerous command` ⊘ declined"),
         "md = {md}"
     );
+}
+
+#[test]
+fn worker_flow_markdown_renders_each_turn_end() {
+    use calm_types::worker_flow::{TurnOutcome, WorkerFlowItem};
+    let items = vec![
+        WorkerFlowItem::TurnEnded {
+            env: flow_env(0, 1),
+            outcome: TurnOutcome::Completed,
+        },
+        WorkerFlowItem::TurnEnded {
+            env: flow_env(1, 2),
+            outcome: TurnOutcome::Aborted {
+                reason: "interrupted".into(),
+            },
+        },
+        WorkerFlowItem::TurnEnded {
+            env: flow_env(2, 3),
+            outcome: TurnOutcome::Failed {
+                message: Some(
+                    "{\"status\":400,\"error\":{\"message\":\"model requires a newer Codex\"}}"
+                        .into(),
+                ),
+            },
+        },
+        WorkerFlowItem::TurnEnded {
+            env: flow_env(3, 4),
+            outcome: TurnOutcome::Failed {
+                message: Some("upstream said no\n## not a heading\n\n  - nor a list item".into()),
+            },
+        },
+        WorkerFlowItem::TurnEnded {
+            env: flow_env(4, 5),
+            outcome: TurnOutcome::Failed { message: None },
+        },
+    ];
+    let md = worker_flow_markdown(&CardId::from("card-turn-ends"), &items);
+    assert!(
+        md.contains("### Turn 1\n\n- Turn ended: completed\n"),
+        "{md}"
+    );
+    assert!(
+        md.contains("### Turn 2\n\n- Turn ended: aborted (interrupted)\n"),
+        "{md}"
+    );
+    assert!(
+        md.contains("### Turn 3\n\n- Turn ended: failed — 400: model requires a newer Codex\n"),
+        "{md}"
+    );
+    // A multi-line plain-text error stays one list line: no line of it may open a heading or item.
+    assert!(
+        md.contains(
+            "### Turn 4\n\n- Turn ended: failed — upstream said no ## not a heading - nor a list item\n"
+        ),
+        "{md}"
+    );
+    assert!(!md.contains("\n## not a heading"), "{md}");
+    assert!(md.contains("### Turn 5\n\n- Turn ended: failed\n"), "{md}");
 }
 
 #[test]
