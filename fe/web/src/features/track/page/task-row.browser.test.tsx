@@ -70,7 +70,7 @@ function tooltipAt(x: number, y: number): string | null {
 }
 
 describe('a compact desktop TASKS row', () => {
-  it('puts the bare status before the worker kind and paints no trailing status icon', async () => {
+  it('shows only the name and right-aligned worker kind', async () => {
     await browserPage.viewport(1200, 800);
     const row = renderTasks([assigned]);
     const status = row.querySelector<HTMLElement>('[data-nc-task-status-text]')!;
@@ -80,12 +80,13 @@ describe('a compact desktop TASKS row', () => {
     const kindBox = kind.getBoundingClientRect();
 
     expect(rowBox.width).toBeGreaterThan(100);
-    expect(status.innerText).toBe('running');
+    expect(status.textContent).toBe('running');
+    expect(status.closest<HTMLElement>('[data-nc-inventory-metadata]')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
     expect(status.getAttribute('data-nc-status')).toBe('running');
     expect(statusBox.width).toBeGreaterThan(0);
-    expect(statusBox.right).toBeLessThanOrEqual(kindBox.left);
+    expect(status.closest<HTMLElement>('[data-nc-inventory-metadata]')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
     expect(row.querySelector('[role="img"][data-nc-status]')).toBeNull();
-    expect(rowBox.right - kindBox.right).toBeLessThan(12);
+    expect(rowBox.right - kindBox.right).toBeCloseTo(4, 0);
   });
 
   it('keeps a pending reason out of the row copy and exposes it on hover', async () => {
@@ -101,25 +102,22 @@ describe('a compact desktop TASKS row', () => {
       },
     }]);
     const status = row.querySelector<HTMLElement>('[data-nc-task-status-text]')!;
-    const box = status.getBoundingClientRect();
-
-    expect(status.innerText).toBe('pending');
-    expect(row.innerText).not.toContain(message);
+    expect(row.querySelector<HTMLElement>('[data-nc-inventory-metadata]')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
     expect(status.title).toBe(`pending — ${message}`);
-    expect(tooltipAt(box.left + box.width / 2, box.top + box.height / 2))
-      .toBe(`pending — ${message}`);
     const reveal = row.querySelector<HTMLElement>('button[data-nc-row-action="reveal-block"]')!;
+    const box = reveal.getBoundingClientRect();
+    expect(tooltipAt(box.left + box.width / 2, box.top + box.height / 2)).toBe(message);
     expect(reveal.title).toBe(message);
     expect(reveal.getAttribute('aria-description')).toBe(`pending — ${message}`);
   });
 
-  it('gives the key and status to reveal, and only the worker kind to the card', async () => {
+  it('keeps name and row space as reveal, and only the worker kind as card open', async () => {
     await browserPage.viewport(1200, 800);
     const onOpenCard = vi.fn();
     const onOpenTask = vi.fn();
     const row = renderTasks([assigned], onOpenCard, onOpenTask);
     const reveal = row.querySelector<HTMLElement>('button[data-nc-row-action="reveal-block"]')!;
-    const status = row.querySelector<HTMLElement>('[data-nc-task-status-text]')!;
+    const status = reveal;
     const kind = row.querySelector<HTMLElement>('button[title^="Open the worker card"]')!;
     const statusBox = status.getBoundingClientRect();
     const kindBox = kind.getBoundingClientRect();
@@ -183,7 +181,7 @@ describe('a compact desktop TASKS row', () => {
     expect(background()).not.toBe(resting);
   });
 
-  it('renders every runtime status as text with its complete hover phrase', async () => {
+  it('preserves runtime metadata and full descriptions without displaying state labels', async () => {
     await browserPage.viewport(1200, 800);
     renderTasks([
       { ...assigned, blockId: 'b-running', key: 'running-task' },
@@ -192,10 +190,11 @@ describe('a compact desktop TASKS row', () => {
       { ...assigned, blockId: 'b-failed', key: 'failed-task', status: 'failed', statusDetail: 'command exited 1' },
     ]);
     const statuses = [...document.querySelectorAll<HTMLElement>('[data-nc-task-status-text]')];
-    expect(statuses.map((status) => status.innerText)).toEqual(['running', 'pending', 'failed', 'done']);
+    expect(statuses.map((status) => status.textContent)).toEqual(['running', 'pending', 'failed', 'done']);
     expect(statuses.map((status) => status.title)).toEqual([
       'running', 'pending — waiting for input', 'failed — command exited 1', 'done',
     ]);
+    for (const status of statuses) expect(status.closest<HTMLElement>('[data-nc-inventory-metadata]')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
     expect(document.querySelectorAll('[role="img"][data-nc-status]')).toHaveLength(0);
   });
 });

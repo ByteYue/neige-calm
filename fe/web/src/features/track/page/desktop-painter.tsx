@@ -3,15 +3,15 @@
 
 import { ListText } from '../../../ui/list-typography/public.tsx';
 import { Fragment, type ReactNode } from 'react';
+import { VisuallyHidden } from '@astryxdesign/core/VisuallyHidden';
 
 import { inventorySections, panelRowGroup, type InventoryGroupKey } from '../../../../../core/view/panel-groups.ts';
 import { InventoryGroups } from './inventory-groups.tsx';
 import { FIELD, MARKER, paintPanel } from '../../../../../core/view/panel.ts';
 import type {
-  ActionSupport, PanelRow, RowAction, RowBadge, RowModuleView, RowPainter, TrackPageView,
+  ActionSupport, PanelRow, RowAction, RowModuleView, RowPainter, TrackPageView,
 } from '../../../../../core/view/panel.ts';
 import { activityLabelOf } from '../../../../../core/domain/activity.ts';
-import { ActivityIndicator } from '../../../ui/activity-indicator/public.tsx';
 import { Icon } from '../../../ui/icon/public.tsx';
 import { PanelEmpty, PanelModule } from '../../../ui/panel-card/public.tsx';
 import styles from './page.module.css';
@@ -74,12 +74,21 @@ function wording(action: Control): Readonly<Record<string, string>> {
   };
 }
 
-function cardBadge(badge: RowBadge): ReactNode {
-  return (
-    <ListText tone="secondary" key={badge.id} className={styles.kernelOwned} {...mark(MARKER.badge, badge.id)}>
-      {badge.text}
-    </ListText>
-  );
+/** Nonvisual metadata preserves the projection and accessible descriptions; groups own visible state. */
+function rowMetadata(row: PanelRow, moduleKey: RowModuleView['key']): ReactNode {
+  return <VisuallyHidden data-nc-inventory-metadata="">
+    {row.activity !== null && <>
+      <span data-nc-activity={row.activity} aria-hidden="true" />
+      <span>{activityLabelOf(row.activity)}</span>
+    </>}
+    {row.status !== null && <span {...mark(MARKER.status, row.status.token)} title={row.status.phrase}
+      {...(moduleKey === 'tasks' ? { 'aria-hidden': true, 'data-nc-task-status-text': '' } : {})}>
+      {row.status.token}
+    </span>}
+    {row.badges.map(badge => <ListText tone="secondary" key={badge.id}
+      className={badge.struck ? styles.taskWithdrawn : undefined}
+      {...mark(MARKER.badge, badge.id)}>{badge.text}</ListText>)}
+  </VisuallyHidden>;
 }
 
 /** A Cards row. The delete is a sibling of the row button, never a child: a `<button>` inside a `<button>` is dropped by every HTML parser. */
@@ -90,20 +99,18 @@ function cardRow(row: PanelRow, deps: DesktopPainterDeps): ReactNode {
     <li key={row.id} className={styles.cardItem} {...mark(MARKER.row, row.id)}>
       <button
         type="button"
-        className={`${styles.cardRow} ${remove !== null ? styles.cardRowRemovable : ''}`}
+        className={styles.cardRow}
         {...(open === null ? {} : { ...mark(MARKER.action, 'open-card'), ...wording(open) })}
         onClick={open === null ? undefined : () => deps.onOpenCard?.(open.id)}
       >
-        <ListText tone="primary" className={styles.cardKind} {...mark(MARKER.field, FIELD.title)}>{row.title}</ListText>
-        <span className={styles.cardMeta}>
-          {row.activity !== null && <ActivityIndicator state={row.activity} spoken={activityLabelOf(row.activity)} />}
-          {row.status !== null && <ListText tone="secondary" className={styles.cardStatus}
-            {...mark(MARKER.status, row.status.token)} title={row.status.phrase}>{row.status.token}</ListText>}
-          {row.kind !== null && (
-            <ListText tone="secondary" className={styles.cardKindTag} {...mark(MARKER.field, FIELD.kind)}>{row.kind}</ListText>
-          )}
-          {row.badges.map(cardBadge)}
+        <span className={`${styles.cardName} ${remove === null ? '' : styles.cardNameRemovable}`}>
+          <ListText tone="primary" className={styles.cardKind} {...mark(MARKER.field, FIELD.title)}>{row.title}</ListText>
         </span>
+        {row.kind !== null && (
+          <ListText tone="secondary" className={styles.cardKindTag} title={row.kind}
+            {...mark(MARKER.field, FIELD.kind)}>{row.kind}</ListText>
+        )}
+        {rowMetadata(row, 'cards')}
       </button>
       {remove !== null && (
         <button
@@ -125,8 +132,6 @@ function cardRow(row: PanelRow, deps: DesktopPainterDeps): ReactNode {
 function taskRow(row: PanelRow, deps: DesktopPainterDeps): ReactNode {
   const reveal = control(row, 'reveal-block');
   const open = control(row, 'open-card');
-  const group = panelRowGroup(row, 'tasks');
-  const explanation = group === 'failed' || group === 'attention' ? row.status?.detail ?? null : null;
   const revealControl = (
     <button
       type="button"
@@ -135,28 +140,11 @@ function taskRow(row: PanelRow, deps: DesktopPainterDeps): ReactNode {
       onClick={reveal === null ? undefined : () => deps.onOpenTask?.(reveal.id)}
     >
       <ListText tone="primary" className={styles.taskKey} {...mark(MARKER.field, FIELD.title)}>{row.title}</ListText>
-      {row.badges.map((badge) => (
-        <ListText tone="secondary"
-          key={badge.id}
-          className={badge.struck ? styles.taskWithdrawn : styles.taskNote}
-          {...mark(MARKER.badge, badge.id)}
-        >{badge.text}</ListText>
-      ))}
-      {/* Spoken: the status word below is `aria-hidden` and names the run, not the verdict. */}
-      {row.activity !== null && <ActivityIndicator state={row.activity} spoken={activityLabelOf(row.activity)} />}
-      {row.status !== null && (
-        <ListText tone="secondary"
-          className={styles.taskStatusText}
-          data-nc-task-status-text=""
-          {...mark(MARKER.status, row.status.token)}
-          aria-hidden="true"
-          title={row.status.phrase}
-        >{row.status.token}</ListText>
-      )}
+      {rowMetadata(row, 'tasks')}
     </button>
   );
   return (
-    <li key={row.id} className={`${styles.taskRow} ${explanation === null ? '' : styles.taskRowDetailed}`} {...mark(MARKER.row, row.id)}>
+    <li key={row.id} className={styles.taskRow} {...mark(MARKER.row, row.id)}>
       {revealControl}
       {/* `title` describes the destination without touching the accessible name, which stays the visible word (WCAG 2.5.3). */}
       {row.kind !== null && (open === null
@@ -172,9 +160,6 @@ function taskRow(row: PanelRow, deps: DesktopPainterDeps): ReactNode {
             {row.kind}
           </ListText>
         ))}
-      {explanation !== null && (
-        <ListText tone="secondary" className={styles.taskReason} aria-hidden="true">{explanation}</ListText>
-      )}
     </li>
   );
 }
