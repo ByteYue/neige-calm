@@ -23,3 +23,8 @@
 fixture 方法论有固有边界：同源产物互比（两侧可能一起陈旧）、CI job 是否真正被 required check 强制、开放世界的目录名与扩展名全集，以及 mutation 的 `expected_red` 是否真正守住业务契约，都不能靠 fixture 证伪，必须由独立 oracle、人工语义审查或真实生成器执行承担。
 
 模块级静态数组必须运行时冻结；`as const` 只提供类型只读性，不改变运行时对象。应写成 `Object.freeze(['a', 'b'] as const)`。模块状态规则的 pure-factory 白名单仅接受经正反 fixture 证明不会产生可变模块对象图的具体 API；扩充时须在 `tools/architecture/no-module-runtime-state.mjs` 登记 import 来源与导出名，并补误报回归及反向变异。
+
+## 设计系统与 token
+
+遵循 [前端设计系统](../docs/frontend-design-system.md)，使用现有语义 token，
+优先复用 Astryx 和本仓库 UI 原语。等值 token 替换保持现有视觉。
