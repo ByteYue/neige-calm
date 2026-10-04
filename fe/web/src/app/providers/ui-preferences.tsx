@@ -41,6 +41,11 @@ export function createUiPreferences(storage?: UiPreferenceStorage) {
       return createStorageKey('ui', 'receipts',
         encodeURIComponent(receiptNamespace[0]), encodeURIComponent(receiptNamespace[1]), encodeURIComponent(key));
     }
+    /* A per-browser display choice outlives a kernel restart the same way: origin and user, not the boot. */
+    if (receiptNamespace !== null && key.startsWith('browser:')) {
+      return createStorageKey('ui', 'browser',
+        encodeURIComponent(receiptNamespace[0]), encodeURIComponent(receiptNamespace[1]), encodeURIComponent(key));
+    }
     return createStorageKey('ui', 'recovery', encodeURIComponent(recoveryScope), encodeURIComponent(key));
   };
   const read = (key: string): Preference => {
@@ -131,6 +136,11 @@ export function createUiPreferences(storage?: UiPreferenceStorage) {
       return typeof value === 'boolean' ? value : null;
     },
     setRailCollapsed: (value: boolean) => write('rail-collapsed', value, true),
+    /** The desktop drawer's expanded reading width; one choice for every drawer, off by default. */
+    drawerExpanded(): boolean {
+      return read('browser:drawer-expanded') === true;
+    },
+    setDrawerExpanded: (value: boolean) => write('browser:drawer-expanded', value, true),
     /** A report preview block's device choice (#1780), as the block serialized it; per Track and block key. */
     previewViewport(trackId: string, key: string): string | null {
       const value = read(`preview-viewport:${trackId}:${key}`);
@@ -168,6 +178,12 @@ export function useUiPreferences(): UiPreferences {
   const preferences = context ?? local;
   useSyncExternalStore(preferences.subscribe, preferences.getSnapshot, preferences.getSnapshot);
   return preferences;
+}
+
+/** The drawer's reading-width choice, remembered per browser (in memory when storage is unavailable). */
+export function useDrawerReadingWidth() {
+  const preferences = useUiPreferences();
+  return { expanded: preferences.drawerExpanded(), onExpandedChange: preferences.setDrawerExpanded };
 }
 
 type OpenTarget = Readonly<{ kind: 'row'; id: string } | { kind: 'draft' }>;

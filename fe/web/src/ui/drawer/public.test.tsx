@@ -49,7 +49,7 @@ describe('Drawer', () => {
     expect(screen.getByText('the transcript')).toBeTruthy();
     /* The last frame's title is held on the container's accessible name, and `getByRole` only matches the retained name. */
     expect(screen.getByRole('complementary', { name: 'Why the resolver drops a hop' })).toBeTruthy();
-    expect(screen.queryByRole('heading')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Why the resolver drops a hop' })).toBeTruthy();
   });
 
   /* The page header's delete X sits 58px above this control in the same column; an X on both would mean "put away" and "destroy" a flick apart. */
@@ -87,6 +87,51 @@ describe('Drawer', () => {
       expect(screen.queryByRole('button', { name: 'Close conversation' })).toBeNull();
       back.click();
       expect(onClose).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('offers no width toggle unless the caller owns a reading width', () => {
+    open();
+    expect(screen.queryByRole('button', { name: 'Expand reading width' })).toBeNull();
+    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(false);
+  });
+
+  it('toggles the reading width in place, before the close in the header’s tab order', () => {
+    const onExpandedChange = vi.fn();
+    const drawer = (expanded: boolean) => (
+      <Drawer open title="Chat" onClose={vi.fn()} readingWidth={{ expanded, onExpandedChange }}><p>body</p></Drawer>
+    );
+    const { rerender } = render(drawer(false));
+    const toggle = screen.getByRole('button', { name: 'Expand reading width' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(false);
+    const close = screen.getByRole('button', { name: 'Close conversation' });
+    expect(toggle.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(onExpandedChange).toHaveBeenCalledWith(true);
+
+    rerender(drawer(true));
+    expect(screen.getByRole('button', { name: 'Restore width' })).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(true);
+    fireEvent.click(toggle);
+    expect(onExpandedChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps a compact drawer at full width whatever the reading-width choice', () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    try {
+      render(<Drawer open title="Chat" onClose={vi.fn()} readingWidth={{ expanded: true, onExpandedChange: vi.fn() }}><p>body</p></Drawer>);
+      expect(screen.queryByRole('button', { name: 'Restore width' })).toBeNull();
+      expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
