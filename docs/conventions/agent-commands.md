@@ -52,7 +52,7 @@ model sees    := "mcp__" server_key "__" tool name     e.g. mcp__neige__neige_tr
 
 ## 3. Verb vocabulary (closed)
 
-Effect classes: **V** view (no state change, no anchor), **AR** anchored read, **W** write,
+Effect classes: **V** view (no state change, no anchor; access metadata excepted, see the last decision below), **AR** anchored read, **W** write,
 **LC** lifecycle, **M** maintenance.
 
 | Verb | Class | Meaning | Precedent |
@@ -112,6 +112,8 @@ Decisions, one line each:
   `reject`, `publish`), each with one meaning.
 - **`done` / `fail` replace the two Worker compounds** so every action is one word. The Worker
   claims (`task_done`, `task_fail`); the Planner decides (`task_accept`, `task_reject`).
+- **A view may stamp access metadata** (e.g. a last-seen time) and refresh derived projections onto
+  the caller's own Track; it never changes authority or domain state (#2104).
 
 ## 4. Parameter vocabulary
 
