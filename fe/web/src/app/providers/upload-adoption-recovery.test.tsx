@@ -3,9 +3,22 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createUnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
 import { RecoveryAccess } from '../../../../core/domain/recovery/access.ts';
-import { usePlannerAttachments } from '../../features/planner/attachments.tsx';
+import { NO_UPLOAD, usePlannerAttachments, type AttachmentStore, type UploadState } from '../../features/planner/attachments.tsx';
+import type { PlannerAttachment } from '../../../../core/api/generated/wire.ts';
+import { useState } from '../../ui/state/public.ts';
 import { createRecoveryTransports } from '../../systems/recovery/transport.ts';
 import { usePlannerMutations } from './queries.ts';
+
+
+/** The caller's per-card composer images and uploads, as the router keeps them in the conversation registry. */
+function useCardImages(cardId: string): AttachmentStore {
+  const [byCard, setByCard] = useState<Readonly<Record<string, readonly PlannerAttachment[]>>>({});
+  const [uploads, setUploads] = useState<Readonly<Record<string, UploadState>>>({});
+  return {
+    items: byCard[cardId] ?? [], update: (card, next) => setByCard((current) => ({ ...current, [card]: next(current[card] ?? []) })),
+    upload: uploads[cardId] ?? NO_UPLOAD, editUpload: (card, next) => setUploads((current) => ({ ...current, [card]: next(current[card] ?? NO_UPLOAD) })),
+  };
+}
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -20,13 +33,14 @@ it.each([false, true])('consumes the upload only under its admitted generation (
   let delivered = false;
   const hook = renderHook(() => {
     const mutations = usePlannerMutations(transport, 'card-a', createUnauthorizedChannel({ enqueue: task => task() }));
+    const images = useCardImages('card-a');
     return usePlannerAttachments(async (readBytes, type) => {
       const result = await mutations.uploadAttachment(readBytes, type);
       delivered = true;
       // The provider has finished. Revoke permission before the feature resumes.
       if (interrupted) access.invalidate('paused');
       return result;
-    }, 'card-a');
+    }, 'card-a', images);
   }, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
   try {
     await act(() => hook.result.current.attach(new File([new Uint8Array([1, 2, 3, 4])], 'a.png', { type: 'image/png' })));

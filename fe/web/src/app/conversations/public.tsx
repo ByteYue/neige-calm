@@ -3,6 +3,8 @@ import {
 } from 'react';
 
 import type { ModelSelection, Conversation, OptimisticConversationTurn, TranscriptEntry } from '../../../../core/domain/conversation.ts';
+import { EMPTY_COMPOSER, withRefill, type ComposerContent } from '../../../../core/domain/conversation-rewind.ts';
+import { NO_UPLOAD, type UploadState } from '../../features/planner/attachments.tsx';
 import { useReducer, useState } from '../../ui/state/public.ts';
 
 /**
@@ -95,6 +97,8 @@ export type FailedConversationSend = Readonly<{
   echo: OptimisticConversationTurn;
   message: string;
   delivery: 'rejected' | 'unknown' | 'refused';
+  /** Whether its images came from the composer, which a delivered retry then clears (a Regenerate's never did). */
+  fromComposer: boolean;
 }>;
 
 export type RememberedConversation = Readonly<{
@@ -138,6 +142,23 @@ export type ConversationRegistry = Readonly<{
   tryBeginSend: (conversationId: string) => boolean;
   finishSend: (conversationId: string, failure: FailedConversationSend | null) => void;
   clearFailedSend: (conversationId: string, echoId: string) => void;
+  /** Each existing conversation's unsent words and images, kept across closing, switching and remounts. */
+  composerOf: (conversationId: string) => ComposerContent;
+  /** Change one conversation's composer, whichever conversation is shown. */
+  editComposer: (conversationId: string, next: (current: ComposerContent) => ComposerContent) => void;
+  /** An Edit's rewind is out for this conversation (#1923). */
+  isEditing: (conversationId: string) => boolean;
+  /** One rewind per conversation at a time; false while one is out. */
+  tryBeginEdit: (conversationId: string) => boolean;
+  /** The rewind settled; a removed turn's message, if any, is added to that conversation's composer. */
+  finishEdit: (conversationId: string, removed: Readonly<{ turnId: string; refill: ComposerContent }> | null) => void;
+  /** The latest turn an Edit removed here: actions on it stay withheld while a cached transcript still shows it. */
+  removedTurnOf: (conversationId: string) => string | null;
+  /** A transcript read without that turn landed: nothing is withheld any more. */
+  forgetRemovedTurn: (conversationId: string, turnId: string) => void;
+  /** One card's image uploads, held here so a remount or another route sees an upload still in flight. */
+  uploadOf: (cardId: string) => UploadState;
+  editUpload: (cardId: string, next: (current: UploadState) => UploadState) => void;
   /* Deliberately no "open the planner conversation of track W" slot: the track being left is still
        mounted when a create states it, so that intent travels in the history entry instead. */
 }>;
@@ -191,6 +212,57 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
       setFailedSends((current) => ({ ...current, [conversationId]: failure }));
     }
   }, []);
+  const [composers, setComposers] = useState<Readonly<Record<string, ComposerContent>>>({});
+  const editComposer = useCallback((conversationId: string, next: (current: ComposerContent) => ComposerContent) => {
+    setComposers((current) => {
+      const before = current[conversationId] ?? EMPTY_COMPOSER;
+      const after = next(before);
+      if (after === before) return current;
+      const updated = { ...current };
+      /* An empty composer is no entry, so the map holds only conversations with something unsent. */
+      if (after.text === '' && after.attachments.length === 0) delete updated[conversationId]; else updated[conversationId] = after;
+      return updated;
+    });
+  }, []);
+  const composerOf = useCallback((conversationId: string) => composers[conversationId] ?? EMPTY_COMPOSER, [composers]);
+  const editingRef = useRef<ReadonlySet<string>>(new Set());
+  const [editing, setEditing] = useState<ReadonlySet<string>>(() => new Set());
+  const tryBeginEdit = useCallback((conversationId: string) => {
+    if (editingRef.current.has(conversationId)) return false;
+    editingRef.current = new Set([...editingRef.current, conversationId]);
+    setEditing(editingRef.current);
+    return true;
+  }, []);
+  const [removedTurns, setRemovedTurns] = useState<Readonly<Record<string, string>>>({});
+  const finishEdit = useCallback((conversationId: string, removed: Readonly<{ turnId: string; refill: ComposerContent }> | null) => {
+    if (!editingRef.current.has(conversationId)) return;
+    if (removed !== null) {
+      editComposer(conversationId, (current) => withRefill(current, removed.refill));
+      setRemovedTurns((current) => ({ ...current, [conversationId]: removed.turnId }));
+    }
+    editingRef.current = new Set([...editingRef.current].filter((id) => id !== conversationId));
+    setEditing(editingRef.current);
+  }, [editComposer]);
+  const isEditing = useCallback((conversationId: string) => editing.has(conversationId), [editing]);
+  const removedTurnOf = useCallback((conversationId: string) => removedTurns[conversationId] ?? null, [removedTurns]);
+  const forgetRemovedTurn = useCallback((conversationId: string, turnId: string) => {
+    setRemovedTurns((current) => {
+      if (current[conversationId] !== turnId) return current;
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+  }, []);
+  const [uploads, setUploads] = useState<Readonly<Record<string, UploadState>>>({});
+  const editUpload = useCallback((cardId: string, next: (current: UploadState) => UploadState) => {
+    setUploads((current) => {
+      const after = next(current[cardId] ?? NO_UPLOAD);
+      const updated = { ...current };
+      if (after.inFlight === 0 && after.refusal === null) delete updated[cardId]; else updated[cardId] = after;
+      return updated;
+    });
+  }, []);
+  const uploadOf = useCallback((cardId: string) => uploads[cardId] ?? NO_UPLOAD, [uploads]);
   const clearFailedSend = useCallback((conversationId: string, echoId: string) => {
     setFailedSends((current) => {
       if (current[conversationId]?.echo.id !== echoId) return current;
@@ -261,11 +333,12 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
       draftOf, startDraft, editDraft, adoptDraft, discardDraft, discardUnsentDraft,
       adoptedDraftIdOf, finishDraftAdoption,
       pendingSendIds, failedSends, tryBeginSend, finishSend, clearFailedSend,
+      composerOf, editComposer, isEditing, tryBeginEdit, finishEdit, removedTurnOf, forgetRemovedTurn, uploadOf, editUpload,
     }),
     [adoptDraft, adoptedDraftIdOf, clearOpenRequest, conversations, discardDraft,
-      discardUnsentDraft, draftOf, editDraft, finishDraftAdoption, finishSend, pendingSendIds,
+      composerOf, discardUnsentDraft, draftOf, editComposer, editDraft, editUpload, finishDraftAdoption, forgetRemovedTurn, finishEdit, isEditing, removedTurnOf, uploadOf, finishSend, pendingSendIds,
       remember, requestOpen, failedSends, clearFailedSend,
-      requestedOpenFocusesComposer, requestedOpenId, startDraft, tryBeginSend, turnsOf,
+      requestedOpenFocusesComposer, requestedOpenId, startDraft, tryBeginEdit, tryBeginSend, turnsOf,
       updateExisting],
   );
   return <ConversationContext.Provider value={value}>{children}</ConversationContext.Provider>;

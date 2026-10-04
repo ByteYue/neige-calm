@@ -3,10 +3,11 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { UploadAttachmentResponse } from '../../../../core/api/generated/wire.ts';
+import type { PlannerAttachment, UploadAttachmentResponse } from '../../../../core/api/generated/wire.ts';
+import { useState } from '../../ui/state/public.ts';
 import {
   ATTACHED_WORKSPACE_REASON, PlannerAttachButton, PlannerAttachmentDrawer, usePlannerAttachments,
-  type PlannerAttachments, type UploadAttachment,
+  NO_UPLOAD, type AttachmentStore, type PlannerAttachments, type UploadAttachment, type UploadState,
 } from './attachments.tsx';
 
 afterEach(cleanup);
@@ -25,11 +26,24 @@ function png(name = 'shot.png'): File {
 }
 
 let latest: PlannerAttachments | null = null;
+/** Every card's images, as the caller holds them; read by the cases that switch cards. */
+let held: Readonly<Record<string, readonly PlannerAttachment[]>> = {};
+
+/** The caller's per-card composer images and uploads, as the router keeps them in the conversation registry. */
+function useCardImages(cardId: string): AttachmentStore {
+  const [byCard, setByCard] = useState<Readonly<Record<string, readonly PlannerAttachment[]>>>({});
+  held = byCard;
+  const [uploads, setUploads] = useState<Readonly<Record<string, UploadState>>>({});
+  return {
+    items: byCard[cardId] ?? [], update: (card, next) => setByCard((current) => ({ ...current, [card]: next(current[card] ?? []) })),
+    upload: uploads[cardId] ?? NO_UPLOAD, editUpload: (card, next) => setUploads((current) => ({ ...current, [card]: next(current[card] ?? NO_UPLOAD) })),
+  };
+}
 
 function Harness({ upload, supported = true, card = 'card-1' }: {
   upload: UploadAttachment; supported?: boolean; card?: string;
 }) {
-  const attachments = usePlannerAttachments(upload, card);
+  const attachments = usePlannerAttachments(upload, card, useCardImages(card));
   latest = attachments;
   return (
     <>
@@ -136,7 +150,7 @@ describe('planner attachments', () => {
     expect(latest?.ids).toEqual([]);
   });
 
-  it('does not adopt an upload that finished after the card changed', async () => {
+  it('puts an upload that finished after the card changed into the card it started for', async () => {
     let settle: ((value: () => UploadAttachmentResponse) => void) | undefined;
     const upload = vi.fn<UploadAttachment>()
       .mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
@@ -152,6 +166,9 @@ describe('planner attachments', () => {
     });
     expect(latest?.ids).toEqual([]);
     expect(screen.queryByLabelText('Remove Image 1')).toBeNull();
+    expect(held['card-1']?.map((item) => item.id)).toEqual([uploaded(0).attachmentId]);
+    rerender(<Harness upload={upload} card="card-1" />);
+    expect(latest?.ids).toEqual([uploaded(0).attachmentId]);
   });
 
   it('does adopt an upload that finished while the same card was still open', async () => {
@@ -183,6 +200,7 @@ it('an old card upload cannot release the new card upload busy state', async () 
   expect(latest?.busy).toBe(true);
   await act(async () => { pending[0](() => uploaded(0)); await Promise.resolve(); });
   expect(latest?.busy).toBe(true); expect(latest?.ids).toEqual([]);
+  expect(held['card-1']?.map((item) => item.id)).toEqual([uploaded(0).attachmentId]);
   await act(async () => { pending[1](() => uploaded(1)); await Promise.resolve(); });
   expect(latest?.busy).toBe(false); expect(latest?.ids).toEqual([uploaded(1).attachmentId]);
 });

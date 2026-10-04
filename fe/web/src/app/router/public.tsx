@@ -2,6 +2,8 @@ import { writeClipboardText } from '../../ui/operation-feedback/clipboard.ts';
 import { transcriptRowToTurnOutcome } from '../../../../core/domain/conversation.ts';
 import { useConversationStop } from '../conversations/stop.ts';
 import { useLiveReplies, useTranscriptReads } from '../conversations/live-replies.ts';
+import { useConversationEdit } from '../conversations/edit.ts';
+import { EMPTY_COMPOSER, isComposerEmpty, withRefill, type PlannerRewind } from '../../../../core/domain/conversation-rewind.ts';
 import type { ConversationStopFeedback } from '../../../../core/domain/conversation-stop.ts';
 import { admitTransport } from '../providers/recovery-mutation.ts';
 // Code-based TanStack Router setup, built inside a factory so a test can inject the
@@ -10,7 +12,7 @@ import { admitTransport } from '../providers/recovery-mutation.ts';
 import {
   createRootRoute, createRoute, createRouter, type AnyRoute,
 } from '@tanstack/react-router';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react';
 import { TrackViewProvider, useTrackViewState } from './track-view-state.tsx';
 import { HStack } from '@astryxdesign/core/HStack';
 import { onlineManager, useInfiniteQuery, useQuery, type QueryClient } from '@tanstack/react-query';
@@ -20,7 +22,7 @@ import type { AgentProvider, PlannerAttachment } from '../../../../core/api/gene
 import type { UnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
 import {
   ATTACHED_WORKSPACE_REASON, PlannerAttachButton, PlannerAttachmentDrawer,
-  type UploadAttachment, usePlannerAttachments,
+  NO_UPLOAD, type AttachmentStore, type UploadAttachment, usePlannerAttachments,
 } from '../../features/planner/attachments.tsx';
 import { hasUnseenMatchingConversationMessage, failedConversationDelivery } from '../../../../core/domain/conversation-delivery.ts';
 import {
@@ -156,14 +158,19 @@ type ConversationStore = Readonly<{
   failedSend: FailedConversationSend | null;
   matchingSendMessage: boolean;
   retrySend: (echoId: string) => void;
-  /** What became of the send. `attachments` are ids already uploaded; naming one here is what makes it permanent. */
-  send: (conversationId: string, text: string, attachments?: readonly PlannerAttachment[]) => Promise<SendOutcome>;
+  /**
+   * What became of the send. `attachments` are ids already uploaded; naming one here is what makes it permanent.
+   * `fromComposer`: they are the composer's own, so a delivery clears them (and the upload refusal) there.
+   */
+  send: (conversationId: string, text: string, attachments: readonly PlannerAttachment[], fromComposer: boolean) => Promise<SendOutcome>;
   /** Whether this card's track can take image attachments at all. */
   attachmentsSupported: boolean;
   /** How full this conversation's context is; `null` when the harness has never said. */
   contextUsage: PlannerRunTokenUsage | null;
   uploadAttachment: UploadAttachment;
   interrupt: () => void;
+  /** Remove this card's latest turn and hand back its input (#1923). */
+  rewind: (turnId: string) => Promise<PlannerRewind>;
   retryHistory: () => void;
   loadEarlier: () => void;
   /** Why the queue is not draining, when the reader has to act; a standing condition of the conversation, unlike `actionError`. */
@@ -508,7 +515,7 @@ export function useConversationStore(
     : listedConversations.map((row) => row.id === conversation.id ? conversation : row);
 
   const send = async (
-    _conversationId: string, text: string, attachments: readonly PlannerAttachment[] = [],
+    _conversationId: string, text: string, attachments: readonly PlannerAttachment[], fromComposer: boolean,
   ): Promise<SendOutcome> => {
     if (_conversationId !== cardId || stalled || sendingRef.current || !registry.tryBeginSend(cardId)) return 'not-sent';
     sendingRef.current = true;
@@ -548,6 +555,13 @@ export function useConversationStore(
       setUnconfirmedEchoId((current) => current === echo.id ? null : current);
       /* The claim decides only who draws this message; written wherever the echo
                still lives, the registry unconditionally. */
+      /* A composer send's delivered images leave the composer they were sent from, whichever conversation is shown by now. */
+      if (fromComposer) {
+        const sentIds = new Set(attachments.map((attachment) => attachment.id));
+        registry.editComposer(sentTo, (current) => current.attachments.some((image) => sentIds.has(image.id))
+          ? { ...current, attachments: current.attachments.filter((image) => !sentIds.has(image.id)) } : current);
+        registry.editUpload(sentTo, (current) => current.refusal === null ? current : { ...current, refusal: null });
+      }
       const claimedEntryId = sent.entry_id;
       if (claimedEntryId !== null && stillActive()) {
         setEchoes((current) => current.map((turn) =>
@@ -593,6 +607,7 @@ export function useConversationStore(
       sendFailure = {
         echo, message: errorMessage(error, 'Could not send the message.'),
         delivery: settled === 'refused' ? 'refused' : failedConversationDelivery(error instanceof ApiError ? error.failure : null),
+        fromComposer,
       };
       /* A failure belongs to the conversation that failed; the provider still records
                it for a remount of the owning card. */
@@ -684,15 +699,16 @@ export function useConversationStore(
       /* The retry carries the echo's images: an image-only message re-sent as
              `{ text: "" }` is refused, and the ids on a failed echo are still bound. */
       if (failedSend?.echo.id === echoId) {
-        void send(cardId, failedSend.echo.text, failedSend.echo.attachments);
+        void send(cardId, failedSend.echo.text, failedSend.echo.attachments ?? [], failedSend.fromComposer);
       }
     },
-    send: (conversationId, text, attachments) => failedSend === null || failedSend.delivery === 'refused'
-      ? send(conversationId, text, attachments) : Promise.resolve('not-sent'),
+    send: (conversationId, text, attachments, fromComposer) => failedSend === null || failedSend.delivery === 'refused'
+      ? send(conversationId, text, attachments, fromComposer) : Promise.resolve('not-sent'),
     attachmentsSupported: run.data?.attachments_supported ?? false,
     contextUsage: run.data?.token_usage ?? null,
     uploadAttachment: mutations.uploadAttachment,
     interrupt: stop.interrupt,
+    rewind: mutations.rewind,
     retryHistory: () => { void history.refetch().catch(() => undefined); },
     loadEarlier: () => { void history.fetchNextPage().catch(() => undefined); },
     blockedReason: run.data?.blocked_reason ?? null,
@@ -929,14 +945,54 @@ function useConversationPanel(
   /* `@` only in the Planner's own row; the track the drawer is on ranks its blocks first. */
   const mentionTrigger = useMentionTrigger(useMentionSearch(transport, unauthorized,
     source.planner !== null && openRowId === source.planner.cardId ? source.planner.areaId : null, source.scopeId));
-  /* The composer's pending images, keyed to the open card so moving to another
-       conversation does not carry a picked image into it. */
-  const attachments = usePlannerAttachments(store.uploadAttachment, scope?.cardId ?? '');
+  const registry = useConversationRegistry();
+  /* The open conversation's own composer: words and images live in the registry per conversation,
+       so closing keeps them and switching shows the other conversation's own. */
+  const composerId = scope?.cardId ?? null;
+  const composer = composerId === null ? EMPTY_COMPOSER : registry.composerOf(composerId);
+  const { editComposer } = registry;
+  const setComposerText = useCallback<Dispatch<SetStateAction<string>>>((action) => {
+    if (composerId === null) return;
+    editComposer(composerId, (current) => {
+      const text = typeof action === 'function' ? action(current.text) : action;
+      return text === current.text ? current : { ...current, text };
+    });
+  }, [composerId, editComposer]);
+  const { editUpload } = registry;
+  const uploadState = composerId === null ? NO_UPLOAD : registry.uploadOf(composerId);
+  const attachmentStore = useMemo<AttachmentStore>(() => ({
+    items: composer.attachments,
+    update: (cardId, next) => editComposer(cardId, (current) => {
+      const attachments = next(current.attachments);
+      return attachments === current.attachments ? current : { ...current, attachments };
+    }),
+    upload: uploadState,
+    editUpload,
+  }), [composer.attachments, editComposer, editUpload, uploadState]);
+  const attachments = usePlannerAttachments(store.uploadAttachment, composerId ?? '', attachmentStore);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+  const shownComposer = useRef(composerId);
+  shownComposer.current = composerId;
+  const focusComposer = useCallback((conversationId: string) => {
+    if (shownComposer.current === conversationId) setComposerFocusRequest((count) => count + 1);
+  }, []);
+  const edit = useConversationEdit({ conversationId: composerId, rewind: store.rewind, focusComposer });
+  /* The one readiness every response action and the continue guidance share. */
+  const canContinue = store.historyReady && !store.sendBlocked && !store.working && !store.stopping;
   /* A conversation's provider is fixed for its life; its model picker offers that provider's group alone. */
   const scopeProvider: AgentProvider = scope === null ? 'codex' : scope.provider;
-  const registry = useConversationRegistry();
   const go = useGo();
   const open = store.conversations.find((conversation) => conversation.id === openRowId) ?? null;
+  /* A turn an Edit removed still shows until a transcript read without it lands; nothing acts on it meanwhile. */
+  const removedTurn = open === null ? null : registry.removedTurnOf(open.id);
+  const showsRemovedTurn = open !== null && removedTurn !== null
+    && store.turnsOf(open.id).some((entry) => entry.author === 'turn' && entry.turnId === removedTurn);
+  const respondable = canContinue && !showsRemovedTurn;
+  const { forgetRemovedTurn } = registry;
+  const openId = open?.id ?? null;
+  useEffect(() => {
+    if (openId !== null && removedTurn !== null && store.historyReady && !showsRemovedTurn) forgetRemovedTurn(openId, removedTurn);
+  }, [forgetRemovedTurn, openId, removedTurn, showsRemovedTurn, store.historyReady]);
   const preferences = useUiPreferences();
   // Receipts compare the row's completion time, not `updatedAt`, which also moves
   // when the reader queues a message. `null` is never unread.
@@ -1349,18 +1405,20 @@ function useConversationPanel(
                 ) : <ChatFooterError message={store.failedSend.delivery === 'unknown'
                   ? `Delivery is unconfirmed. ${store.failedSend.message}` : `Not sent. ${store.failedSend.message}`} />}
                 {store.failedSend.delivery !== 'unknown' ? (
-                  (store.failedSend.delivery !== 'refused' || composerDraft === '') && <>
+                  (store.failedSend.delivery !== 'refused' || composer.text === '') && <>
                     <ChatFooterRemedy disabled={store.stalled || store.sending || !store.historyReady}
                       onClick={() => {
                         if (store.failedSend === null) return;
-                        setComposerDraft('');
+                        setComposerText('');
                         store.retrySend(store.failedSend.echo.id);
                       }}>
                       Try again
                     </ChatFooterRemedy>
                     <ChatFooterRemedy onClick={() => {
                       if (store.failedSend === null) return;
-                      setComposerDraft(store.failedSend.echo.text);
+                      const { echo } = store.failedSend;
+                      /* The failed message's words and images go back together; nothing already there is lost. */
+                      editComposer(open.id, (current) => withRefill(current, { text: echo.text, attachments: echo.attachments ?? [] }));
                       registry.clearFailedSend(open.id, store.failedSend.echo.id);
                     }}>Edit</ChatFooterRemedy>
                   </>
@@ -1408,17 +1466,13 @@ function useConversationPanel(
               /* Read at mount only, which is what makes it one-shot; the flag is dropped
                                when the drawer closes. */
               focusOnMount={composerFocusFor === open.id}
-              draft={{ text: composerDraft, onChange: setComposerDraft }}
-              disabled={store.sendBlocked || !store.historyReady}
+              focusRequest={composerFocusRequest}
+              draft={{ text: composer.text, onChange: setComposerText }}
+              disabled={store.sendBlocked || !store.historyReady || edit.requesting}
               /* `delivered` is the one outcome that licenses forgetting the images; every
                                other one leaves the message with the reader. */
-              onSend={(text) => {
-                const sent = attachments.items;
-                return store.send(open.id, text, sent).then((outcome) => {
-                  if (outcome === 'delivered') attachments.clear();
-                  return outcome;
-                });
-              }}
+              /* The images stay with the composer until the store reports them delivered. */
+              onSend={(text) => store.send(open.id, text, attachments.items, true)}
               allowEmptyText={attachments.items.length > 0}
               /* The queue lives inside the composer, above the field: these messages have
                                not reached the model, so they are not part of the conversation behind it. */
@@ -1453,7 +1507,7 @@ function useConversationPanel(
                       available: store.attachmentsSupported,
                       reason: ATTACHED_WORKSPACE_REASON,
                     }}
-                    disabled={store.sendBlocked || !store.historyReady}
+                    disabled={store.sendBlocked || !store.historyReady || edit.requesting}
                   />
                   <ModelPill
                     /* Without a scope the catalog read is disabled, so no `unavailable` label can show. */
@@ -1500,15 +1554,17 @@ function useConversationPanel(
                 key={open.id}
                 conversation={open}
                 turns={store.turnsOf(open.id).filter((turn) => store.failedSend?.delivery !== 'refused'
-                  || composerDraft === '' || turn.id !== store.failedSend.echo.id)}
+                  || composer.text === '' || turn.id !== store.failedSend.echo.id)}
                 pending={store.pending.has(open.id)}
                 cards={source.cards}
                 stalled={store.stalled}
-                copyText={writeClipboardText}
-                regenerateMessage={store.historyReady && !store.sendBlocked && !store.working && !store.stopping
-                  ? async (message) => { await store.send(open.id, message.text, message.attachments ?? []); }
+                copyText={showsRemovedTurn ? undefined : writeClipboardText}
+                regenerateMessage={respondable && !edit.requesting
+                  ? async (message) => { await store.send(open.id, message.text, message.attachments ?? [], false); }
                   : undefined}
-                canContinue={store.historyReady && !store.sendBlocked && !store.working && !store.stopping}
+                editMessage={respondable && store.pendingQueue.length === 0 && store.pendingQueueOverflow === 0
+                  && isComposerEmpty(composer) && !attachments.busy ? edit.run : undefined}
+                canContinue={canContinue}
                 stalledReason={store.blockedReason}
                 stopFeedback={store.stopFeedback}
               />
