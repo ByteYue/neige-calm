@@ -7,9 +7,11 @@ import time
 
 import pytest
 
-from paper_trading.allocation import Allocation
+from paper_trading.allocation import TOOLS, Allocation
 from paper_trading.allocation_broker import AllocationBroker
-from paper_trading.allocation_config import AllocationConfig
+from paper_trading.allocation_config import OPTIONAL, REQUIRED, AllocationConfig
+from paper_trading.allocation_report import tables
+from .host import Host
 
 NOW = datetime(2026, 9, 30, 15, tzinfo=timezone.utc)
 ROOT = Path(__file__).parents[1]
@@ -310,12 +312,10 @@ def wait_for(host, predicate, caller=WORKER):
 
 
 def test_spy_production_stdio_entrypoint_and_overlays(allocation_rig):
-    from types import SimpleNamespace
-    from .test_process import Host
     r = allocation_rig
     now = datetime.now(timezone.utc)
     state = r.read(); state['snapshot']['quote']['at'] = now.isoformat(); r.write(state)
-    host = Host(SimpleNamespace(home=r.home, data=r.root), config=r.values | {'cli_path': '/usr/local/bin/longbridge'})
+    host = Host(r.home, r.root, r.values)
     try:
         names = {t['name'] for t in host.request('tools/list', {})['tools']}
         assert names == {'spy.plan', 'spy.execute', 'spy.status', 'spy.refresh'}
@@ -343,6 +343,11 @@ def test_spy_production_stdio_entrypoint_and_overlays(allocation_rig):
         assert result['snapshot']['shares'] == 60
         while not {'spy.overview', 'spy.portfolio', 'spy.decisions', 'spy.fills'} <= {p['kind'] for p in host.overlays}:
             host.receive()
+        for overlay in host.overlays:
+            # The kernel callback frame: every overlay belongs to the owning Track and carries its projection.
+            assert set(overlay) == {'entity_kind', 'entity_id', 'kind', 'payload'}, overlay
+            assert overlay['entity_kind'] == 'track' and overlay['entity_id'] == 'owner'
+            assert isinstance(overlay['payload'], dict) and overlay['payload'], overlay['kind']
         # A replayed Worker request may read, but may never write another order.
         assert host.tool('spy.execute', {'decision_id': 'stdio-target'}, track='owner', caller=WORKER)['isError']
         assert len(r.submits()) == 1
@@ -505,3 +510,170 @@ def test_spy_ledger_reconciled_before_opening_shares_started_from_zero(allocatio
 def test_spy_opening_shares_config_is_a_non_negative_integer(allocation_rig, value):
     with pytest.raises(ValueError, match='opening_shares'):
         AllocationConfig.parse(allocation_rig.values | {'opening_shares': value})
+
+
+def test_spy_config_requires_a_profile(allocation_rig):
+    values = {k: v for k, v in allocation_rig.values.items() if k != 'profile'}
+    with pytest.raises(ValueError, match='missing or unknown fields'):
+        AllocationConfig.parse(values)
+
+
+@pytest.mark.parametrize('profile', ['spy-cash', 'SPY_CASH', '', None])
+def test_spy_config_refuses_any_profile_but_spy_cash(allocation_rig, profile):
+    with pytest.raises(ValueError, match='spy_cash profile'):
+        AllocationConfig.parse(allocation_rig.values | {'profile': profile})
+
+
+def test_spy_config_refuses_an_unknown_key(allocation_rig):
+    with pytest.raises(ValueError, match='missing or unknown fields'):
+        AllocationConfig.parse(allocation_rig.values | {'unexpected_setting': 1})
+
+
+def test_manifest_exposes_exactly_the_app_tools():
+    names = [tool['name'] for tool in json.loads((ROOT / 'manifest.json').read_text())['exposes_tools']]
+    assert len(names) == len(TOOLS) and set(names) == TOOLS
+
+
+def test_manifest_config_schema_matches_the_parsed_keys():
+    schema = json.loads((ROOT / 'manifest.json').read_text())['config_schema']
+    assert set(schema['properties']) == REQUIRED | OPTIONAL
+    assert set(schema['required']) == REQUIRED
+    assert len(schema['required']) == len(REQUIRED)
+
+
+@pytest.mark.parametrize('field,value', [('owner_track_id', 'other-owner'), ('account_no', 'PAPER456')])
+def test_spy_ledger_account_and_track_binding_cannot_change_on_restart(allocation_rig, field, value):
+    r = allocation_rig; r.plan()
+    r.config = AllocationConfig.parse(r.values | {field: value})
+    with pytest.raises(ValueError, match='binding cannot be changed'):
+        r.restart()
+    # The original binding still opens the ledger, with its decision intact.
+    r.config = AllocationConfig.parse(r.values)
+    r.restart()
+    assert [d['id'] for d in r.status()['decisions']] == ['allocation-1']
+
+
+@pytest.mark.parametrize('field,value', [('oauth_client_id', 'other-client'), ('broker_home', '/other/home')])
+def test_spy_execution_binding_cannot_change_on_restart(allocation_rig, field, value):
+    r = allocation_rig; r.plan()
+    r.config = AllocationConfig.parse(r.values | {field: value})
+    with pytest.raises(ValueError, match='SPY execution binding cannot change'):
+        r.restart()
+    r.config = AllocationConfig.parse(r.values)
+    r.restart()
+    assert [d['id'] for d in r.status()['decisions']] == ['allocation-1']
+
+
+class ProcessCrash(BaseException):
+    """Stands in for the process dying inside the broker write; no handler may absorb it."""
+
+
+def test_spy_restart_marks_a_crashed_submission_unknown_and_never_resubmits(allocation_rig, monkeypatch):
+    r = allocation_rig; r.plan(); r.request()
+
+    def crash(request):
+        raise ProcessCrash()
+    monkeypatch.setattr(r.broker, 'submit', crash)
+    with pytest.raises(ProcessCrash):
+        r.step()
+    with r.app.ledger.session() as db:
+        assert r.app.ledger.decision(db, 'allocation-1')['state'] == 'submitting'
+    monkeypatch.undo()
+    r.restart()
+    state = r.status()
+    assert state['decisions'][0]['state'] == 'unknown'
+    assert any(e['kind'] == 'submission_unknown' for e in state['journal'])
+    # Later passes reconcile only: the uncertain order is never written again.
+    for _ in range(2):
+        assert r.step()['decisions'][0]['state'] == 'unknown'
+    assert r.submits() == []
+
+
+def test_spy_unchanged_reconciliation_appends_no_false_transition(allocation_rig):
+    r = allocation_rig; r.plan(); r.execute(); r.publish()
+    first = r.step()
+    assert first['error'] is None and first['decisions'][0]['state'] == 'working'
+    # Every poll re-applies each owned order's state; unchanged broker records record nothing.
+    second = r.step()
+    assert second['decisions'][0]['state'] == 'working'
+    assert second['journal'] == first['journal']
+
+
+def test_spy_tables_publish_only_declared_columns(allocation_rig):
+    r = allocation_rig; r.plan(); r.execute(); r.publish()
+    state = r.fill('order-1', 60, '4000', 'buy-fill', 60)
+    assert state['error'] is None and state['fills']
+    published = {kind: payload for kind, payload in tables(state).items() if 'columns' in payload}
+    assert set(published) == {'spy.portfolio', 'spy.decisions', 'spy.fills'}
+    for kind, payload in published.items():
+        assert set(payload) == {'columns', 'rows', 'caption'}, kind
+        assert isinstance(payload['caption'], str) and payload['caption'], kind
+        assert all(set(column) == {'key', 'label'} and column['label'] for column in payload['columns']), kind
+        declared = {column['key'] for column in payload['columns']}
+        assert payload['rows'], kind
+        # The kernel refuses a row key that is not a declared column.
+        assert all(set(row) == declared for row in payload['rows']), kind
+
+
+def test_spy_status_names_its_profile_and_symbol(allocation_rig):
+    state = allocation_rig.status()
+    assert state['profile'] == 'spy_cash' and state['symbol'] == 'SPY.US'
+
+
+def test_spy_ledger_persists_its_account_and_track_binding(allocation_rig):
+    with allocation_rig.app.ledger.session() as db:
+        stored = db.execute("SELECT body FROM meta WHERE key='binding'").fetchone()[0]
+    # The live ledger's persisted form: renaming either key would orphan an existing binding.
+    assert stored == '{"account_no":"PAPER123","owner_track_id":"owner"}'
+
+
+def test_spy_settlement_journals_one_decision_state_transition(allocation_rig):
+    r = allocation_rig; r.plan(); r.execute(); r.publish()
+    before = {e['seq'] for e in r.status()['journal']}
+    # One reconciliation moves the working order straight to settled.
+    state = r.fill('order-1', 60, '4000', 'buy-fill', 60)
+    added = [e for e in state['journal'] if e['seq'] not in before and e['kind'] == 'decision_state']
+    assert [e['body'] for e in added] == [{'decision_id': 'allocation-1', 'state': 'settled', 'error': None,
+                                          'broker_id': 'order-1', 'broker_status': 'Filled'}]
+
+
+@pytest.mark.parametrize('status,expected,executed', [
+    ('Canceled', 'canceled', 0), ('Rejected', 'rejected', 0), ('Expired', 'expired', 0),
+    ('PartialWithdrawal', 'canceled', 30)])
+def test_spy_terminal_broker_status_resolves_the_decision(allocation_rig, status, expected, executed):
+    r = allocation_rig; r.plan(); r.execute()
+    if executed:
+        r.publish(); state = r.fill('order-1', executed, '7000', 'part-fill', executed, status=status)
+    else:
+        r.publish(status=status); state = r.step()
+    assert state['error'] is None
+    assert state['decisions'][0]['state'] == expected
+    assert state['decisions'][0]['broker_status'] == status
+
+
+def test_spy_exponent_broker_price_is_refused_before_any_order(allocation_rig):
+    r = allocation_rig; r.plan()
+    state = r.read(); state['snapshot']['quote']['price'] = '1E+2'; r.write(state)
+    state = r.execute()
+    # Sizing reads only plain decimal strings; the decision waits instead of trading on it.
+    assert 'without exponent' in state['decisions'][0]['error']
+    assert state['decisions'][0]['state'] == 'requested' and not r.submits()
+
+
+def test_spy_fully_invested_account_with_zero_cash_can_sell(allocation_rig):
+    r = allocation_rig; _opening(r, 100, 100)
+    state = r.read(); state['snapshot']['cash_usd'] = state['snapshot']['available_cash_usd'] = '0'; r.write(state)
+    r.plan(target_spy_bps=0)
+    state = r.execute()
+    assert state['error'] is None and state['snapshot']['cash_usd'] == '0'
+    assert state['decisions'][0]['state'] == 'working'
+    assert r.order()['side'] == 'Sell' and r.order()['quantity'] > 0
+
+
+def test_spy_zero_broker_price_fails_reconciliation(allocation_rig):
+    r = allocation_rig; r.plan()
+    state = r.read(); state['snapshot']['quote']['price'] = '0'; r.write(state)
+    state = r.execute()
+    # Cash may be zero; a quote price may not. The observation is refused as a whole.
+    assert 'outside supported range' in state['error'] and state['snapshot'] is None
+    assert state['decisions'][0]['state'] == 'requested' and not r.submits()
