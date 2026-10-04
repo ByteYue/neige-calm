@@ -29,7 +29,10 @@ import {
   ATTACHED_WORKSPACE_REASON, PlannerAttachButton, PlannerAttachmentDrawer,
   NO_UPLOAD, type AttachmentStore, type UploadAttachment, usePlannerAttachments,
 } from '../../features/planner/attachments.tsx';
-import { hasUnseenMatchingConversationMessage, failedConversationDelivery } from '../../../../core/domain/conversation-delivery.ts';
+import {
+  KeyedSendFailure, retryUnknownSend, sendFailureKind,
+} from '../../../../core/domain/conversation-delivery.ts';
+import { recoveryDelay } from '../../../../core/domain/recovery/access.ts';
 import {
   trackOverlayPayload, plannerProviderOf, toTrack, trackActivityFrom, trackDisplayTitle,
   type Track, type TrackActivity, type TrackDetailWire,
@@ -78,13 +81,13 @@ import type { ReportSourceLinkTarget } from '../../../../core/domain/report-sour
 import {
   buildTranscript, conversationName, conversationNameFrom, CONVERSATION_STATE_SOURCE,
   conversationCreateFailure, CONVERSATION_TEXT_MAX, harnessItemToTurns, isOptimisticConversationTurn,
-  isConversationMessage, isSendRefusalCode, kernelQueuesInput,
+  isConversationMessage, kernelQueuesInput,
   mergeTranscript, reconcileOptimisticConversationTurns, serverItemHighWater,
   trackConversationCardId,
   FOLLOW_INSTALLATION_DEFAULT,
   type Conversation, type ConversationKind, type ConversationMessage, type ConversationState,
   type ModelCatalog, type ModelSelection,
-  type OptimisticConversationTurn, type PendingQueueEntry, type PlannerRunTokenUsage,
+  type PendingQueueEntry, type PlannerRunTokenUsage,
   type PlannerQueueWriteOutcome, type SendOutcome, type TranscriptEntry,
 } from '../../../../core/domain/conversation.ts';
 import { ConfirmDialog, Dialog } from '../../ui/dialog/public.tsx';
@@ -97,7 +100,7 @@ import { Icon } from '../../ui/icon/public.tsx';
 import { PanelAction, PanelEmpty } from '../../ui/panel-card/public.tsx';
 import { useState } from '../../ui/state/public.ts';
 import {
-  ApiError, OfflineSubmissionError, apiFailureCodeOf, harnessItemsQueryOptions,
+  ApiError, OfflineSubmissionError, harnessItemsQueryOptions,
   modelCatalogQueryOptions, serverVersionOperation, runOperation,
   prefetchAreaList, plannerRunQueryOptions, todayLaunchpadQueryOptions,
   usePlannerMutations, useTodayLaunchpadEnsureMutation, useTodayReportResetMutation,
@@ -118,7 +121,7 @@ import { TrackSelector } from '../shell/track-selector.tsx';
 import { AppShell, useConversationDrawerResize, useOpenMobileSection, useMobileHeaderActionsHost, useMobileHeaderTitleHost, useMobileTrackChoices } from '../shell/public.tsx';
 import {
   ConversationProvider, useConversationRegistry,
-  type ConversationDraft, type ConversationDraftId, type FailedConversationSend,
+  type ConversationDraft, type ConversationDraftId, type FailedConversationSend, type KeyedSendOp,
 } from '../conversations/public.tsx';
 import {
   renderedMobilePanel,
@@ -162,7 +165,6 @@ type ConversationStore = Readonly<{
   historyError: string | null;
   actionError: string | null;
   failedSend: FailedConversationSend | null;
-  matchingSendMessage: boolean;
   retrySend: (echoId: string) => void;
   /**
    * What became of the send. `attachments` are ids already uploaded; naming one here is what makes it permanent.
@@ -221,6 +223,9 @@ function tombstoneHides(wroteAt: number | undefined, rev: number): boolean {
 /* A stable identity for "no queue page", so the memo below is not recomputed on
    every render by a fresh array literal. */
 const EMPTY_PENDING_QUEUE: readonly PendingQueueEntry[] = Object.freeze([]);
+
+/** Beside Try again for a keyed send that could not leave the browser. */
+const OFFLINE_RETRY = 'Try again when you’re back online.';
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== '' ? error.message : fallback;
@@ -392,10 +397,6 @@ export function useConversationStore(
     [history.data, items, serverEntries],
   );
   const failedSend = registry.failedSends[cardId] ?? null;
-  // A stale cache can reveal an old equal message after this attempt. Only the
-  // reader may dismiss its recovery state; a match is a review hint, not an ack.
-  const matchingSendMessage = failedSend?.delivery === 'unknown'
-    && hasUnseenMatchingConversationMessage(serverTurns, failedSend.echo);
   useEffect(() => {
     forgetEchoes();
     setUnconfirmedEchoId(null);
@@ -535,28 +536,28 @@ export function useConversationStore(
     ? listedConversations
     : listedConversations.map((row) => row.id === conversation.id ? conversation : row);
 
+  /**
+   * One run of a keyed send. A press starts a new op (`opAt` mints its key and echo); Try again
+   * resumes the failed op as it was — same key, same echo and high water, and an outcome that once
+   * was unknown stays unknown — so the run is a continuation, not a second message.
+   * `refusedAtPress` answers a run whose press admission refused it.
+   */
   const send = async (
-    _conversationId: string, text: string, attachments: readonly PlannerAttachment[], fromComposer: boolean,
+    _conversationId: string, opAt: () => KeyedSendOp, refusedAtPress: (error: unknown) => SendOutcome,
   ): Promise<SendOutcome> => {
     /* Not shown any more (it waited out an Edit's rewind): it still goes to its own conversation, and nothing on screen here speaks for it. */
     const shown = shownCardId.current === cardId;
-    if (_conversationId !== cardId || stalled || (shown && sendingRef.current) || !registry.tryBeginSend(cardId)) return 'not-sent';
+    if (_conversationId !== cardId || stalled || (shown && sendingRef.current)) return 'not-sent';
+    /* Admitted at the press. Where the transport carries a recovery admission (the bundled build),
+       a run that cannot leave the browser is refused here and sends nothing; the web build admits
+       every press, and a send that cannot leave fails as a transport error — unknown, retried. */
+    let pressed: ApiTransportPort;
+    try { pressed = admitTransport(transport); } catch (error) { return refusedAtPress(error); }
+    if (!registry.tryBeginSend(cardId)) return 'not-sent';
     if (shown) { sendingRef.current = true; setSending(true); setActionError(null); stop.clearFeedback(); }
-    const echo: OptimisticConversationTurn = {
-      id: `echo-${mintIdempotencyKey()}`, author: 'you' as const, text, atMs: Date.now(),
-      /* The echo carries the images: an image-only message has no text to reconcile
-               on, so the ids are the second criterion. */
-      attachments,
-      serverHighWaterBefore: serverItemHighWater(items),
-      /* Read at the press from the last `GET /planner/run` snapshot, against the
-               kernel's whitelist (`can_issue_turn()`), not `working`: a front-end notion of
-               "busy" is not the kernel's notion of "can start a turn". Never recomputed
-               from the live phase later. */
-      queued: kernelQueuesInput(phase),
-      /* Not knowable yet — the POST below is what answers it. Claimed in the
-         `then`, and left `null` forever if the server has none to give. */
-      entryId: null,
-    };
+    const { key, echo, fromComposer, unknown } = opAt();
+    const { text } = echo;
+    const attachments = echo.attachments ?? [];
     const sentTo = cardId;
     if (shown) activeSend.current = { cardId: sentTo, echoId: echo.id };
     /* Still ours to answer for. False from the moment the reader moved to
@@ -570,10 +571,20 @@ export function useConversationStore(
        cleared. */
     let answeredHere = false;
     if (shown) { setEchoes((current) => [...current, echo]); setUnconfirmedEchoId(echo.id); }
-    return mutations.send(text, attachments.map((attachment) => attachment.id)).then((sent) => {
-      setUnconfirmedEchoId((current) => current === echo.id ? null : current);
-      /* The claim decides only who draws this message; written wherever the echo
-               still lives, the registry unconditionally. */
+    const attachmentIds = attachments.map((attachment) => attachment.id);
+    /* An unknown answer is sent again under the same key, so the server queues the message at most once. Each
+       retry is admitted again; one that cannot go out counts as an attempt. */
+    const admitRetry = (): ApiTransportPort | null => { try { return admitTransport(transport); } catch { return null; } };
+    return retryUnknownSend(
+      (attempt) => {
+        const admitted = attempt === 0 ? pressed : admitRetry();
+        return admitted === null ? Promise.reject(new OfflineSubmissionError())
+          : mutations.send(text, attachmentIds, key, admitted);
+      },
+      (error) => sendFailureKind(error instanceof ApiError ? error.failure : null),
+      (retry) => new Promise<void>((resolve) => { setTimeout(resolve, recoveryDelay(retry, Math.random())); }),
+      unknown,
+    ).then(({ sent, everUnknown }) => {
       /* A composer send's delivered images leave the composer they were sent from, whichever conversation is shown by now. */
       if (fromComposer) {
         const sentIds = new Set(attachments.map((attachment) => attachment.id));
@@ -581,6 +592,21 @@ export function useConversationStore(
           ? { ...current, attachments: current.attachments.filter((image) => !sentIds.has(image.id)) } : current);
         registry.editUpload(sentTo, (current) => current.refusal === null ? current : { ...current, refusal: null });
       }
+      if (everUnknown) {
+        /* Not reconciled optimistically: the answer may replay an entry deleted, rewound or reset since,
+           which no read would ever confirm. The echo goes from both copies and the reads `mutations.send`
+           refreshes are the authority — the message shows once, queued or drained, or not at all. */
+        const isOpEcho = (turn: TranscriptEntry) => isOptimisticConversationTurn(turn) && turn.id === echo.id;
+        setEchoes((current) => current.filter((turn) => !isOpEcho(turn)));
+        registry.updateExisting(sentTo, ({ conversation: known, turns: knownTurns }) => ({
+          conversation: known, turns: knownTurns.filter((turn) => !isOpEcho(turn)),
+        }));
+        setUnconfirmedEchoId((current) => current === echo.id ? null : current);
+        return;
+      }
+      setUnconfirmedEchoId((current) => current === echo.id ? null : current);
+      /* The claim decides only who draws this message; written wherever the echo
+               still lives, the registry unconditionally. */
       const claimedEntryId = sent.entry_id;
       if (claimedEntryId !== null && stillActive()) {
         setEchoes((current) => current.map((turn) =>
@@ -622,11 +648,13 @@ export function useConversationStore(
         };
       });
     }).catch((error: unknown) => {
-      settled = isSendRefusalCode(apiFailureCodeOf(error)) ? 'refused' : 'unresolved';
+      const failed = error instanceof KeyedSendFailure ? error : new KeyedSendFailure(error, 'unknown');
+      settled = failed.delivery === 'refused' ? 'refused' : 'unresolved';
       sendFailure = {
-        echo, message: errorMessage(error, 'Could not send the message.'),
-        delivery: settled === 'refused' ? 'refused' : failedConversationDelivery(error instanceof ApiError ? error.failure : null),
-        fromComposer,
+        echo, key, delivery: failed.delivery, fromComposer,
+        /* The admission's own words ("nothing was sent", "will not send automatically") would contradict Try again. */
+        message: failed.cause instanceof OfflineSubmissionError
+          ? OFFLINE_RETRY : errorMessage(failed.cause, 'Could not send the message.'),
       };
       /* A failure belongs to the conversation that failed; the provider still records
                it for a remount of the owning card. */
@@ -692,8 +720,7 @@ export function useConversationStore(
   return {
     conversations,
     turnsOf: (conversationId) => conversation?.id === conversationId
-      ? displayedFailure === null || matchingSendMessage ? transcript
-        : mergeTranscript(transcript, [displayedFailure])
+      ? displayedFailure === null ? transcript : mergeTranscript(transcript, [displayedFailure])
       : registry.turnsOf(conversationId),
     pending: pendingConversationIds(conversation, working, !stalled && (sending || sendingAcrossMounts)),
     working,
@@ -713,16 +740,45 @@ export function useConversationStore(
     historyError: history.error instanceof Error ? history.error.message : null,
     actionError,
     failedSend,
-    matchingSendMessage,
     retrySend: (echoId) => {
-      /* The retry carries the echo's images: an image-only message re-sent as
-             `{ text: "" }` is refused, and the ids on a failed echo are still bound. */
+      /* Resumes the failed op, it does not press again: the echo (images included — an image-only
+             message re-sent as `{ text: "" }` is refused, and its ids are still bound), the key, the high water
+             and the unknown-ness all carry over, so a first attempt that was stored after all is answered
+             again, reconciles this echo, and is never queued twice. */
       if (failedSend?.echo.id === echoId) {
-        void send(cardId, failedSend.echo.text, failedSend.echo.attachments ?? [], failedSend.fromComposer);
+        const { key, echo, fromComposer, delivery } = failedSend;
+        void send(cardId, () => ({ key, echo, fromComposer, unknown: delivery === 'unknown' }), () => {
+          /* The op keeps its standing; only the line beside Try again changes, never to the admission's own
+             words ("will not send automatically"), which would contradict it. */
+          if (registry.tryBeginSend(cardId)) registry.finishSend(cardId, { ...failedSend, message: OFFLINE_RETRY });
+          return 'refused';
+        });
       }
     },
     send: (conversationId, text, attachments, fromComposer) => failedSend === null || failedSend.delivery === 'refused'
-      ? send(conversationId, text, attachments, fromComposer) : Promise.resolve('not-sent'),
+      ? send(conversationId, () => ({
+        key: mintIdempotencyKey(), fromComposer, unknown: false,
+        echo: {
+          id: `echo-${mintIdempotencyKey()}`, author: 'you' as const, text, atMs: Date.now(),
+          /* The echo carries the images: an image-only message has no text to reconcile
+                   on, so the ids are the second criterion. */
+          attachments,
+          /* The op's, not the run's: a resumed op's first attempt may already be in the transcript, above any
+             high water read later, and only this one lets that row reconcile the echo. */
+          serverHighWaterBefore: serverItemHighWater(items),
+          /* Read at the press from the last `GET /planner/run` snapshot, against the
+                   kernel's whitelist (`can_issue_turn()`), not `working`: a front-end notion of
+                   "busy" is not the kernel's notion of "can start a turn". Never recomputed
+                   from the live phase later. */
+          queued: kernelQueuesInput(phase),
+          /* Not knowable yet — the POST below is what answers it. Claimed in the
+             `then`, and left `null` forever if the server has none to give. */
+          entryId: null,
+        },
+      }), (error) => {
+        if (shownCardId.current === cardId) setActionError(errorMessage(error, 'Connection is not ready. Try again after reconnecting.'));
+        return 'refused';
+      }) : Promise.resolve('not-sent'),
     attachmentsSupported: run.data?.attachments_supported ?? false,
     contextUsage: run.data?.token_usage ?? null,
     runningAnchor: nextRunningAnchor,
@@ -1008,7 +1064,6 @@ function useConversationPane(
        here because the request is cleared in the same commit that opens the row;
        dropped when the drawer closes. */
   const [composerFocusFor, setComposerFocusFor] = useState<string | null>(null);
-  const [resendConfirmation, setResendConfirmation] = useState<string | null>(null);
   const openRowId = options?.enabled === false ? null : openTarget?.kind === 'row' ? openTarget.id : null;
   /* A track conversation runs on Codex; Claude is a Planner-only backend (#1791). */
   const draftCatalog = useQuery({ ...modelCatalogQueryOptions(transport, { kind: 'provider', provider: 'codex' }, unauthorized),
@@ -1502,59 +1557,35 @@ function useConversationPane(
               </ChatFooterNotice>
             )}
             {store.failedSend !== null && (
-              <ChatFooterNotice tone={store.matchingSendMessage ? 'neutral' : 'error'}>
-                {store.matchingSendMessage ? (
-                  <span>A matching message is visible. Delivery is still unconfirmed.</span>
-                ) : <ChatFooterError message={store.failedSend.delivery === 'unknown'
-                  ? `Delivery is unconfirmed. ${store.failedSend.message}` : `Not sent. ${store.failedSend.message}`} />}
-                {store.failedSend.delivery !== 'unknown' ? (
-                  (store.failedSend.delivery !== 'refused' || composer.text === '') && <>
-                    <ChatFooterRemedy disabled={store.stalled || store.sending || !store.historyReady}
-                      onClick={() => {
-                        if (store.failedSend === null) return;
-                        setComposerText('');
-                        store.retrySend(store.failedSend.echo.id);
-                      }}>
-                      Try again
-                    </ChatFooterRemedy>
-                    <ChatFooterRemedy onClick={() => {
+              <ChatFooterNotice>
+                <ChatFooterError message={store.failedSend.delivery === 'unknown'
+                  ? `Delivery is unconfirmed. ${store.failedSend.message}` : `Not sent. ${store.failedSend.message}`} />
+                {store.failedSend.delivery === 'unknown' ? (
+                  /* Safe without asking: the retry reuses the send's key, so a message that did arrive is not queued twice.
+                     No Edit here — an edited message is a new send under a new key, and the first may have arrived. */
+                  <ChatFooterRemedy disabled={store.stalled || store.sending || !store.historyReady}
+                    onClick={() => { if (store.failedSend !== null) store.retrySend(store.failedSend.echo.id); }}>
+                    Try again
+                  </ChatFooterRemedy>
+                ) : (store.failedSend.delivery !== 'refused' || composer.text === '') && <>
+                  <ChatFooterRemedy disabled={store.stalled || store.sending || !store.historyReady}
+                    onClick={() => {
                       if (store.failedSend === null) return;
-                      const { echo } = store.failedSend;
-                      /* The failed message's words and images go back together; nothing already there is lost. */
-                      editComposer(open.id, (current) => withRefill(current, { text: echo.text, attachments: echo.attachments ?? [] }));
-                      registry.clearFailedSend(open.id, store.failedSend.echo.id);
-                    }}>Edit</ChatFooterRemedy>
-                  </>
-                ) : (
-                  <>
-                    {store.matchingSendMessage ? (
-                      <ChatFooterRemedy onClick={() => {
-                        if (store.failedSend !== null) registry.clearFailedSend(open.id, store.failedSend.echo.id);
-                      }}>I’ve checked</ChatFooterRemedy>
-                    ) : <ChatFooterRemedy disabled={store.historyLoading} onClick={store.retryHistory}>
-                      {store.historyLoading ? 'Checking…' : 'Check delivery'}
-                    </ChatFooterRemedy>}
-                    <ChatFooterRemedy disabled={store.stalled || store.sending || !store.historyReady}
-                      onClick={() => setResendConfirmation(store.failedSend?.echo.id ?? null)}>
-                      Send again…
-                    </ChatFooterRemedy>
-                  </>
-                )}
+                      setComposerText('');
+                      store.retrySend(store.failedSend.echo.id);
+                    }}>
+                    Try again
+                  </ChatFooterRemedy>
+                  <ChatFooterRemedy onClick={() => {
+                    if (store.failedSend === null) return;
+                    const { echo } = store.failedSend;
+                    /* The failed message's words and images go back together; nothing already there is lost. */
+                    editComposer(open.id, (current) => withRefill(current, { text: echo.text, attachments: echo.attachments ?? [] }));
+                    registry.clearFailedSend(open.id, store.failedSend.echo.id);
+                  }}>Edit</ChatFooterRemedy>
+                </>}
               </ChatFooterNotice>
             )}
-            <ConfirmDialog
-              open={resendConfirmation !== null && store.failedSend?.echo.id === resendConfirmation}
-              title="Send this message again?"
-              description="It may already have arrived. Sending again can deliver the same request twice. Check the conversation for a reply first."
-              confirmLabel="Send again"
-              destructive={false}
-              confirmState={store.stalled || store.sending || !store.historyReady ? 'blocked' : 'ready'}
-              onConfirm={() => {
-                if (resendConfirmation !== null) store.retrySend(resendConfirmation);
-                setResendConfirmation(null);
-              }}
-              onCancel={() => setResendConfirmation(null)}
-            />
             {options?.sideError != null && (
               <ChatFooterNotice><ChatFooterError message={options.sideError} /></ChatFooterNotice>
             )}

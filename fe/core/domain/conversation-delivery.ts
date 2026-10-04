@@ -1,5 +1,5 @@
 import type { ApiFailure } from '../api/types.js';
-import type { ConversationMessage, OptimisticConversationTurn } from './conversation.js';
+import { isSendRefusalCode } from './conversation.js';
 
 /** These explicit request rejections happen before dispatch; every other outcome requires checking delivery. */
 export function failedConversationDelivery(failure: ApiFailure | null): 'rejected' | 'unknown' {
@@ -8,24 +8,69 @@ export function failedConversationDelivery(failure: ApiFailure | null): 'rejecte
     ? 'rejected' : 'unknown';
 }
 
+/** What one failed attempt of a keyed send says about whether its message was stored. */
+export type SendFailureKind = 'unknown' | 'refused' | 'rejected';
+
 /**
- * A newly observed exact user message is a candidate for the reader to review, never proof
- * that this request arrived. Attachment ids are server-minted, one per upload, so they match
- * an image-only message whose text is blank.
+ * What one failed attempt says, taken alone. `null` is a failure with no answer at all, such as a
+ * connection that is not ready. `planner_harness_dormant` and `planner_harness_runtime_superseded`
+ * are a refusal only for an op with no unknown attempt yet: once one was unknown, a write of it may
+ * still be queued and commit later while those codes come back, so {@link retryUnknownSend} keeps
+ * such an op unknown.
  */
-export function hasUnseenMatchingConversationMessage(
-  serverTurns: readonly ConversationMessage[], echo: OptimisticConversationTurn,
-): boolean {
-  const text = echo.text.trim();
-  const echoAttachments = echo.attachments ?? [];
-  if (text === '' && echoAttachments.length === 0) return false;
-  return serverTurns.some((turn) => {
-    if (turn.author !== 'you') return false;
-    if (Number.parseInt(turn.id.split(':', 1)[0] ?? '', 10) <= echo.serverHighWaterBefore) {
-      return false;
+export function sendFailureKind(failure: ApiFailure | null): SendFailureKind {
+  if (isSendRefusalCode(failure?.kind === 'http' ? failure.code : null)) return 'refused';
+  return failedConversationDelivery(failure) === 'rejected' ? 'rejected' : 'unknown';
+}
+
+/** Automatic retries of one keyed send after its first attempt; an attempt that cannot go out counts too. */
+export const SEND_RETRIES = 5;
+
+/**
+ * A keyed send that gave up. `cause` is the last attempt's error. `delivery` stays `unknown` once
+ * any attempt's outcome was: no later answer short of a 200 says whether that attempt was stored.
+ */
+export class KeyedSendFailure extends Error {
+  readonly delivery: SendFailureKind;
+
+  constructor(cause: unknown, delivery: SendFailureKind) {
+    super(cause instanceof Error ? cause.message : 'Could not send the message.', { cause });
+    this.name = 'KeyedSendFailure';
+    this.delivery = delivery;
+  }
+}
+
+/** A keyed send's answer, and whether the op was ever unknown before it came. */
+export type KeyedSendAnswer<T> = Readonly<{ sent: T; everUnknown: boolean }>;
+
+/**
+ * Run `attempt` until it answers, fails for a reason other than an unknown outcome, or the retries
+ * are spent; rejects with a {@link KeyedSendFailure}. Every attempt must reuse one
+ * `Idempotency-Key`; `pause` waits before retry `retry`. `unknown` is the op's state from earlier
+ * runs: a resumed op that was unknown ends unknown on anything but a 200. A 200 after an unknown
+ * outcome may replay a message that has since been deleted, rewound or reset, so `everUnknown`
+ * tells the caller not to trust its entry for display.
+ */
+export async function retryUnknownSend<T>(
+  attempt: (index: number) => Promise<T>,
+  classify: (error: unknown) => SendFailureKind,
+  pause: (retry: number) => Promise<void>,
+  unknown: boolean,
+): Promise<KeyedSendAnswer<T>> {
+  let unknownSoFar = unknown;
+  for (let index = 0; ; index += 1) {
+    try {
+      return { sent: await attempt(index), everUnknown: unknownSoFar };
+    } catch (error) {
+      const kind = classify(error);
+      if (kind === 'unknown') {
+        unknownSoFar = true;
+        if (index < SEND_RETRIES) {
+          await pause(index);
+          continue;
+        }
+      }
+      throw new KeyedSendFailure(error, unknownSoFar ? 'unknown' : kind);
     }
-    if (text !== '') return turn.text.trim() === text;
-    const rowIds = new Set((turn.attachments ?? []).map((attachment) => attachment.id));
-    return echoAttachments.every((attachment) => rowIds.has(attachment.id));
-  });
+  }
 }

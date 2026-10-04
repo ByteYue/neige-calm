@@ -96,10 +96,23 @@ function moveDraft(slots: DraftSlots, move: DraftMove): DraftSlots {
   }
 }
 
+/** One keyed send as an op: what its press and every Try again share. Each run is admitted, begun and
+ * finished on its own; the op is what a run resumes. */
+export type KeyedSendOp = Readonly<{
+  key: string;
+  /** The message as first shown: its id, place (`atMs`) and `serverHighWaterBefore` are the op's. */
+  echo: OptimisticConversationTurn;
+  fromComposer: boolean;
+  /** Whether an earlier attempt's outcome was unknown. Once true, only a 200 settles the op. */
+  unknown: boolean;
+}>;
+
 /** A failed request keeps its words and delivery witness across drawer remounts.
  * It is recovery work, never a confirmed transcript or conversation title. */
 export type FailedConversationSend = Readonly<{
   echo: OptimisticConversationTurn;
+  /** The `Idempotency-Key` it was sent under; Try again sends it again, so a stored first attempt is not queued twice. */
+  key: string;
   message: string;
   delivery: 'rejected' | 'unknown' | 'refused';
   /** Whether its images came from the composer, which a delivered retry then clears (a Regenerate's never did). */
