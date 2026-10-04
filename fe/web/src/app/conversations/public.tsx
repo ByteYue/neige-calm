@@ -98,28 +98,23 @@ function moveDraft(slots: DraftSlots, move: DraftMove): DraftSlots {
 }
 
 /**
- * An Edit of a conversation's latest turn (#1923). `editing`: its message is in the composer and Send replaces it;
- * `replacing`: that Send's rewind is out; `replaced`: the turn is gone and stays hidden until a read no longer shows it.
+ * An Edit of a conversation's latest turn (#1923): its message is in the composer and Send replaces the turn. The
+ * Send is one keyed send that names the turn (#2043); beginning it ends the Edit, and the outbox holds the rest.
  */
 export type ConversationEdit = Readonly<{
-  /** The turn the rewind names. */
+  /** The turn the replace names. */
   turnId: string;
   /** Its outcome entry, keyed by row: a later turn reusing `turnId` is never taken for it. */
   outcomeId: string;
   /** What the click put in the composer. */
   refill: ComposerContent;
-  phase: 'editing' | 'replacing' | 'replaced';
 }>;
 
-/** How a replacing Send's rewind answered. `refused`: the server said no and changed nothing; otherwise it may have landed. */
-export type RewindAnswer = Readonly<{ removed: true } | { removed: false; message: string; refused: boolean }>;
-
-/** What this conversation's last Edit came to, shown above its composer until its next Edit or send. */
-export type EditNotice = Readonly<
-  | { kind: 'refused'; message: string }
-  | { kind: 'unreachable' }
-  | { kind: 'stale' }
->;
+/**
+ * How this conversation's last Edit ended, shown above its composer until its next Edit or send: a newer turn
+ * arrived first, or the server refused the replace (the turn is untouched and its words are back in the composer).
+ */
+export type EditNotice = Readonly<{ kind: 'stale' } | { kind: 'refused'; message: string }>;
 
 export type RememberedConversation = Readonly<{
   conversation: Conversation;
@@ -157,7 +152,8 @@ export type ConversationRegistry = Readonly<{
   finishDraftAdoption: (scopeId: string, conversationId: string) => void;
   /** Each conversation's keyed sends not yet shown by the server, above every route remount. */
   outboxOf: (conversationId: string) => readonly SendOp[];
-  /** Start a send there (`beginSendOp`): false while that conversation cannot take it. Clears its Edit notice. */
+  /** Start a send there (`beginSendOp`): false while that conversation cannot take it. Clears its Edit notice, and
+   * ends the Edit the send replaces the turn of. */
   beginSend: (conversationId: string, op: SendOp) => boolean;
   /** Change one conversation's outbox, whichever is shown; returns it as written. */
   editOutbox: (conversationId: string, next: (current: readonly SendOp[]) => readonly SendOp[]) => readonly SendOp[];
@@ -174,17 +170,13 @@ export type ConversationRegistry = Readonly<{
   /** The Edit held for this conversation, if any; nothing else acts on the conversation meanwhile. */
   editOf: (conversationId: string) => ConversationEdit | null;
   /** Enter edit mode, one Edit per conversation; false while one is held. Puts the message in that conversation's composer. */
-  beginEdit: (conversationId: string, edit: Pick<ConversationEdit, 'turnId' | 'outcomeId' | 'refill'>) => boolean;
+  beginEdit: (conversationId: string, edit: ConversationEdit) => boolean;
   /** Leave edit mode and its notice; a composer still holding exactly the refill (no upload in flight) goes back to empty, one the reader changed is kept. */
   cancelEdit: (conversationId: string) => void;
-  /** A Send pressed here: `replace` names the turn its rewind removes; `busy` while that rewind is out; `plain` outside edit mode. */
-  beginReplace: (conversationId: string) => Readonly<{ kind: 'plain' } | { kind: 'busy' } | { kind: 'replace'; turnId: string }>;
-  /** The replacing rewind answered: removed, refused (edit mode ends) or unknown (still editing, Send tries again). */
-  finishReplace: (conversationId: string, answer: RewindAnswer) => void;
   /** The edited turn is no longer the latest: edit mode ends and the composer keeps what it holds. */
   leaveEdit: (conversationId: string, outcomeId: string) => void;
-  /** A transcript read without the replaced turn landed: nothing is hidden or withheld any more. */
-  forgetEdit: (conversationId: string, outcomeId: string) => void;
+  /** The server refused an Edit's replace, changing nothing: say why above that conversation's composer. */
+  noteRefusedEdit: (conversationId: string, message: string) => void;
   editNoticeOf: (conversationId: string) => EditNotice | null;
   /** One card's image uploads, held here so a remount or another route sees an upload still in flight. */
   uploadOf: (cardId: string) => UploadState;
@@ -241,13 +233,23 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     setOutboxes(updated);
     return after;
   }, []);
+  const editsRef = useRef<Readonly<Record<string, ConversationEdit>>>({});
+  const [edits, setEdits] = useState(editsRef.current);
+  const writeEdit = useCallback((conversationId: string, edit: ConversationEdit | null) => {
+    const next = { ...editsRef.current };
+    if (edit === null) delete next[conversationId]; else next[conversationId] = edit;
+    editsRef.current = next;
+    setEdits(next);
+  }, []);
   const beginSend = useCallback((conversationId: string, op: SendOp) => {
     const begun = beginSendOp(outboxesRef.current[conversationId] ?? NO_SENDS, op);
     if (begun === null) return false;
     editOutbox(conversationId, () => begun);
     clearEditNotice(conversationId);
+    /* The Edit's Send is now this op, which holds the words until the server answers: no ✕ can drop them (#2041). */
+    if (op.replaces !== null && editsRef.current[conversationId]?.outcomeId === op.replaces.outcomeId) writeEdit(conversationId, null);
     return true;
-  }, [clearEditNotice, editOutbox]);
+  }, [clearEditNotice, editOutbox, writeEdit]);
   const outboxOf = useCallback((conversationId: string) => outboxes[conversationId] ?? NO_SENDS, [outboxes]);
   const nextRead = useCallback(() => { readsStarted.current += 1; return readsStarted.current; }, []);
   const [composers, setComposers] = useState<Readonly<Record<string, ComposerContent>>>({});
@@ -286,59 +288,34 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     });
   }, []);
   const uploadOf = useCallback((cardId: string) => uploads[cardId] ?? NO_UPLOAD, [uploads]);
-  const editsRef = useRef<Readonly<Record<string, ConversationEdit>>>({});
-  const [edits, setEdits] = useState(editsRef.current);
-  const writeEdit = useCallback((conversationId: string, edit: ConversationEdit | null) => {
-    const next = { ...editsRef.current };
-    if (edit === null) delete next[conversationId]; else next[conversationId] = edit;
-    editsRef.current = next;
-    setEdits(next);
-  }, []);
   const noteEdit = useCallback((conversationId: string, notice: EditNotice) => {
     setEditNotices((current) => ({ ...current, [conversationId]: notice }));
   }, []);
-  const beginEdit = useCallback((conversationId: string, edit: Pick<ConversationEdit, 'turnId' | 'outcomeId' | 'refill'>) => {
+  const beginEdit = useCallback((conversationId: string, edit: ConversationEdit) => {
     if (conversationId in editsRef.current) return false;
-    writeEdit(conversationId, { ...edit, phase: 'editing' });
+    writeEdit(conversationId, edit);
     editComposer(conversationId, (current) => withRefill(current, edit.refill));
     clearEditNotice(conversationId);
     return true;
   }, [clearEditNotice, editComposer, writeEdit]);
   const cancelEdit = useCallback((conversationId: string) => {
     const edit = editsRef.current[conversationId];
-    if (edit?.phase !== 'editing') return;
+    if (edit === undefined) return;
     writeEdit(conversationId, null);
     clearEditNotice(conversationId);
     /* An image still uploading is a change the composer does not show yet: keep everything. */
     if ((uploads[conversationId]?.inFlight ?? 0) > 0) return;
     editComposer(conversationId, (current) => isSameComposer(current, edit.refill) ? EMPTY_COMPOSER : current);
   }, [clearEditNotice, editComposer, uploads, writeEdit]);
-  const beginReplace = useCallback((conversationId: string) => {
-    const edit = editsRef.current[conversationId];
-    if (edit === undefined || edit.phase === 'replaced') return { kind: 'plain' } as const;
-    if (edit.phase === 'replacing') return { kind: 'busy' } as const;
-    writeEdit(conversationId, { ...edit, phase: 'replacing' });
-    clearEditNotice(conversationId);
-    return { kind: 'replace', turnId: edit.turnId } as const;
-  }, [clearEditNotice, writeEdit]);
-  const finishReplace = useCallback((conversationId: string, answer: RewindAnswer) => {
-    const edit = editsRef.current[conversationId];
-    if (edit?.phase !== 'replacing') return;
-    if (answer.removed) { writeEdit(conversationId, { ...edit, phase: 'replaced' }); return; }
-    /* An answer the server did not give may have landed: stay in edit mode, so Send asks again. */
-    writeEdit(conversationId, answer.refused ? null : { ...edit, phase: 'editing' });
-    noteEdit(conversationId, answer.refused ? { kind: 'refused', message: answer.message } : { kind: 'unreachable' });
-  }, [noteEdit, writeEdit]);
   const leaveEdit = useCallback((conversationId: string, outcomeId: string) => {
     const edit = editsRef.current[conversationId];
-    if (edit?.phase !== 'editing' || edit.outcomeId !== outcomeId) return;
+    if (edit?.outcomeId !== outcomeId) return;
     writeEdit(conversationId, null);
     noteEdit(conversationId, { kind: 'stale' });
   }, [noteEdit, writeEdit]);
-  const forgetEdit = useCallback((conversationId: string, outcomeId: string) => {
-    const edit = editsRef.current[conversationId];
-    if (edit?.phase === 'replaced' && edit.outcomeId === outcomeId) writeEdit(conversationId, null);
-  }, [writeEdit]);
+  const noteRefusedEdit = useCallback((conversationId: string, message: string) => {
+    noteEdit(conversationId, { kind: 'refused', message });
+  }, [noteEdit]);
   const editOf = useCallback((conversationId: string) => edits[conversationId] ?? null, [edits]);
   const editNoticeOf = useCallback((conversationId: string) => editNotices[conversationId] ?? null, [editNotices]);
   const remember = useCallback((conversation: Conversation, given: readonly TranscriptEntry[]) => {
@@ -409,10 +386,10 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
       adoptedDraftIdOf, finishDraftAdoption,
       outboxOf, beginSend, editOutbox, nextRead,
       composerOf, editComposer, newConversationComposerOf, editNewConversationComposer,
-      editOf, beginEdit, cancelEdit, beginReplace, finishReplace, leaveEdit, forgetEdit, editNoticeOf, uploadOf, editUpload,
+      editOf, beginEdit, cancelEdit, leaveEdit, noteRefusedEdit, editNoticeOf, uploadOf, editUpload,
     }),
     [adoptDraft, adoptedDraftIdOf, clearOpenRequest, conversations, discardDraft,
-      composerOf, discardUnsentDraft, draftOf, editComposer, editDraft, editNewConversationComposer, newConversationComposerOf, editUpload, finishDraftAdoption, forgetEdit, editOf, beginEdit, cancelEdit, beginReplace, finishReplace, leaveEdit, editNoticeOf, uploadOf, outboxOf, beginSend, editOutbox, nextRead,
+      composerOf, discardUnsentDraft, draftOf, editComposer, editDraft, editNewConversationComposer, newConversationComposerOf, editUpload, finishDraftAdoption, editOf, beginEdit, cancelEdit, leaveEdit, noteRefusedEdit, editNoticeOf, uploadOf, outboxOf, beginSend, editOutbox, nextRead,
       remember, requestOpen,
       requestedOpenFocusesComposer, requestedOpenId, startDraft, turnsOf,
       updateExisting],
