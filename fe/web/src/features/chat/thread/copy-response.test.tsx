@@ -11,7 +11,7 @@ it('copies the visible response Markdown only after a deliberate click', async (
   render(<ChatThread conversation={{ id: 'c', trackId: 't', title: null, kind: 'codex', state: 'idle', updatedAt: 0 }} cards={{}}
     stalled={false} canContinue={false} copyText={copyText} turns={[
       { id: 'u', author: 'you', text: 'Prompt', atMs: 1 }, { id: 'a', author: 'agent', text, atMs: 2 },
-      { id: 'end', author: 'turn', turnId: 'turn', status: 'completed', atMs: 3 },
+      { id: 'end', author: 'turn', elapsedMs: null, turnId: 'turn', status: 'completed', atMs: 3 },
     ]} />);
   expect(copyText).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Copy response' }));
@@ -61,7 +61,7 @@ it('regenerates only the delivered prompt after an explicit click, including its
   render(<ChatThread conversation={{ id: 'c', trackId: 't', title: null, kind: 'codex', state: 'idle', updatedAt: 0 }} cards={{}}
     stalled={false} canContinue={false} regenerateMessage={regenerate} turns={[
       user, { id: 'a', author: 'agent', text: 'Answer', atMs: 2 },
-      { id: 'end', author: 'turn', turnId: 'turn', status: 'completed', atMs: 3 },
+      { id: 'end', author: 'turn', elapsedMs: null, turnId: 'turn', status: 'completed', atMs: 3 },
     ]} />);
   expect(regenerate).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Regenerate response' }));
@@ -74,7 +74,7 @@ const editTurns = (first: 'you' | 'system' = 'you') => [
   first === 'you' ? { id: 'u', author: 'you' as const, text: 'Prompt', atMs: 1 }
     : { id: 'wake', author: 'system' as const, label: 'Wake', text: 'Automatic turn', atMs: 1 },
   { id: 'a', author: 'agent' as const, text: 'Answer', atMs: 2 },
-  { id: 'end', author: 'turn' as const, turnId: 'turn-7', status: 'completed' as const, atMs: 3 },
+  { id: 'end', author: 'turn' as const, turnId: 'turn-7', status: 'completed' as const, atMs: 3, elapsedMs: null },
 ];
 
 it('edits the current turn once under repeated clicks and shows a refusal in the action itself', async () => {
