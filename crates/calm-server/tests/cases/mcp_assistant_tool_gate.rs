@@ -24,6 +24,10 @@ const ASSISTANT_ALLOWED_TOOLS: &[&str] = &[
 
 /// Denied tools whose handler a **Planner** token gets past; also the control list below.
 const ASSISTANT_DENIED_TOOLS_PLANNER_REACHABLE: &[&str] = &[
+    "neige.workspace.reports",
+    "neige.workspace.report",
+    "neige.workspace.changes",
+    "neige.workspace.edits",
     // Cross-track / cross-area report discovery reads.
     "neige.area.outline",
     "neige.report.backlinks",
