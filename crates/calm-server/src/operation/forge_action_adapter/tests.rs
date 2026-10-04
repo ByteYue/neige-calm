@@ -41,7 +41,7 @@ fn frozen_forge_six_shape_defaults_new_optional_fields() {
     .expect("slice 6 frozen forge shape remains readable");
 
     assert!(frozen.context.is_empty());
-    assert!(frozen.subject.is_some());
+    assert_eq!(frozen.subject.map(|subject| subject.pr_number), Some(760));
     assert!(frozen.event_spec.is_some());
 }
 
@@ -741,8 +741,6 @@ fn merge_payload(
         card_id: "card-1".into(),
         subject: Some(
             serde_json::from_value(json!({
-                "phase": "impl",
-                "slice_id": "815",
                 "pr_number": 42
             }))
             .expect("merge subject"),
