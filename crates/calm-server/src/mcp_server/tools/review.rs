@@ -1,4 +1,4 @@
-//! User ratification requests on an open Track. Development review belongs to the built-in Dev component.
+//! `calm.ratify.request`: a Planner asks the user to ratify a decision on an open Track.
 
 use crate::db::write_with_actor_events_typed;
 use crate::error::CalmError;
@@ -124,7 +124,7 @@ async fn ratify_request(
     }
 }
 
-pub(crate) async fn resolve_track_for_identity(
+async fn resolve_track_for_identity(
     ctx: &Arc<AppContext>,
     identity: &ToolCallIdentity,
 ) -> Result<(crate::model::Card, Track), RpcError> {
