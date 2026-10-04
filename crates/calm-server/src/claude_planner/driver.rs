@@ -323,7 +323,10 @@ impl Reading<'_> {
             }
             _ => {}
         }
-        for event in self.translator.translate(&record, crate::model::now_ms()) {
+        for event in self
+            .translator
+            .translate_line(line, &record, crate::model::now_ms())
+        {
             self.total_tokens = usage_total(&event).or(self.total_tokens);
             let _ = self.shared.events.send(event);
         }

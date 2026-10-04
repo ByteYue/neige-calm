@@ -21,7 +21,7 @@ use crate::codex_appserver::InputItem;
 use crate::db::{Repo, write_in_tx_typed};
 use crate::error::{CalmError, Result};
 use crate::event::{Event, EventBus, EventScope, HarnessQueueChange};
-use crate::harness::backend::{PlannerBackend, PlannerEvents, TurnStartFailure};
+use crate::harness::backend::{BackendRewind, PlannerBackend, PlannerEvents, TurnStartFailure};
 use crate::harness::config::HarnessConfig;
 use crate::harness::issuance::{IssuanceRefusal, SelectionSource};
 use crate::harness::live_replies::{LiveReplies, LiveReplyClaim, LiveReplyWriter};
@@ -32,7 +32,7 @@ use crate::harness::queue::{
     QueueMutation, apply_mutation, input_segments_for_entries, locate_entry,
     try_fold_report_edit_tail, try_fold_tail,
 };
-use crate::harness::snapshot::{HarnessPhaseTag, HarnessSnapshot, IssuedInputSegments};
+use crate::harness::snapshot::{HarnessPhaseTag, HarnessSnapshot, IssuedInputSegments, TurnBase};
 use crate::harness::state::{HarnessState, IssuingKind, run_status_for};
 use crate::harness::token_usage::TokenUsage;
 use crate::ids::{ActorId, CardId, TrackId};
@@ -201,6 +201,15 @@ pub(super) struct Inner {
     last_seen_head: Mutex<Option<track_vcs::CommitHash>>,
     /// Latest context-window reading from `thread/tokenUsage/updated`; latest-wins.
     token_usage: Mutex<Option<TokenUsage>>,
+    /// See `HarnessSnapshot::pending_rewind`; `maybe_issue_turn` hands it to the next `turn/start`
+    /// and clears it once that returns `Ok`.
+    pending_rewind: Mutex<Option<BackendRewind>>,
+    /// See `HarnessSnapshot::last_turn_base`; written when a turn goes out, read by a rewind.
+    last_turn_base: Mutex<Option<TurnBase>>,
+    /// Turns a rewind removed: a late `item/*` or plan frame for one writes no row. Live-only. An
+    /// outcome needs none: every completion arm requires the running turn, the interrupt target or
+    /// `last_turn_id`, and a rewind leaves none of them naming the removed turn.
+    rewound_turns: Mutex<HashSet<String>>,
     debounce: Mutex<DebounceState>,
     interrupt_deadline: Mutex<Option<(String, Instant)>>,
     /// Durable causal evidence outlives an interrupt RPC and the recovery phase.
@@ -276,9 +285,16 @@ impl<'a> IssueTurnHandle<'a> {
         input: Vec<InputItem>,
         selection: &TurnModelSelection,
         client_user_message_id: &str,
+        pending_rewind: Option<&BackendRewind>,
     ) -> std::result::Result<String, TurnStartFailure> {
         self.backend
-            .turn_start(thread_id, input, selection, client_user_message_id)
+            .turn_start(
+                thread_id,
+                input,
+                selection,
+                client_user_message_id,
+                pending_rewind,
+            )
             .await
     }
 }
@@ -316,6 +332,12 @@ enum HarnessObservationCommand {
         actor: ActorId,
         applied: oneshot::Sender<Result<SteerResult>>,
     },
+    /// A human removing the latest turn from the conversation (#1923). Served between ticks and
+    /// notifications, under the issuance lock, so no turn starts and no row lands while it runs.
+    Rewind {
+        turn_id: String,
+        answer: oneshot::Sender<Result<RewoundTurn>>,
+    },
 }
 
 /// A steer that took effect: codex has the entry inside `turn_id`.
@@ -349,6 +371,13 @@ pub enum SteerRefused {
         message: String,
         phase: HarnessPhaseTag,
     },
+}
+
+/// A turn a rewind removed: its id and the user input it carried, for the composer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewoundTurn {
+    pub turn_id: String,
+    pub input: Vec<HarnessInputSegment>,
 }
 
 /// The domain answer to a steer, in the same two layers as [`MutationResult`]:
@@ -630,6 +659,33 @@ impl PlannerHarness {
 
     pub async fn interrupt(&self, reason: String) -> Result<()> {
         issue_interrupt(&self.inner, reason).await
+    }
+
+    /// Remove the latest turn `turn_id` from the conversation and hand back its user input
+    /// (#1923). Every refusal is a `Conflict` whose message is for the reader, and changes nothing.
+    pub async fn rewind_turn(&self, turn_id: String) -> Result<RewoundTurn> {
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            return Err(CalmError::Conflict(
+                "the conversation is shutting down; nothing was changed".into(),
+            ));
+        }
+        match &self.inner.observations {
+            ObservationIngress::Running(sender) => {
+                let (answer, rewound) = oneshot::channel();
+                sender
+                    .try_send(HarnessObservationCommand::Rewind { turn_id, answer })
+                    .map_err(map_observation_send_error)?;
+                rewound.await.map_err(|_| {
+                    CalmError::Conflict(
+                        "the conversation stopped before the edit was applied".into(),
+                    )
+                })?
+            }
+            #[cfg(feature = "fixtures")]
+            ObservationIngress::Unstarted(_) => {
+                rewind_command::handle_rewind(&self.inner, &turn_id).await
+            }
+        }
     }
 
     /// Stop only this failed loop, without interrupting or sealing its provider
@@ -1007,6 +1063,9 @@ fn inner_from_params(
         // Round-trips through the snapshot: codex only re-pushes it on the next model response, so a
         // resumed-but-idle thread would otherwise read as having no context usage.
         token_usage: Mutex::new(snapshot.token_usage),
+        pending_rewind: Mutex::new(snapshot.pending_rewind),
+        last_turn_base: Mutex::new(snapshot.last_turn_base),
+        rewound_turns: Mutex::new(HashSet::new()),
         debounce: Mutex::new(debounce),
         interrupt_deadline: Mutex::new(None),
         issuance_retry_after: Mutex::new(None),
@@ -1167,6 +1226,15 @@ async fn run_loop(
                     HarnessObservationCommand::Steer { entry_id, if_entry_rev, actor, applied } => {
                         let outcome = handle_steer(&inner, &entry_id, if_entry_rev, &actor).await;
                         let _ = applied.send(outcome);
+                    }
+                    HarnessObservationCommand::Rewind { turn_id, answer } => {
+                        let outcome = rewind_command::handle_rewind(&inner, &turn_id).await;
+                        // A reply of the removed turn that failed to store stays live until the
+                        // next turn starts; the turn is gone, so its text goes now.
+                        if outcome.is_ok() {
+                            live.discard(&turn_id);
+                        }
+                        let _ = answer.send(outcome);
                     }
                 }
             }
@@ -2030,6 +2098,9 @@ async fn on_notification(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let turn_id = item_turn_id(&params).map(ToOwned::to_owned);
+            if is_rewound(inner, turn_id.as_deref()).await {
+                return persist_snapshot(inner).await;
+            }
             let params_json = serde_json::to_string(&params)?;
             // The one turn an older binary can have left in flight: its drain wrote no projection row,
             // so its echo takes the segments from the legacy slot.
@@ -2147,6 +2218,9 @@ async fn on_notification(
             };
             // `turnId` is top-level on a plan; `item_turn_id` falls back to it and accepts `turn_id` too.
             let turn_id = item_turn_id(&params).map(ToOwned::to_owned);
+            if is_rewound(inner, turn_id.as_deref()).await {
+                return persist_snapshot(inner).await;
+            }
             let params_json = serde_json::to_string(&params)?;
             inner
                 .repo
@@ -2218,6 +2292,23 @@ async fn on_notification(
     persist_snapshot(inner).await
 }
 
+/// Whether a rewind removed `turn_id`: a late frame for it must not put a row back.
+async fn is_rewound(inner: &Inner, turn_id: Option<&str>) -> bool {
+    let Some(turn_id) = turn_id else {
+        return false;
+    };
+    let rewound = inner.rewound_turns.lock().await.contains(turn_id);
+    if rewound {
+        tracing::debug!(
+            worker_session_id = %inner.worker_session_id,
+            card_id = %inner.card_id,
+            turn_id,
+            "planner harness dropping a late frame of a rewound turn"
+        );
+    }
+    rewound
+}
+
 fn item_turn_id(params: &Value) -> Option<&str> {
     params
         .get("turn")
@@ -2228,7 +2319,7 @@ fn item_turn_id(params: &Value) -> Option<&str> {
 }
 
 /// Live codex sends `userMessage`; the kernel stores `item.type` verbatim and tests have used snake case.
-fn is_user_message_type(item_type: Option<&str>) -> bool {
+pub(super) fn is_user_message_type(item_type: Option<&str>) -> bool {
     matches!(item_type, Some("userMessage" | "user_message"))
 }
 
@@ -3001,13 +3092,21 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
         ProjectionWrite(CalmError),
         TurnStart(TurnStartFailure),
     }
+    // A rewind's cut rides with whatever turn starts next; it is consumed only once one has.
+    let pending_rewind = inner.pending_rewind.lock().await.clone();
     let issued = async {
         // Written before `turn/start` goes out, so the row says what codex is told.
         write_projection_row(inner, &thread_id, client_id.as_str(), &segments)
             .await
             .map_err(IssueFailure::ProjectionWrite)?;
         let turn = IssueTurnHandle::from_reconciliation(inner)
-            .issue(&thread_id, items, &selection, client_id.as_str())
+            .issue(
+                &thread_id,
+                items,
+                &selection,
+                client_id.as_str(),
+                pending_rewind.as_ref(),
+            )
             .await
             .map_err(IssueFailure::TurnStart)?;
         Ok::<_, IssueFailure>(turn)
@@ -3033,6 +3132,14 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
             *inner.issued_turn_head.lock().await = diff.current_head.clone();
             // Cleared in the same snapshot that empties the queue, so no restart can pair this key with a later batch.
             *inner.projection_client_id.lock().await = None;
+            // Known gap (#1923): a crash between this start and the snapshot write below replays the
+            // cut on restart. Codex answers `turn not found` (applied); the Claude CLI guard fails that
+            // one turn loudly. Either way the cut is then consumed and later turns are unaffected.
+            *inner.pending_rewind.lock().await = None;
+            *inner.last_turn_base.lock().await = Some(TurnBase {
+                turn_id: turn_id.clone(),
+                seen_head: last_seen_head_snapshot.clone(),
+            });
             persist_issuance_outcome(inner).await?;
         }
         Err(failure) => {
@@ -3459,6 +3566,8 @@ async fn snapshot_for(inner: &Arc<Inner>) -> HarnessSnapshot {
     snapshot.projection_client_id = projection_client_id;
     snapshot.token_usage = token_usage;
     snapshot.interruption_intent = inner.interruption_intent.lock().await.clone();
+    snapshot.pending_rewind = inner.pending_rewind.lock().await.clone();
+    snapshot.last_turn_base = inner.last_turn_base.lock().await.clone();
     snapshot
 }
 
@@ -3995,6 +4104,7 @@ mod tests {
 }
 
 mod live_reply;
+mod rewind_command;
 
 #[cfg(test)]
 mod completed_commit_tests;
