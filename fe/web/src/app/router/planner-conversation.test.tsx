@@ -230,7 +230,7 @@ describe('planner conversation regressions', () => {
     expect(screen.queryByText(/Pick a model to start it again/)).toBeNull();
   });
 
-  it('offers exactly the close, the reading-width toggle, Send and the model picker, and no other control at all', async () => {
+  it('offers exactly the close, the resize edge, Send and the model picker, and no other control at all', async () => {
     setupWithTurns();
     await openConversationWithTurns();
     const drawer = screen.getByRole('complementary', { name: 'Planner chat' });
@@ -239,9 +239,40 @@ describe('planner conversation regressions', () => {
       .map((button) => button.getAttribute('aria-label') ?? button.textContent);
     /* No catalog answers `GET /api/models`, so the trigger reads `Model: Default` and no effort control appears. */
     expect([...names].sort()).toEqual([
-      'Attach an image', 'Close conversation', 'Expand reading width', 'Model: Default', 'Send',
+      'Attach an image', 'Close conversation', 'Model: Default', 'Send',
     ]);
+    /* The shell hands the route's conversation drawer its resize contract. */
+    expect(within(drawer).getAllByRole('separator').map((edge) => edge.getAttribute('aria-label'))).toEqual(['Resize conversation']);
     expect(screen.queryByRole('button', { name: /reset/i })).toBeNull();
+  });
+
+  /* The production wiring, end to end: the router's drawer, the shell's contract and `.main`'s property — written directly mid-drag, then from the stored width once it settles; what is stored is `ui-preferences.test.tsx`. jsdom lays nothing out and has no pointer capture, so the card reports a fixed 480px (30rem) and capture is a no-op; the geometry is `app/shell/drawer-seam.browser.test.tsx`. */
+  it('previews a drag on the main region, keeps the settled width there, and clears it on reset', async () => {
+    setupWithTurns();
+    await openConversationWithTurns();
+    const measured = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue(DOMRect.fromRect({ x: 0, y: 0, width: 480, height: 600 }));
+    const capture = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'setPointerCapture');
+    Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', { configurable: true, value: () => {} });
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+    try {
+      const main = document.querySelector('main')!;
+      const edge = screen.getByRole('separator', { name: 'Resize conversation' });
+      expect(main.style.getPropertyValue('--nc-drawer-width')).toBe('');
+      fireEvent.pointerDown(edge, { pointerId: 1, button: 0, clientX: 500 });
+      fireEvent.pointerMove(edge, { pointerId: 1, clientX: 420 });
+      vi.advanceTimersToNextFrame();
+      expect(main.style.getPropertyValue('--nc-drawer-width')).toBe('35rem');
+      fireEvent.pointerUp(edge, { pointerId: 1, clientX: 420 });
+      expect(main.style.getPropertyValue('--nc-drawer-width')).toBe('30rem');
+      fireEvent.keyDown(edge, { key: 'Home' });
+      expect(main.style.getPropertyValue('--nc-drawer-width')).toBe('');
+    } finally {
+      vi.useRealTimers();
+      measured.mockRestore();
+      if (capture === undefined) delete (HTMLElement.prototype as Partial<HTMLElement>).setPointerCapture;
+      else Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', capture);
+    }
   });
 
   /* The server still serves `POST /planner/reset`; this pins that the front end has no path to it. */

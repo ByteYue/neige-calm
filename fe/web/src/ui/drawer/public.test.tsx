@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { useEffect, useRef, type ReactNode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Drawer } from './public.tsx';
+import { Drawer, type DrawerResize } from './public.tsx';
 import { Dialog } from '../dialog/public.tsx';
 import { useState } from '../state/public.ts';
 
@@ -92,46 +92,42 @@ describe('Drawer', () => {
     }
   });
 
-  it('offers no width toggle unless the caller owns a reading width', () => {
+  it('offers no resize edge unless the caller owns the width', () => {
     open();
-    expect(screen.queryByRole('button', { name: 'Expand reading width' })).toBeNull();
-    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(false);
+    expect(screen.queryByRole('separator')).toBeNull();
+    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-resizable')).toBe(false);
   });
 
-  it('toggles the reading width in place, before the close in the header’s tab order', () => {
-    const onExpandedChange = vi.fn();
-    const drawer = (expanded: boolean) => (
-      <Drawer open title="Chat" onClose={vi.fn()} readingWidth={{ expanded, onExpandedChange }}><p>body</p></Drawer>
-    );
-    const { rerender } = render(drawer(false));
-    const toggle = screen.getByRole('button', { name: 'Expand reading width' });
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
-    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(false);
+  it('puts the resize edge after the header in the tab order, and resets it from the keyboard or a double click', () => {
+    const resize = { onPreview: vi.fn(), onCommit: vi.fn() };
+    render(<Drawer open title="Chat" onClose={vi.fn()} resize={resize}><p>body</p></Drawer>);
+    const edge = screen.getByRole('separator', { name: 'Resize conversation' });
+    expect(edge.getAttribute('aria-orientation')).toBe('vertical');
+    expect(edge.tabIndex).toBe(0);
+    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-resizable')).toBe(true);
     const close = screen.getByRole('button', { name: 'Close conversation' });
-    expect(toggle.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    toggle.focus();
-    fireEvent.click(toggle);
-    expect(onExpandedChange).toHaveBeenCalledWith(true);
+    expect(close.compareDocumentPosition(edge) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    rerender(drawer(true));
-    expect(screen.getByRole('button', { name: 'Restore width' })).toBe(toggle);
-    expect(document.activeElement).toBe(toggle);
-    expect(toggle.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(true);
-    fireEvent.click(toggle);
-    expect(onExpandedChange).toHaveBeenLastCalledWith(false);
+    fireEvent.keyDown(edge, { key: 'Home' });
+    expect(resize.onPreview).toHaveBeenLastCalledWith(null);
+    expect(resize.onCommit).toHaveBeenLastCalledWith(null);
+    fireEvent.keyDown(edge, { key: 'Tab' });
+    expect(resize.onCommit).toHaveBeenCalledOnce();
+    fireEvent.doubleClick(edge);
+    expect(resize.onCommit).toHaveBeenCalledTimes(2);
+    expect(resize.onCommit).toHaveBeenLastCalledWith(null);
   });
 
-  it('keeps a compact drawer at full width whatever the reading-width choice', () => {
+  it('keeps a compact drawer at full width with no resize edge', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({
       matches: true,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     })));
     try {
-      render(<Drawer open title="Chat" onClose={vi.fn()} readingWidth={{ expanded: true, onExpandedChange: vi.fn() }}><p>body</p></Drawer>);
-      expect(screen.queryByRole('button', { name: 'Restore width' })).toBeNull();
-      expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-expanded')).toBe(false);
+      render(<Drawer open title="Chat" onClose={vi.fn()} resize={{ onPreview: vi.fn(), onCommit: vi.fn() }}><p>body</p></Drawer>);
+      expect(screen.queryByRole('separator')).toBeNull();
+      expect(screen.getByRole('complementary').hasAttribute('data-nc-drawer-resizable')).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -333,5 +329,91 @@ describe('Drawer', () => {
     view.rerender(drawerAt(false, <p>the transcript</p>));
     expect(document.activeElement).toBe(opener);
     column.remove(); pageTitle.remove();
+  });
+});
+
+/* jsdom lays nothing out and has no pointer capture: the card reports a fixed 480px and capture is a no-op, so these pin the drag's lifetime, not its geometry (that is `app/shell/drawer-seam.browser.test.tsx`). */
+describe('a held drag that is interrupted', () => {
+  const restore: (() => void)[] = [];
+  function stub<K extends keyof HTMLElement>(key: K, value: HTMLElement[K]) {
+    const had = Object.getOwnPropertyDescriptor(HTMLElement.prototype, key);
+    Object.defineProperty(HTMLElement.prototype, key, { configurable: true, value });
+    restore.push(() => { if (had === undefined) delete (HTMLElement.prototype as Partial<HTMLElement>)[key]; else Object.defineProperty(HTMLElement.prototype, key, had); });
+  }
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+    stub('getBoundingClientRect', () => DOMRect.fromRect({ x: 0, y: 0, width: 480, height: 600 }));
+    stub('setPointerCapture', () => {});
+  });
+  afterEach(() => { vi.useRealTimers(); for (const undo of restore.splice(0).reverse()) undo(); });
+
+  const drawer = (resize: DrawerResize | undefined, open = true) => (
+    <Drawer open={open} title="Chat" onClose={vi.fn()} resize={resize}><p>body</p></Drawer>
+  );
+  /** Press the edge and move it 80px toward the page, one frame laid out, a second move left pending. */
+  function holdDrag() {
+    const edge = screen.getByRole('separator', { name: 'Resize conversation' });
+    fireEvent.pointerDown(edge, { pointerId: 1, button: 0, clientX: 500 });
+    fireEvent.pointerMove(edge, { pointerId: 1, clientX: 420 });
+    vi.advanceTimersToNextFrame();
+    fireEvent.pointerMove(edge, { pointerId: 1, clientX: 400 });
+  }
+
+  it.each([
+    ['closing the drawer', (rerender: (ui: ReactNode) => void, resize: DrawerResize) => { rerender(drawer(resize, false)); }],
+    ['losing the resize contract, as a compact viewport does', (rerender: (ui: ReactNode) => void) => { rerender(drawer(undefined)); }],
+  ])('keeps the width last laid out when %s ends it, drops the pending frame, and lets the next press drag', (_, interrupt) => {
+    const resize = { onPreview: vi.fn(), onCommit: vi.fn() };
+    const { rerender } = render(drawer(resize));
+    holdDrag();
+    expect(resize.onPreview).toHaveBeenLastCalledWith(35);
+    expect(resize.onCommit).not.toHaveBeenCalled();
+
+    interrupt(rerender, resize);
+    expect(screen.queryByRole('separator')).toBeNull();
+    expect(resize.onCommit).toHaveBeenCalledExactlyOnceWith(30);
+    vi.advanceTimersToNextFrame();
+    expect(resize.onPreview).toHaveBeenCalledOnce();
+
+    rerender(drawer(resize));
+    holdDrag();
+    expect(resize.onPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the width last laid out when the drawer unmounts mid-drag', () => {
+    const resize = { onPreview: vi.fn(), onCommit: vi.fn() };
+    const { unmount } = render(drawer(resize));
+    holdDrag();
+    unmount();
+    expect(resize.onCommit).toHaveBeenCalledExactlyOnceWith(30);
+    vi.advanceTimersToNextFrame();
+    expect(resize.onPreview).toHaveBeenCalledOnce();
+  });
+
+  /* Advances the queued frame inside the commit that removes the edge: a sibling's layout effect runs after the deleted subtree's layout cleanups and before any passive effect, so this is the window a passive cleanup would leave open. */
+  function FrameInCommit({ fire }: { fire: boolean }) {
+    useLayoutEffect(() => { if (fire) vi.advanceTimersToNextFrame(); }, [fire]);
+    return null;
+  }
+
+  it('drops the queued frame in the commit that removes the edge, before passive effects run', () => {
+    const resize = { onPreview: vi.fn(), onCommit: vi.fn() };
+    const { rerender } = render(<>{drawer(resize)}<FrameInCommit fire={false} /></>);
+    holdDrag();
+    rerender(<>{drawer(undefined)}<FrameInCommit fire /></>);
+    expect(resize.onPreview).toHaveBeenCalledOnce();
+    expect(resize.onCommit).toHaveBeenCalledExactlyOnceWith(30);
+  });
+
+  it('commits nothing when a press ends without a move', () => {
+    const resize = { onPreview: vi.fn(), onCommit: vi.fn() };
+    const { rerender } = render(drawer(resize));
+    const edge = screen.getByRole('separator', { name: 'Resize conversation' });
+    fireEvent.pointerDown(edge, { pointerId: 1, button: 0, clientX: 500 });
+    fireEvent.pointerUp(edge, { pointerId: 1, clientX: 500 });
+    fireEvent.pointerDown(edge, { pointerId: 2, button: 0, clientX: 500 });
+    rerender(drawer(resize, false));
+    expect(resize.onPreview).not.toHaveBeenCalled();
+    expect(resize.onCommit).not.toHaveBeenCalled();
   });
 });
