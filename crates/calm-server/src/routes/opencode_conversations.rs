@@ -304,6 +304,9 @@ pub(crate) fn summary(
     last_turn_completed_at: Option<i64>,
 ) -> TrackConversationSummary {
     TrackConversationSummary {
+        source_card_id: card.payload["side_source_card_id"]
+            .as_str()
+            .map(ToOwned::to_owned),
         id: card.id.to_string(),
         track_id: card.track_id.to_string(),
         title: card.title.clone(),

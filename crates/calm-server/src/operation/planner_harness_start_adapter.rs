@@ -136,10 +136,12 @@ impl PlannerHarnessStartAdapter {
         }
     }
 
-    fn opencode_wiring(&self) -> OpenCodePlannerWiring {
+    fn opencode_wiring(&self, events: crate::event::EventBus) -> OpenCodePlannerWiring {
         OpenCodePlannerWiring {
             host: self.opencode_host.clone(),
             plugin: self.plugin.clone(),
+            events,
+            write: WriteContext::new(self.card_role_cache.clone(), self.track_area_cache.clone()),
         }
     }
 
@@ -1503,7 +1505,7 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
             self.daemon.clone(),
             self.seals.clone(),
             &self.claude_wiring(),
-            &self.opencode_wiring(),
+            &self.opencode_wiring(ctx.events.clone()),
             self.repo.clone(),
             ClaudePlannerRow {
                 worker_session_id: &worker_session_id,

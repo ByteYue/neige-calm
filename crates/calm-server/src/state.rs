@@ -151,6 +151,8 @@ impl RouteState {
         OpenCodePlannerWiring {
             host: self.opencode_planner.clone(),
             plugin: self.plugin.clone(),
+            events: self.events.clone(),
+            write: self.write.clone(),
         }
     }
 
@@ -677,6 +679,34 @@ impl AppState {
             .await;
     }
 
+    /// Fixture assembly: the same registered loopback connections used in production.
+    #[cfg(feature = "fixtures")]
+    pub fn with_opencode_connections_config(
+        mut self,
+        config: crate::opencode_planner::attachment::ConnectionsConfig,
+    ) -> Self {
+        let current = &self.route.opencode_planner;
+        self.route.opencode_planner = Arc::new(
+            OpenCodePlannerHost::new(
+                None,
+                current
+                    .instructions_dir
+                    .parent()
+                    .expect("OpenCode data directory"),
+                current.mcp_shim.clone(),
+                current.mcp_socket.clone(),
+            )
+            .expect("OpenCode host")
+            .with_connections(config)
+            .expect("OpenCode connections"),
+        );
+        self.route
+            .opencode_planner
+            .validate_external_directories(&self.route.workspace_root)
+            .expect("External native directories");
+        self.rebuild_operation_runtime();
+        self
+    }
     /// Fixture assembly: configure the same managed OpenCode host used by production.
     #[cfg(feature = "fixtures")]
     pub fn with_opencode_planner_config(mut self, config: OpenCodePlannerConfig) -> Self {
@@ -1226,6 +1256,23 @@ impl AppState {
             mcp_shim_bin.clone(),
             mcp_socket_path.clone(),
         )?);
+        let opencode_planner = Arc::new(
+            Arc::try_unwrap(opencode_planner)
+                .expect("new OpenCode host")
+                .with_connections(
+                    cfg.opencode_connections_config
+                        .as_deref()
+                        .map(crate::opencode_planner::attachment::ConnectionsConfig::read)
+                        .transpose()?
+                        .unwrap_or_default(),
+                )?,
+        );
+        opencode_planner.validate_external_directories(&workspace_root)?;
+        if let Some(pool) = repo.sqlite_pool() {
+            opencode_planner
+                .validate_external_owned_directories(&pool)
+                .await?;
+        }
         crate::opencode_planner::lifecycle::boot(repo.as_ref(), &opencode_planner).await?;
         let mcp_server = crate::mcp_server::McpServer::spawn_with_context(
             mcp_context.clone(),

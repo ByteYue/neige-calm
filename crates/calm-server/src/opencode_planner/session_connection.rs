@@ -129,7 +129,9 @@ impl Shared {
         Ok(())
     }
     pub(crate) fn send(&self, notification: Notification) {
-        let _ = self.notifications.send(notification);
+        let _ = self
+            .notifications
+            .send(super::events::from_notification(notification));
     }
     pub(crate) fn unknown(&self, thread: &str, turn: &str, reason: &str) {
         self.send(Notification::Other {

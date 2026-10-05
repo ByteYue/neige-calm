@@ -29,7 +29,7 @@ pub const SIDE_SOURCE_CARD_PAYLOAD_KEY: &str = "side_source_card_id";
 
 /// Kernel-owned card fields, refused at client boundaries and preserved by
 /// `card_update_tx` even when a replacement payload omits them.
-pub const SERVER_OWNED_CARD_PAYLOAD_KEYS: [&str; 4] = [
+pub const SERVER_OWNED_CARD_PAYLOAD_KEYS: [&str; 5] = [
     TERMINAL_SIGNALS_PAYLOAD_KEY,
     PLANNER_TEMPLATE_CONTEXT_PAYLOAD_KEY,
     PLANNER_PROVIDER_PAYLOAD_KEY,

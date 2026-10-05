@@ -1176,7 +1176,8 @@ mod tests {
                 "terminal_signals",
                 "template_context",
                 "planner_provider",
-                "side_source_card_id"
+                "side_source_card_id",
+                "opencode_attachment"
             ]
         );
         let probes = [json!(true), json!({}), json!("declared"), Value::Null];

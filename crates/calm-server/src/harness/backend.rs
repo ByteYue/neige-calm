@@ -255,6 +255,24 @@ impl PlannerBackend {
         }
     }
 
+    pub fn owns_provider_process(&self) -> bool {
+        !self
+            .opencode_session()
+            .is_some_and(|session| session.is_attached())
+    }
+
+    pub fn attached_session(&self) -> Option<crate::opencode_planner::attachment::AttachedSession> {
+        self.opencode_session()
+            .and_then(|session| session.attached_session())
+    }
+
+    pub async fn check_external_submission(&self) -> Result<()> {
+        if let Some(session) = self.opencode_session() {
+            session.check_can_submit().await?;
+        }
+        Ok(())
+    }
+
     /// Whether a queued entry can join the running turn (§5.9): the run loop checks this before
     /// it takes the entry out of the queue.
     pub fn supports_steer(&self) -> bool {
@@ -267,9 +285,9 @@ impl PlannerBackend {
     /// Control authority is declared by the provider session before the kernel
     /// records an interrupt intent or arms a completion deadline.
     pub fn supports_interrupt(&self) -> bool {
-        match self {
-            Self::Codex(_) | Self::Claude(_) => true,
-            Self::OpenCode(session) => session.supports_interrupt(),
+        match &self.0 {
+            Arm::Codex(_) | Arm::Claude(_) => true,
+            Arm::OpenCode(session) => session.supports_interrupt(),
         }
     }
 
@@ -373,6 +391,14 @@ impl PlannerBackend {
                 codex_selection::resolve(daemon, source, &payload).await
             }
             Arm::OpenCode(session) => {
+                if session.is_attached() {
+                    return Ok(TurnModelSelection {
+                        model: session
+                            .attached_session()
+                            .and_then(|metadata| metadata.model),
+                        effort: None,
+                    });
+                }
                 session.host().configured().map_err(|error| IssuanceRefusal::needs_a_choice(error.to_string(), "OpenCode Planner needs a server configuration; your message remains queued.".into()))?;
                 let payload = source.card_payload().await?;
                 crate::opencode_planner::models::turn_selection(&payload)

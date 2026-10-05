@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{Inner, emit_item_added, insert_item_row, item_turn_id};
+use super::{Inner, emit_item_added, item_turn_id, transcript_owner};
 use crate::harness::live_replies::{LiveReplyWriter, OpenReply};
 use crate::harness::planner_event::ItemPhase;
 use crate::harness::state::{HarnessState, IssuingKind};
+use crate::harness::transcript::{ItemMetadata, TranscriptItem};
 
 /// The stored item type of a reply, the one item type that streams.
 const REPLY_ITEM_TYPE: &str = "agentMessage";
@@ -120,17 +121,21 @@ async fn store_partial(
         "completedAtMs": crate::model::now_ms(),
         "_partial": true,
     });
-    let row_id = insert_item_row(
-        inner,
-        thread_id,
-        Some(turn_id),
-        Some(&reply.item_id),
-        Some(REPLY_ITEM_TYPE),
-        method,
-        &serde_json::to_string(&params)?,
-        None,
-    )
-    .await?;
+    let params_json = serde_json::to_string(&params)?;
+    let row_id = transcript_owner(inner)
+        .record(&TranscriptItem {
+            thread_id,
+            metadata: ItemMetadata {
+                turn_id: Some(turn_id),
+                item_uuid: Some(&reply.item_id),
+                item_type: Some(REPLY_ITEM_TYPE),
+                method,
+            },
+            params_json: &params_json,
+            legacy_segments_json: None,
+            projection_client_id: None,
+        })
+        .await?;
     live.item_stored(&reply.item_id);
     emit_item_added(
         inner,

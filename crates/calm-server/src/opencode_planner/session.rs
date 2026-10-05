@@ -159,8 +159,8 @@ impl OpenCodePlannerSession {
     pub fn host(&self) -> &Arc<OpenCodePlannerHost> {
         &self.shared.params.host
     }
-    pub fn codex(&self) -> &Arc<ThreadSeals> {
-        &self.shared.params.seals
+    pub fn thread_sealed(&self, thread: &str) -> bool {
+        self.shared.params.seals.is_sealed(thread)
     }
     pub fn subscribe_events(&self) -> broadcast::Receiver<provider::events::PlannerEvent> {
         self.shared.notifications.subscribe()

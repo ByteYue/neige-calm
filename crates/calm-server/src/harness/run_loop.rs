@@ -35,6 +35,9 @@ use crate::harness::queue::{
 use crate::harness::snapshot::{HarnessPhaseTag, HarnessSnapshot, IssuedInputSegments, TurnBase};
 use crate::harness::state::{HarnessState, IssuingKind, RunningTurn, run_status_for};
 use crate::harness::token_usage::TokenUsage;
+use crate::harness::transcript::{
+    ItemMetadata, TranscriptItem, TranscriptOwner, is_user_message_type,
+};
 use crate::ids::{ActorId, CardId, TrackId};
 use crate::model::HarnessInputSegment;
 use crate::planner_attachments::bind::BoundAttachment;
@@ -858,6 +861,18 @@ impl PlannerHarness {
 
     /// Why this conversation's queue is not draining, or `None`. `None` does NOT mean waiting is
     /// the right answer.
+    pub fn owns_provider_process(&self) -> bool {
+        self.inner.backend.owns_provider_process()
+    }
+    pub fn supports_steer(&self) -> bool {
+        self.inner.backend.supports_steer()
+    }
+    pub fn attached_session(&self) -> Option<crate::opencode_planner::attachment::AttachedSession> {
+        self.inner.backend.attached_session()
+    }
+    pub async fn check_external_submission(&self) -> Result<()> {
+        self.inner.backend.check_external_submission().await
+    }
     pub async fn issuance_block(&self) -> Option<String> {
         self.inner.issuance_block.lock().await.clone()
     }
@@ -986,6 +1001,22 @@ impl PlannerHarness {
         *self.inner.interrupt_deadline.lock().await = None;
         persist_snapshot(&self.inner).await?;
         Ok((old_phase, tag))
+    }
+
+    /// Fixtures advance an actual running turn past the configured duration and invoke
+    /// the production watchdog, preserving its native correlation and permissions.
+    #[cfg(feature = "fixtures")]
+    pub async fn expire_turn_duration_for_test(&self) -> Result<()> {
+        let mut state = self.inner.state.lock().await;
+        let HarnessState::TurnRunning { started_at, .. } = &mut *state else {
+            return Err(CalmError::Conflict(
+                "Fixture requires an actual running turn".into(),
+            ));
+        };
+        *started_at =
+            Instant::now() - self.inner.config.max_turn_duration - Duration::from_millis(1);
+        drop(state);
+        watchdog_tick(&self.inner).await
     }
 
     /// Permanently stop this harness from issuing turns; in replay mode the app-server is a stub
@@ -1409,7 +1440,7 @@ async fn handle_steer(
     // runs as the next turn.
     if !inner.backend.supports_steer() {
         return Ok(Err(SteerRefused::NotTaken {
-            message: "this Planner's provider (Claude) cannot take messages into a running \
+            message: "this conversation's provider cannot take messages into a running \
                       turn; it stays queued"
                 .into(),
             phase,
@@ -2194,69 +2225,30 @@ async fn on_notification(
             } else {
                 None
             };
-            let item_db_id = match (projection_client_id.as_deref(), phase) {
-                (Some(client_id), ItemPhase::Completed) => {
-                    let upgraded = match item_uuid.as_deref() {
-                        Some(codex_item_id) => {
-                            inner
-                                .repo
-                                .transcript_projection_upgrade(
-                                    inner.card_id.as_str(),
-                                    client_id,
-                                    turn_id.as_deref(),
-                                    codex_item_id,
-                                    &params_json,
-                                )
-                                .await?
-                        }
-                        None => None,
-                    };
-                    match upgraded {
-                        Some(row_id) => row_id,
-                        None => {
-                            insert_item_row(
-                                inner,
-                                &thread_id,
-                                turn_id.as_deref(),
-                                item_uuid.as_deref(),
-                                item_type.as_deref(),
-                                method,
-                                &params_json,
-                                legacy_segments_json.as_deref(),
-                            )
-                            .await?
-                        }
-                    }
-                }
-                (Some(client_id), ItemPhase::Started)
-                    if inner
-                        .repo
-                        .transcript_projection_id(inner.card_id.as_str(), client_id)
-                        .await?
-                        .is_some() =>
-                {
-                    tracing::debug!(
-                        worker_session_id = %inner.worker_session_id,
-                        card_id = %inner.card_id,
-                        client_id,
-                        "planner harness skipping item/started echo of a projected user message"
-                    );
-                    return persist_snapshot(inner).await;
-                }
-                _ => {
-                    insert_item_row(
-                        inner,
-                        &thread_id,
-                        turn_id.as_deref(),
-                        item_uuid.as_deref(),
-                        item_type.as_deref(),
-                        method,
-                        &params_json,
-                        legacy_segments_json.as_deref(),
-                    )
+            if phase == ItemPhase::Started
+                && let Some(client_id) = projection_client_id.as_deref()
+                && inner
+                    .repo
+                    .transcript_projection_id(inner.card_id.as_str(), client_id)
                     .await?
-                }
-            };
+                    .is_some()
+            {
+                return persist_snapshot(inner).await;
+            }
+            let item_db_id = transcript_owner(inner)
+                .record(&TranscriptItem {
+                    thread_id: &thread_id,
+                    metadata: ItemMetadata {
+                        turn_id: turn_id.as_deref(),
+                        item_uuid: item_uuid.as_deref(),
+                        item_type: item_type.as_deref(),
+                        method,
+                    },
+                    params_json: &params_json,
+                    legacy_segments_json: legacy_segments_json.as_deref(),
+                    projection_client_id: projection_client_id.as_deref(),
+                })
+                .await?;
             live_reply::on_item(live, phase, &params);
             if phase == ItemPhase::Completed && legacy_segments_json.is_some() {
                 *inner.legacy_issued_input_segments.lock().await = None;
@@ -2388,40 +2380,18 @@ fn item_turn_id(params: &Value) -> Option<&str> {
         .or_else(|| params.get("turnId").and_then(Value::as_str))
 }
 
-/// Live codex sends `userMessage`; the kernel stores `item.type` verbatim and tests have used snake case.
-pub(super) fn is_user_message_type(item_type: Option<&str>) -> bool {
-    matches!(item_type, Some("userMessage" | "user_message"))
-}
-
-/// One transcript row for a codex `item/*` notification. `input_segments` is NULL for every
-/// turn this binary issued (they live on the projection row); `legacy_segments_json` is the
-/// exception for an older binary's in-flight turn.
-#[allow(clippy::too_many_arguments)]
-async fn insert_item_row(
-    inner: &Arc<Inner>,
-    thread_id: &str,
-    turn_id: Option<&str>,
-    item_uuid: Option<&str>,
-    item_type: Option<&str>,
-    method: &str,
-    params_json: &str,
-    legacy_segments_json: Option<&str>,
-) -> Result<i64> {
-    Ok(inner
-        .repo
-        .harness_item_insert(
-            &inner.worker_session_id,
-            inner.card_id.as_str(),
-            inner.track_id.as_str(),
-            thread_id,
-            turn_id,
-            item_uuid,
-            item_type,
-            method,
-            params_json,
-            legacy_segments_json,
-        )
-        .await?)
+fn transcript_owner(inner: &Inner) -> TranscriptOwner<'_> {
+    TranscriptOwner {
+        repo: inner.repo.as_ref(),
+        events: &inner.events,
+        write: crate::state::WriteContext::new(
+            inner.card_role_cache.clone(),
+            inner.track_area_cache.clone(),
+        ),
+        worker_session_id: &inner.worker_session_id,
+        card_id: inner.card_id.as_str(),
+        track_id: inner.track_id.as_str(),
+    }
 }
 
 async fn emit_item_added(
@@ -2432,29 +2402,18 @@ async fn emit_item_added(
     turn_id: Option<String>,
     method: String,
 ) -> Result<()> {
-    let scope = harness_event_scope(inner, "harness.item.added");
-    inner
-        .repo
-        .log_pure_event(
-            ActorId::Kernel,
-            scope,
-            None,
-            &inner.events,
-            &inner.card_role_cache,
-            &inner.track_area_cache,
-            Event::HarnessItemAdded {
-                worker_session_id: inner.worker_session_id.clone(),
-                card_id: inner.card_id.clone(),
-                track_id: inner.track_id.clone(),
-                item_db_id,
-                item_uuid,
-                item_type,
-                turn_id,
-                method,
+    transcript_owner(inner)
+        .announce(
+            harness_event_scope(inner, "harness.item.added"),
+            item_db_id,
+            &ItemMetadata {
+                turn_id: turn_id.as_deref(),
+                item_uuid: item_uuid.as_deref(),
+                item_type: item_type.as_deref(),
+                method: &method,
             },
         )
-        .await?;
-    Ok(())
+        .await
 }
 
 /// The drained batch, written to the transcript BEFORE `turn/start` goes out, in the shape
@@ -3601,6 +3560,9 @@ async fn issue_interrupt_for_turn(
     target_turn_id: String,
     reason: String,
 ) -> Result<()> {
+    if !inner.backend.supports_interrupt() {
+        return Ok(());
+    }
     let Some(thread_id) = inner.thread_id.read().await.clone() else {
         return Ok(());
     };

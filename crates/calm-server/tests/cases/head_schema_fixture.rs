@@ -87,6 +87,7 @@ const POST_0067_MIGRATION_NAMES: &[&str] = &[
     "0147_track_creator_provenance.sql",
     "0148_opencode_planner_sessions.sql",
     "0149_opencode_submission_journal.sql",
+    "0150_attached_opencode_sessions.sql",
 ];
 
 #[test]
