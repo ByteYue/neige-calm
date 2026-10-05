@@ -8,6 +8,7 @@ use calm_server::harness::{ClaimMode, Observation, new_track_delete_locks};
 use calm_server::ids::ActorId;
 use calm_server::mail::{Recipient, SendRequest};
 use calm_server::model::{HarnessInputPresentation, NewArea, now_ms};
+use calm_types::observation::MAIL_WAKE_SOURCE;
 use serde_json::{Value, json};
 
 use super::track_mail_fixture::{Planner, World, mail_and_hop, refusal};
@@ -87,6 +88,24 @@ async fn mail_send_wakes_the_recipient_planner_with_one_line() {
         )),
         "{turn}"
     );
+    // The recipient's stored turn input presents the wake as mail (#2160 S2), not as the user's word.
+    let stored = w
+        .repo_dyn
+        .transcript_rows_of_thread(n.card_id.as_str(), &n.thread_id)
+        .await
+        .unwrap();
+    let wake_segments: Vec<Value> = stored
+        .iter()
+        .filter_map(|row| row.input_segments.as_deref())
+        .flat_map(|json| serde_json::from_str::<Vec<Value>>(json).unwrap())
+        .filter(|segment| {
+            segment["text"]
+                .as_str()
+                .is_some_and(|t| t.contains(&mail_id))
+        })
+        .map(|segment| segment["presentation"].clone())
+        .collect();
+    assert_eq!(wake_segments, vec![json!("system_mail")]);
     assert!(
         !turn.contains(body),
         "the body is never in the wake: {turn}"
@@ -579,17 +598,20 @@ async fn mail_to_a_down_planner_is_woken_on_its_next_harness_start() {
     harness.shutdown().await.unwrap();
 }
 
-/// Row 10 (M): a mail's wake is a system segment, never the user's word.
+/// Row 10 (M): a mail's wake is a mail segment, never the user's word.
 #[test]
 fn mail_wake_never_presents_as_user() {
     let wake = Observation::TrackWake {
-        source: "mail".into(),
+        source: MAIL_WAKE_SOURCE.into(),
         key: "m1".into(),
         text: "\"R\": s — neige mail cat m1".into(),
     };
     let segments = Observation::input_segments_for(&[wake]);
     assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].presentation, HarnessInputPresentation::System);
+    assert_eq!(
+        segments[0].presentation,
+        HarnessInputPresentation::SystemMail
+    );
 }
 
 /// Row 13 (M): the send and the stamp re-prove the caller session in their own transaction, so a
