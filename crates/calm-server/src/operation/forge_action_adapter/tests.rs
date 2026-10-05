@@ -15,6 +15,8 @@ use crate::terminal_renderer::TerminalRendererRegistry;
 
 #[cfg(test)]
 mod checks_upgrade_tests;
+#[cfg(test)]
+mod comment_rename_tests;
 
 #[test]
 fn frozen_forge_six_shape_defaults_new_optional_fields() {
@@ -789,7 +791,7 @@ fn no_event_payload(
     }
 }
 
-/// The git-forge plugin's `git.commit` probe text: the credential split, then the shared script.
+/// The git-forge plugin's `git_commit` probe text: the credential split, then the shared script.
 fn git_commit_probe_script() -> String {
     format!("{FORGE_SHELL_PRELUDE}\n{GIT_COMMIT_PROBE_SCRIPT}")
 }

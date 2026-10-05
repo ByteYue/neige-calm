@@ -1033,12 +1033,20 @@ impl PluginHost {
                 // its handle, so we treat that as "go ahead".
                 return Err(HostError::AlreadyRunning(id.to_string()));
             }
-            match find_template_conflict(
-                &manifest,
-                self.registry.list(),
+            match find_minted_name_conflict(
+                id,
+                &manifest.exposes_tools,
                 &table.template_holder_ids(),
-                &trusted_forge_plugin,
-            ) {
+                self.registry.list(),
+            )
+            .or_else(|| {
+                find_template_conflict(
+                    &manifest,
+                    self.registry.list(),
+                    &table.template_holder_ids(),
+                    &trusted_forge_plugin,
+                )
+            }) {
                 Some(conflict) => Err(conflict),
                 None => {
                     table.spawning.insert(id.to_string());
@@ -1053,7 +1061,7 @@ impl PluginHost {
                 tracing::warn!(
                     plugin_id = %id,
                     error = %conflict,
-                    "refusing to spawn plugin with a conflicting template id"
+                    "refusing to spawn plugin with a conflicting template id or minted name"
                 );
                 // Surface the refusal as a failed `PluginState` event so operators see why the plugin isn't running.
                 self.emit_crashed_under(lifecycle, &conflict.to_string())
@@ -1368,11 +1376,15 @@ impl PluginHost {
 
         let tools = connector::materialize_http_tools(id, block, &upstream);
         let tool_count = tools.len();
+        let published = match self.claim_minted_names(lifecycle, tools) {
+            Ok(published) => published,
+            Err(reason) => return self.connector_unavailable(lifecycle, guard, reason).await,
+        };
 
         // Materialization, then the live insert: the ORDER is the invariant, and each block stamps the tick as its LAST action.
 
-        // Field-level mutation, and a NO-OP if the id is not in the registry; abandoning the spawn is the right answer to 'the registry does not know this id' however we got there.
-        if !self.registry.set_exposes_tools(lifecycle, tools) {
+        // The publication is field-level, and a NO-OP if the id is not in the registry; abandoning the spawn is the right answer to 'the registry does not know this id' however we got there.
+        if !published {
             let reason = format!(
                 "plugin `{id}` left the registry while its connector was starting \
                  (uninstalled or reloaded mid-spawn); abandoning spawn"
@@ -1484,9 +1496,13 @@ impl PluginHost {
 
         let tools = connector::materialize_cli_tools(id, block);
         let tool_count = tools.len();
+        let published = match self.claim_minted_names(lifecycle, tools) {
+            Ok(published) => published,
+            Err(reason) => return self.connector_unavailable(lifecycle, guard, reason).await,
+        };
 
         // Materialization, then the live insert: the ORDER is the invariant.
-        if !self.registry.set_exposes_tools(lifecycle, tools) {
+        if !published {
             let reason = format!(
                 "plugin `{id}` left the registry while its connector was starting \
                  (uninstalled or reloaded mid-spawn); abandoning spawn"
@@ -1559,6 +1575,31 @@ impl PluginHost {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .copied()
+    }
+
+    /// Refuse a connector's materialized tools when they collide, else publish them, under the one
+    /// table lock that admission's minted-name check also holds. The check and the publication are
+    /// one step, so two concurrent spawns cannot each pass against the other's still-empty catalog
+    /// (#2087 B5). `Ok(false)`: the id left the registry mid-spawn and nothing was published.
+    fn claim_minted_names(
+        &self,
+        lifecycle: &LifecycleGuard,
+        tools: Vec<manifest::ExposedTool>,
+    ) -> Result<bool, String> {
+        let id = lifecycle.id();
+        connector::refuse_minted_collisions(id, &tools)?;
+        let table = self.lock_table();
+        if let Some(conflict) = find_minted_name_conflict(
+            id,
+            &tools,
+            &table.template_holder_ids(),
+            self.registry.list(),
+        ) {
+            return Err(conflict.to_string());
+        }
+        let published = self.registry.set_exposes_tools(lifecycle, tools);
+        drop(table);
+        Ok(published)
     }
 
     /// Shared connector failure exit: swap the reservation for a live `Unavailable` entry, emit it, return a typed error.
@@ -2221,6 +2262,46 @@ fn inherited_window(
     }
 }
 
+/// The first running or admitted plugin that already mints a name `id` would serve: the same
+/// `plugin_<id>_` prefix, or one of `tools`' `plugin_<id>_<tool>` names.
+fn find_minted_name_conflict(
+    id: &str,
+    tools: &[manifest::ExposedTool],
+    holders: &BTreeSet<String>,
+    registry: Vec<Manifest>,
+) -> Option<HostError> {
+    use crate::plugin_results::{PLUGIN_TOOL_PREFIX, minted_segment, registry_name};
+    let prefix = minted_segment(id);
+    let own: BTreeSet<String> = tools.iter().map(|t| registry_name(id, &t.name)).collect();
+    let conflict = |held_by: &str, minted: String| HostError::MintedNameConflict {
+        plugin_id: id.to_string(),
+        held_by: held_by.to_string(),
+        minted,
+    };
+    let mut others: Vec<Manifest> = registry
+        .into_iter()
+        .filter(|other| other.id != id && holders.contains(&other.id))
+        .collect();
+    others.sort_by(|a, b| a.id.cmp(&b.id));
+    for other in others {
+        if minted_segment(&other.id) == prefix {
+            return Some(conflict(
+                &other.id,
+                format!("{PLUGIN_TOOL_PREFIX}{prefix}_"),
+            ));
+        }
+        if let Some(minted) = other
+            .exposes_tools
+            .iter()
+            .map(|t| registry_name(&other.id, &t.name))
+            .find(|minted| own.contains(minted))
+        {
+            return Some(conflict(&other.id, minted));
+        }
+    }
+    None
+}
+
 /// Pure core of the template-id uniqueness check: only trusted plugins participate, only holders (running + admission-reserved) count, and the plugin's own registry entry is skipped.
 /// The trust predicate is injected to keep this testable without process env.
 fn find_template_conflict(
@@ -2452,7 +2533,86 @@ mod required_template_owner {
         )
         .unwrap();
         assert!(
-            matches!(error, super::HostError::TemplateConflict { ref held_by, .. } if held_by == "dev.neige.git-forge")
+            matches!(error, super::HostError::TemplateConflict { ref held_by, .. } if held_by == "gitforge")
+        );
+    }
+}
+
+#[cfg(test)]
+mod minted_name_conflict_tests {
+    use super::*;
+
+    fn app(id: &str, tools: &[&str]) -> Manifest {
+        let tools: Vec<_> = tools
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect();
+        Manifest::parse(
+            &serde_json::json!({
+                "manifest_version": 1, "id": id, "version": "0.1.0",
+                "min_kernel_version": "0.0.1", "display_name": "Stub",
+                "entrypoint": { "command": "bin/stub" }, "exposes_tools": tools,
+            })
+            .to_string(),
+        )
+        .expect("manifest parses")
+    }
+
+    fn holders(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    /// #2087 §6: a second running plugin whose id mints the same prefix (`ab-c`, `ab.c`), or whose
+    /// tool mints a running plugin's name (`ab` + `c_d`, `ab-c` + `d`), is refused; a stopped
+    /// holder or a distinct name is not.
+    #[test]
+    fn minted_tool_names_refuse_collisions_across_running_plugins() {
+        let held = app("ab-c", &["d"]);
+        let same_prefix = app("ab.c", &["z"]);
+        let conflict = find_minted_name_conflict(
+            "ab.c",
+            &same_prefix.exposes_tools,
+            &holders(&["ab-c"]),
+            vec![held.clone(), same_prefix.clone()],
+        )
+        .expect("same prefix");
+        assert_eq!(
+            conflict.to_string(),
+            "plugin `ab.c` mints `plugin_ab_c_`, which running plugin `ab-c` already mints"
+        );
+
+        let same_name = app("ab", &["c_d", "e"]);
+        let conflict = find_minted_name_conflict(
+            "ab",
+            &same_name.exposes_tools,
+            &holders(&["ab-c"]),
+            vec![held.clone(), same_name.clone()],
+        )
+        .expect("same minted tool name");
+        assert!(
+            matches!(&conflict, HostError::MintedNameConflict { held_by, minted, .. }
+                if held_by == "ab-c" && minted == "plugin_ab_c_d"),
+            "{conflict:?}"
+        );
+        assert!(
+            find_minted_name_conflict(
+                "ab",
+                &same_name.exposes_tools,
+                &holders(&[]),
+                vec![held.clone()]
+            )
+            .is_none(),
+            "a stopped holder does not conflict"
+        );
+        let distinct = app("ab", &["e"]);
+        assert!(
+            find_minted_name_conflict(
+                "ab",
+                &distinct.exposes_tools,
+                &holders(&["ab-c"]),
+                vec![held]
+            )
+            .is_none()
         );
     }
 }

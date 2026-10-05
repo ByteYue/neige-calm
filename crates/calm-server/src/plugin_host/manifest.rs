@@ -753,6 +753,16 @@ impl Manifest {
 
         self.permissions.validate()?;
 
+        if let Some((first, second, minted)) = crate::plugin_results::minted_name_collision(
+            &self.id,
+            self.exposes_tools.iter().map(|tool| tool.name.as_str()),
+        ) {
+            return Err(ManifestError::invalid(
+                "exposes_tools",
+                format!("tools `{first}` and `{second}` both mint `{minted}`"),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -1576,6 +1586,30 @@ impl Permissions {
         }
         Ok(())
     }
+}
+
+/// `^[a-z0-9]{2,32}$` — one word (#2087 §6), the id every new plugin and every built-in takes.
+/// [`is_valid_plugin_id`] stays wider so the installed external ids, which carry `.` or `-`, keep
+/// loading until each is reinstalled under a word (§9).
+pub fn is_word_plugin_id(s: &str) -> bool {
+    (2..=32).contains(&s.len()) && s.bytes().all(is_lower_alnum)
+}
+
+/// The five external plugin ids installed before #2087, which carry `.` or `-`. They are
+/// grandfathered: a fresh host, or an uninstall and reinstall, still installs each under its id,
+/// since renaming one moves its directory and rewrites the report cards that name it (§9). Closed
+/// and never extended: every other new plugin takes a word.
+pub const LEGACY_PLUGIN_IDS: [&str; 5] = [
+    "dev-neige-market",
+    "dev-neige-barra",
+    "dev-neige-paper-trading",
+    "cli-longbridge",
+    "mcp-wisburg-mcp-server-49abefc5",
+];
+
+/// The install route's id rule: a word, or one of the [`LEGACY_PLUGIN_IDS`].
+pub fn is_installable_plugin_id(s: &str) -> bool {
+    is_word_plugin_id(s) || LEGACY_PLUGIN_IDS.contains(&s)
 }
 
 /// `^[a-z0-9][a-z0-9.-]{1,63}$` — total 2..=64 chars; head is alphanumeric.
@@ -3911,7 +3945,7 @@ mod builtin_backend_contract {
     fn builtin_manifest_has_no_process_entrypoint() {
         let parsed = super::Manifest::parse(
             r#"{
-            "manifest_version": 3, "id": "dev.neige.git-forge", "version": "0.1.0",
+            "manifest_version": 3, "id": "gitforge", "version": "0.1.0",
             "min_kernel_version": "0.1.0", "display_name": "Development", "kind": "builtin"
         }"#,
         );
