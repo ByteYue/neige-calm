@@ -340,7 +340,8 @@ export function useConversationStore(
   /* The catalog rides alongside the run query: the trigger has to render the chosen
        model's name, and `planner-run` gives only its slug. */
   const modelCatalog = useQuery({
-    ...modelCatalogQueryOptions(transport, { kind: 'card', cardId }, unauthorized), enabled: scope !== null,
+    ...modelCatalogQueryOptions(transport, { kind: 'card', cardId }, unauthorized),
+    enabled: scope !== null && !requiresAttachedSession,
   });
   const phase = run.data?.phase ?? null;
   const attachedSession = run.data?.attached_session ?? null;
@@ -1425,15 +1426,15 @@ function useConversationPane(
                     }}
                     disabled={store.sendBlocked || !store.historyReady || edit.replacing}
                   />
-                  <ModelPill
+                  {scope?.kind !== 'track-opencode' && <ModelPill
                     /* Without a scope the catalog read is disabled, so no `unavailable` label can show. */
                     /* An existing conversation keeps issue-time handling: no availability gate here (#1817). */
                     groups={[{ provider: scopeProvider, catalog: store.modelCatalog, availability: null }]}
                     provider={scopeProvider}
                     selection={store.model}
                     onChange={store.setModel}
-                    isDisabled={!store.historyReady || scope?.kind === 'track-opencode'}
-                  />
+                    isDisabled={!store.historyReady}
+                  />}
                 </HStack>
               )}
             />
