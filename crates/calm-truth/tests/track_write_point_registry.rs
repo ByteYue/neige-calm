@@ -43,6 +43,18 @@ const WRITER_STATEMENTS: &[(&str, &str)] = &[
 /// Writes expected outside the production writer, by exact normalized text: `(file, statement, why)`.
 const EXPECTED_OTHER_WRITES: &[(&str, &str, &str)] = &[
     (
+        "crates/calm-server/tests/support/opencode_existing_registry.rs",
+        "update tracks set workspace_worktree_path=?1 where id=?2",
+        "Seeds an existing kernel-owned worktree to prove external OpenCode attachment refuses \
+         both that directory and its child; the production writer cannot change a frozen fixture.",
+    ),
+    (
+        "crates/calm-server/tests/support/opencode_existing_registry.rs",
+        "update tracks set workspace_worktree_path=null where id=?1",
+        "Clears only that fixture worktree before shutdown, so recycling cannot remove the \
+         directory used by the next directory-isolation case.",
+    ),
+    (
         "crates/calm-server/tests/cases/today_launchpad.rs",
         "update tracks set purpose=null, workspace_path='/also-scrambled', workspace_kind='attached', workspace_frozen_at=null where id=?1",
         "Deliberately desynchronizes the row so the launchpad adopt branch has \
