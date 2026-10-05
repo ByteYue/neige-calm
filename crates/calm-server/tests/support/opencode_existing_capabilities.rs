@@ -1,6 +1,65 @@
 use super::*;
 
 #[tokio::test]
+async fn attached_model_catalog_refuses_before_managed_process_or_native_writes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new().await;
+    let stack = Stack::boot(&fixture).await;
+    let track = stack.track(&fixture).await;
+    let card = stack.attach(&track, "native-model-ownership").await;
+    stack.wait_submit(&card).await;
+    let native_messages = fixture.native.0.lock().unwrap().messages.clone();
+    let binary = fixture.path().join("managed-opencode-trap");
+    let invoked = fixture.path().join("managed-opencode-invoked");
+    std::fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nprintf invoked > '{}'\nexit 1\n",
+            invoked.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let state = stack.state.clone().with_opencode_planner_config(
+        calm_server::opencode_planner::config::OpenCodePlannerConfig {
+            opencode_binary: binary,
+            opencode_version: "1.18.34".into(),
+            config_dir: fixture.path().join("managed-profile"),
+        },
+    );
+    let app = routes::router()
+        .layer(axum::middleware::from_fn(
+            calm_server::actor::actor_middleware,
+        ))
+        .layer(axum::middleware::from_fn(owner))
+        .with_state(state);
+    let models = Stack {
+        state: stack.state.clone(),
+        app,
+    };
+    for query in [
+        format!("card_id={card}"),
+        format!("card_id={card}&provider=opencode"),
+    ] {
+        let (status, error) = models
+            .request("GET", &format!("/api/models?{query}"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(error["code"], "conflict");
+        assert!(
+            !invoked.exists(),
+            "attached catalog reads must not even check the managed binary"
+        );
+    }
+    assert_eq!(fixture.native.0.lock().unwrap().messages, native_messages);
+    assert!(fixture.posts().is_empty());
+    assert!(stack.journals().await.is_empty());
+    drop(models);
+    stack.shutdown().await;
+}
+
+#[tokio::test]
 async fn native_empty_session_preserves_explicit_agent_and_variant_on_first_input() {
     let fixture = Fixture::new().await;
     fixture.native.0.lock().unwrap().messages.clear();

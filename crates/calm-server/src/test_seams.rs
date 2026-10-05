@@ -57,6 +57,10 @@ pub async fn pause_point(point: &str, key: &str) {
 #[cfg(feature = "fixtures")]
 pub const PLANNER_INPUT_REPLAY_MISSED: &str = "planner-input-replay-missed";
 
+/// Where an attachment is about to resolve its observer runtime; keyed by card id.
+#[cfg(feature = "fixtures")]
+pub const OPENCODE_ATTACH_RECOVERY: &str = "opencode-attach-recovery";
+
 /// Where an operation insert has found no row under its `(kind, idempotency_key)` and is about to
 /// write one; keyed by the idempotency key.
 #[cfg(feature = "fixtures")]

@@ -784,6 +784,8 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
     assert!(fixture.posts().is_empty());
     stack.shutdown().await;
 }
+#[path = "support/opencode_existing_attach_recovery.rs"]
+mod attach_recovery_tests;
 #[path = "support/opencode_existing_capabilities.rs"]
 mod capability_tests;
 #[path = "support/opencode_existing_native.rs"]

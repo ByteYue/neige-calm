@@ -269,6 +269,12 @@ pub(crate) async fn attach_conversation(
     if s.harness.get(&runtime.id).is_none() {
         // Release the same-track deletion guard before the canonical recovery entry acquires it.
         drop(_delete);
+        #[cfg(feature = "fixtures")]
+        crate::test_seams::pause_point(
+            crate::test_seams::OPENCODE_ATTACH_RECOVERY,
+            card.id.as_str(),
+        )
+        .await;
         crate::harness::spawn_recovered_harness(
             w.repo.clone(),
             s.events.clone(),
