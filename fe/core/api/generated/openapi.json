@@ -3263,12 +3263,42 @@
               }
             }
           },
+          "409": {
+            "description": "An attached OpenCode session owns its native model configuration and cannot use the managed model catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/opencode/connections": {
+      "get": {
+        "tags": [
+          "opencode"
+        ],
+        "operationId": "list_connections",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionsResponse"
                 }
               }
             }
@@ -7331,6 +7361,95 @@
         }
       }
     },
+    "/api/tracks/{track_id}/opencode-conversations": {
+      "post": {
+        "tags": [
+          "opencode"
+        ],
+        "operationId": "attach_conversation",
+        "parameters": [
+          {
+            "name": "track_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Required stable attachment request key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachOpenCodeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackConversationSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/tracks/{track_id}/terminal-cards": {
       "post": {
         "tags": [
@@ -7776,6 +7895,72 @@
             "type": "string"
           }
         }
+      },
+      "AttachOpenCodeBody": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "session_id"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AttachedSession": {
+        "type": "object",
+        "required": [
+          "connection_id",
+          "label",
+          "session_id",
+          "directory",
+          "status",
+          "can_submit",
+          "can_stop"
+        ],
+        "properties": {
+          "can_stop": {
+            "type": "boolean"
+          },
+          "can_submit": {
+            "type": "boolean"
+          },
+          "connection_id": {
+            "type": "string"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AttachedStatus"
+          }
+        }
+      },
+      "AttachedStatus": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "running",
+          "unavailable",
+          "unknown"
+        ]
       },
       "AttachmentId": {
         "type": "string",
@@ -8232,7 +8417,7 @@
               "object",
               "null"
             ],
-            "description": "Replaces the stored payload. A payload carrying a server-owned key is refused with 400:\n`terminal_signals`, `template_context`, `planner_provider`, `side_source_card_id`. Every kernel-minted server-owned value the card already carries is kept."
+            "description": "Replaces the stored payload. A payload carrying a server-owned key is refused with 400:\n`terminal_signals`, `template_context`, `planner_provider`, `side_source_card_id`, `opencode_attachment`. Every kernel-minted server-owned value the card already carries is kept."
           },
           "sort": {
             "type": [
@@ -8386,6 +8571,39 @@
               "$ref": "#/components/schemas/ReasoningEffortOption"
             },
             "description": "The efforts a selection of this model may carry: Codex's options, or the Claude CLI's\n`supportedEffortLevels` (empty when it declares none, and then only `null` is accepted)."
+          }
+        }
+      },
+      "ConnectionSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "directory"
+        ],
+        "properties": {
+          "directory": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "ConnectionsResponse": {
+        "type": "object",
+        "required": [
+          "connections"
+        ],
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectionSummary"
+            }
           }
         }
       },
@@ -9061,9 +9279,21 @@
           "card_id",
           "pending",
           "pending_overflow",
-          "attachments_supported"
+          "attachments_supported",
+          "supports_steer"
         ],
         "properties": {
+          "attached_session": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AttachedSession",
+                "description": "A borrowed native session, absent for managed conversations."
+              }
+            ]
+          },
           "attachments_supported": {
             "type": "boolean",
             "description": "Whether this card can take image attachments at all: not when the track's workspace is an attached directory, since neige never writes into one. Answered by the same function the upload runs (`planner_attachments::attachment_root`)."
@@ -9126,6 +9356,10 @@
                 "description": "The turn the harness is running. Non-null exactly when this response's `phase` is `turn_running`: both come from one read of the harness state."
               }
             ]
+          },
+          "supports_steer": {
+            "type": "boolean",
+            "description": "Whether queued input can join this provider's active turn."
           },
           "token_usage": {
             "oneOf": [
@@ -13607,6 +13841,7 @@
           "terminal",
           "codex",
           "claude",
+          "opencode",
           "shared-spec"
         ]
       },

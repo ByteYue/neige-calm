@@ -98,11 +98,11 @@ export type CardRuntimeView = { worker_session_id: string, kind: WorkerSessionKi
  */
 last_turn_completed_ms?: number, };
 
-export type DailyTrackResolved = { date: string, time_zone: string, track_id: string, };
-
 export type ConnectionSummary = { id: string, label: string, directory: string, };
 
 export type ConnectionsResponse = { connections: Array<ConnectionSummary>, };
+
+export type DailyTrackResolved = { date: string, time_zone: string, track_id: string, };
 
 /**
  * Why a Git delivery produced no candidate. Every value has exactly one producer (D2 code table).
