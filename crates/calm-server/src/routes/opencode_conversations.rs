@@ -7,7 +7,7 @@ use crate::{
     },
     error::{CalmError, ErrorBody, Result},
     event::{Event, EventScope},
-    harness::{ClaimMode, initial_snapshot_with_goal},
+    harness::initial_snapshot_with_goal,
     model::{Card, CardRole, NewCard, TrackConversationSummary, now_ms},
     opencode_planner::attachment::{Binding, ConnectionSummary, ConnectionsResponse, PAYLOAD_KEY},
     session_projection_repo::{
@@ -257,44 +257,18 @@ pub(crate) async fn attach_conversation(
     };
     // The row is durable before observer startup. A cancelled HTTP response is recovered at
     // boot or the next same-key attach; attaching never puts a prompt into the queue.
-    let runtime = w
-        .repo
-        .session_projection_active_for_card(&card.id.to_string())
-        .await?
-        .ok_or_else(|| {
-            CalmError::Conflict(
-                "The attached conversation was disconnected; its history is retained".into(),
-            )
-        })?;
-    if s.harness.get(&runtime.id).is_none() {
-        // Release the same-track deletion guard before the canonical recovery entry acquires it.
-        drop(_delete);
-        #[cfg(feature = "fixtures")]
-        crate::test_seams::pause_point(
-            crate::test_seams::OPENCODE_ATTACH_RECOVERY,
-            card.id.as_str(),
-        )
-        .await;
-        crate::harness::spawn_recovered_harness(
-            w.repo.clone(),
-            s.events.clone(),
-            s.write.role_cache().clone(),
-            s.write.area_cache().clone(),
-            cs.shared_codex_appserver.clone(),
-            s.thread_seals.clone(),
-            &s.claude_planner_wiring(),
-            &s.opencode_planner_wiring(),
-            &s.harness,
-            &s.track_delete_locks,
-            runtime.clone(),
-            ClaimMode::Replace,
-        )
-        .await?
-        .installed()
-        .ok_or_else(|| {
-            CalmError::Conflict("The attached conversation was concurrently disconnected".into())
-        })?;
-    }
+    // Recovery owns the same deletion fence and the per-card lock used by Send/reset.
+    // Resolve its fresh candidate there instead of replacing an owner after a stale miss.
+    drop(_delete);
+    #[cfg(feature = "fixtures")]
+    crate::test_seams::pause_point(
+        crate::test_seams::OPENCODE_ATTACH_RECOVERY,
+        card.id.as_str(),
+    )
+    .await;
+    let (runtime, _harness, _recovery_guard) =
+        super::planner_input_send::ensure_live_planner_harness(&s, &w, &cs, &card.id, false)
+            .await?;
     Ok((
         StatusCode::CREATED,
         Json(summary(

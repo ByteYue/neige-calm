@@ -359,7 +359,7 @@ async fn live_planner_harness(
 /// No eligible row, or an unrecoverable one (no thread anywhere, or a corrupt snapshot) → typed 409 `PlannerHarnessDormant` so the client steers the user to `/planner/reset`.
 /// Takes the per-card lock and re-fetches under it so racing Sends can't double-spawn; `/planner/reset` takes the SAME lock, and the guard is RETURNED so the caller holds it through enqueue/audit. Row-intrinsic dormancy (409) is checked before daemon liveness (503).
 #[allow(deprecated)]
-async fn ensure_live_planner_harness(
+pub(crate) async fn ensure_live_planner_harness(
     s: &RouteState,
     w: &WorkerState,
     cs: &CodexShellState,

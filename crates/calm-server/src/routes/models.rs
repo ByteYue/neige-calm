@@ -191,6 +191,7 @@ pub fn router() -> Router<AppState> {
     responses(
         (status = 200, description = "Model catalog and the default this installation follows. Codex: `source: \"live\"`, or `source: \"unavailable\"` with an empty catalog if codex cannot be reached (never an error or a hardcoded list). A Claude Planner: `source: \"live\"` with the Claude CLI's cached model list (its `default` entry as `default`, `default_source: \"claude_cli\"`), or `unavailable` with an empty catalog while Claude is not ready", body = ModelsResponse),
         (status = 404, description = "`card_id` names a card that does not exist", body = ErrorBody),
+        (status = 409, description = "An attached OpenCode session owns its native model configuration and cannot use the managed model catalog", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -352,6 +353,11 @@ async fn resolve_card_workspace(s: &RouteState, card_id: &str) -> Result<Resolve
         .card_get(card_id)
         .await?
         .ok_or_else(|| CalmError::NotFound(format!("card {card_id}")))?;
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Err(CalmError::Conflict(
+            "An attached OpenCode session owns its native model configuration; the managed model catalog is unavailable".into(),
+        ));
+    }
     let claude_planner = s.write.verify_role(&card.id).is_some_and(|role| {
         crate::harness::profile::PlannerBinding::from_card(&card, role)
             .is_some_and(|binding| binding.provider == AgentProvider::Claude)
