@@ -49,7 +49,7 @@ async fn opencode_migration_preserves_rows_self_references_and_all_inbound_links
     .await
     .unwrap();
     db.ensure_migrations_table().await.unwrap();
-    apply_through(&mut db, 129).await;
+    apply_through(&mut db, 147).await;
     sqlx::raw_sql(include_str!("fixtures/opencode_migration_before.sql"))
         .execute(&mut db)
         .await
@@ -59,7 +59,7 @@ async fn opencode_migration_preserves_rows_self_references_and_all_inbound_links
         "SELECT name,sql FROM sqlite_schema WHERE type='index' AND tbl_name='worker_sessions' AND sql IS NOT NULL ORDER BY name",
     ).fetch_all(&mut db).await.unwrap();
 
-    apply_through(&mut db, 130).await;
+    apply_through(&mut db, 148).await;
 
     assert_eq!(
         snapshot(&mut db).await,

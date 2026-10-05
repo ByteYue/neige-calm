@@ -106,3 +106,12 @@ Planner Harness. The provider boundary leaves ACP as a later transport option.
 
 See the [OpenCode ACP documentation](https://opencode.ai/docs/acp/) and the pinned
 [ACP implementation](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/acp/service.ts).
+
+## Upstream rebase and development databases
+
+Provider migrations 0148 and 0149 follow upstream migration 0147. The upstream
+migration files are unchanged. Earlier fork-only development databases used
+0130 and 0131 for these different migrations; their SQLx checksums conflict with
+upstream's migration history. Preserve those databases and use a fresh isolated
+Neige database for this rebased development build. Do not rewrite a migration
+ledger. This boundary does not change native OpenCode session history.
