@@ -66,6 +66,26 @@ async fn repeated_attach_preserves_send_recovered_owner_and_durable_queued_text(
                 Some("attach-race-intent"),
             )
             .await;
+        let (status, answer) = if status == StatusCode::CONFLICT {
+            assert_eq!(answer["code"], "conflict");
+            assert_eq!(
+                answer["error"],
+                "conflict: The original OpenCode snapshot is not ready for submission; observe until it settles"
+            );
+            // Recovery installs the real observer before native history has necessarily arrived.
+            // Retry the same intent only after the production readiness projection settles.
+            stack.wait_submit(&card).await;
+            stack
+                .request(
+                    "POST",
+                    &path,
+                    Some(input.clone()),
+                    Some("attach-race-intent"),
+                )
+                .await
+        } else {
+            (status, answer)
+        };
         assert_eq!(status, StatusCode::OK, "{answer}");
         assert_eq!(answer["worker_session_id"], runtime);
         assert!(answer["entry_id"].is_string());
