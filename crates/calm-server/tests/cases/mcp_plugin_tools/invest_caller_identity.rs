@@ -8,8 +8,12 @@ use super::*;
 const PLUGIN_DIR: &str = "invest";
 const RECIPE: &str = "portfolio-recipe.md";
 
-fn tool_text(frame: &Value) -> &str {
-    frame["result"]["content"][0]["text"].as_str().unwrap_or("")
+/// The App's refusal: a JSON-RPC error with its code, the message naming the served tool.
+fn refusal(frame: &Value, code: i64, tool: &str) -> String {
+    assert_eq!(frame["error"]["code"], code, "{frame}");
+    let message = frame["error"]["message"].as_str().unwrap_or("");
+    assert!(message.starts_with(&format!("{tool}: ")), "{frame}");
+    message.to_string()
 }
 
 /// The port of `real_spy_app_admits_planner_plan_and_worker_execution_request` to invest: on the
@@ -49,7 +53,8 @@ async fn real_invest_app_admits_planner_decision_and_worker_execution_request() 
             enabled: true,
             user_config: json!({
                 "account_no": "PAPER123", "broker_home": home.display().to_string(),
-                "portfolio_track_id": fx.track_id, "oauth_client_id": "fixture-client",
+                "portfolio_track_id": fx.track_id, "instrument_recipe_id": "recipe-instrument",
+                "oauth_client_id": "fixture-client",
                 "sdk_python_path": app.join("tests/broker_fixture.py").display().to_string(),
                 "max_held": 4, "max_watched": 4, "max_weight_bps": 10000, "poll_seconds": 5
             }),
@@ -77,11 +82,7 @@ async fn real_invest_app_admits_planner_decision_and_worker_execution_request() 
         json!({"role": "planner", "card_id": "forged", "session_id": "forged"});
     send_frame(&mut wr, forged).await;
     let refused = recv_frame(&mut rd).await;
-    assert_eq!(refused["result"]["isError"], true, "{refused}");
-    assert!(
-        tool_text(&refused).contains("Planner identity"),
-        "{refused}"
-    );
+    assert!(refusal(&refused, -32403, &add).contains("Planner identity"));
 
     let (token, thread) = mint_card_with_thread(
         &fx.repo,
@@ -108,8 +109,7 @@ async fn real_invest_app_admits_planner_decision_and_worker_execution_request() 
     )
     .await;
     let refused = recv_frame(&mut planner_rd).await;
-    assert_eq!(refused["result"]["isError"], true, "{refused}");
-    assert!(tool_text(&refused).contains("Worker identity"), "{refused}");
+    assert!(refusal(&refused, -32403, &execute).contains("Worker identity"));
 
     send_frame(
         &mut wr,

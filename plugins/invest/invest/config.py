@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import re
 
+from .errors import CONFLICT, Refused
+
 
 def money(value, *, zero=False):
     if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,12}(\.[0-9]{1,8})?", value):
@@ -61,3 +63,26 @@ def identifier(value):
 def exact(value, required, optional=()):
     if not isinstance(value, dict) or set(value) - set(required) - set(optional) or set(required) - set(value):
         raise ValueError("missing or unknown fields")
+
+
+def text(value, field, limit):
+    """A non-blank string of at most `limit` characters."""
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        raise ValueError(f'{field} must be non-blank text of at most {limit} characters')
+    return value
+
+
+def captured(refs):
+    """Source references: 1-20 captured `neige://source/` URIs."""
+    if not isinstance(refs, list) or not 1 <= len(refs) <= 20 or any(
+            not isinstance(r, str) or not r.startswith('neige://source/') or len(r) > 512 for r in refs):
+        raise ValueError('1-20 captured neige://source/ references required')
+    return refs
+
+
+def version(value, current):
+    """The optimistic lock of a `set` or `rm`: `value` (checked by `arguments.parse`) must be the entry's
+    current version."""
+    if value != current:
+        raise Refused(CONFLICT, f'expected_version {value} is stale: the current version is {current}; '
+                                'reread and retry', 'stale_version', version=current)
