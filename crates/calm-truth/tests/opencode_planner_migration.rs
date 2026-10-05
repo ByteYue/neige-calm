@@ -120,14 +120,14 @@ async fn attached_opencode_migration_preserves_all_references_and_extends_execut
     .await
     .unwrap();
     db.ensure_migrations_table().await.unwrap();
-    apply_through(&mut db, 129).await;
+    apply_through(&mut db, 147).await;
     sqlx::raw_sql(include_str!("fixtures/opencode_migration_before.sql"))
         .execute(&mut db)
         .await
         .unwrap();
-    apply_through(&mut db, 131).await;
+    apply_through(&mut db, 149).await;
     let before = snapshot(&mut db).await;
-    apply_through(&mut db, 132).await;
+    apply_through(&mut db, 150).await;
     assert_eq!(snapshot(&mut db).await, before);
     for (table, column) in [
         ("cards", "session_id"),

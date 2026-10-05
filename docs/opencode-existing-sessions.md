@@ -123,3 +123,14 @@ database into Neige's private Planner profile.
   production code in an exclusive worktree.
 - Capture the real attachment form, original history and continued response for
   the pull request, with secrets and unrelated session content excluded.
+
+## Rebased development database
+
+This branch appends migrations 0148–0150 after upstream migration 0147. Upstream
+migrations are unchanged. A database created by the earlier fork with OpenCode
+migrations numbered 0130–0132 has different SQLx migration checksums and cannot
+be opened by this rebased build. Keep that database as evidence and use a fresh
+isolated Neige database for this development build. Do not edit its migration
+ledger or point this build at a production database. The original native
+OpenCode profile, session ID and history remain usable through the registered
+HTTP connection; they are separate from Neige's database.
