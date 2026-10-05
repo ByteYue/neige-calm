@@ -25,12 +25,12 @@ describe('existing OpenCode connection contract', () => {
     expect(attachedOpenCodeSessionSchema.safeParse({ ...bound, can_submit: undefined }).success).toBe(false);
     expect(attachedOpenCodeSessionSchema.safeParse({ ...bound, status: 'done' }).success).toBe(false);
     expect(plannerRunOperation('card').responseSchema.parse({ card_id: 'card', model: null, reasoning_effort: null, blocked_reason: null,
-      attached_session: bound, supports_steer: false }).attached_session).toEqual(bound);
+      attached_session: bound, running_turn: null, supports_steer: false }).attached_session).toEqual(bound);
   });
 
   it('rejects a run response that omitted its required steering capability', () => {
     expect(plannerRunOperation('card').responseSchema.safeParse({
-      card_id: 'card', model: null, reasoning_effort: null, blocked_reason: null,
+      card_id: 'card', model: null, reasoning_effort: null, blocked_reason: null, running_turn: null,
     }).success).toBe(false);
   });
 });

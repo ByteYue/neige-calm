@@ -1,6 +1,6 @@
 import type { Conversation } from '../../../../core/domain/conversation.ts';
 import type { OpenCodeConnectRequest } from '../../../../core/domain/opencode-connections.ts';
-import { mintIdempotencyKey } from '../router/idempotency-key.ts';
+import { mintIdempotencyKey } from './idempotency-key.ts';
 
 export type ConnectionDraft = Readonly<{
   connectionId: string; sessionId: string; key: string; busy: boolean; error: string | null;

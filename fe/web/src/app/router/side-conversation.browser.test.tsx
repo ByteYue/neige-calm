@@ -42,7 +42,7 @@ function setup(outcome?: 'interrupted' | 'failed', longText?: string) {
     }
     const cardId = request.path.split('/')[3];
     if (request.path.endsWith('/planner/run')) body = { card_id: cardId, worker_session_id: `session-${cardId}`,
-      phase: 'idle', model: null, reasoning_effort: null, blocked_reason: null, running_turn: null };
+      phase: 'idle', model: null, reasoning_effort: null, blocked_reason: null, running_turn: null, supports_steer: true };
     if (request.path.endsWith('/planner/input')) body = { card_id: cardId, worker_session_id: `session-${cardId}` };
     if (request.path.startsWith('/api/cards/parent/harness/items')) body = [{ id: 1, worker_session_id: 'session-parent',
       card_id: 'parent', track_id: track.id, thread_id: 'thread-parent', turn_id: null, turn_error_text: null,

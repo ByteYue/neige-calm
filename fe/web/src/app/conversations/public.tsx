@@ -1,3 +1,4 @@
+import { createConnectionDraftStore } from '../providers/opencode-connection-drafts.ts';
 import {
   createContext, useCallback, useContext, useMemo, useRef, type ReactNode,
 } from 'react';
@@ -125,6 +126,7 @@ export type RememberedConversation = Readonly<{
 }>;
 
 export type ConversationRegistry = Readonly<{
+  connectionDrafts: ReturnType<typeof createConnectionDraftStore>;
   conversations: readonly Conversation[];
   turnsOf: (conversationId: string) => readonly TranscriptEntry[];
   remember: (conversation: Conversation, turns: readonly TranscriptEntry[]) => void;
@@ -212,6 +214,7 @@ function equalEntry(left: RememberedConversation | undefined, conversation: Conv
 }
 
 export function ConversationProvider({ children }: { children: ReactNode }) {
+  const [connectionDrafts] = useState(createConnectionDraftStore);
   const [entries, setEntries] = useState<Readonly<Record<string, RememberedConversation>>>({});
   /* Keyed by Track because leaving one Track may legitimately start another draft before the first failure is retried. */
   const [draftSlots, moveDraftTo] = useReducer(moveDraft, {} as DraftSlots);
@@ -412,7 +415,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
   );
   const value = useMemo<ConversationRegistry>(
     () => ({
-      conversations, turnsOf, remember, updateExisting,
+      connectionDrafts, conversations, turnsOf, remember, updateExisting,
       requestedOpenId, requestedOpenFocusesComposer, requestOpen, clearOpenRequest,
       draftOf, startDraft, editDraft, adoptDraft, discardDraft, discardUnsentDraft,
       adoptedDraftIdOf, finishDraftAdoption,
@@ -420,7 +423,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
       composerOf, editComposer, newConversationComposerOf, editNewConversationComposer,
       editOf, beginEdit, cancelEdit, leaveEdit, noteRefusedSend, editNoticeOf, uploadOf, editUpload,
     }),
-    [adoptDraft, adoptedDraftIdOf, clearOpenRequest, conversations, discardDraft,
+    [connectionDrafts, adoptDraft, adoptedDraftIdOf, clearOpenRequest, conversations, discardDraft,
       composerOf, discardUnsentDraft, draftOf, editComposer, editDraft, editNewConversationComposer, newConversationComposerOf, editUpload, finishDraftAdoption, editOf, beginEdit, cancelEdit, leaveEdit, noteRefusedSend, editNoticeOf, uploadOf, outboxOf, beginSend, editOutbox, retireSends, spentRowsOf, nextRead,
       remember, requestOpen,
       requestedOpenFocusesComposer, requestedOpenId, startDraft, turnsOf,

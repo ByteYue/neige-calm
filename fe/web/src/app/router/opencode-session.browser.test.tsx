@@ -35,9 +35,10 @@ function mount(existing = false, nativeStatus: () => 'running' | 'idle' | 'unava
     if (request.path === '/api/opencode/connections') return ok({ connections: [{ id: 'ops', label: 'Crawler operations', directory: DIRECTORY }] });
     if (request.path === '/api/tracks/w/opencode-conversations') { connected = true; return { ...ok(ROW), status: 201 }; }
     if (request.path.endsWith('/planner/run')) return ok({ card_id: ROW.id, worker_session_id: 'r', phase: nativeStatus() === 'running' ? 'turn_running' : 'idle',
-      model: 'deepseek/flash', reasoning_effort: null, blocked_reason: null, supports_steer: false,
+      model: 'deepseek/flash', reasoning_effort: null, blocked_reason: null, running_turn: null, supports_steer: false,
       attached_session: { connection_id: 'ops', label: 'Crawler operations', session_id: SESSION, directory: DIRECTORY,
         model: 'deepseek/flash', status: nativeStatus(), can_submit: nativeStatus() === 'idle', can_stop: false } });
+    if (request.path.endsWith('/harness/live')) return ok({ turn_id: null, items: [] });
     if (request.path.includes('/harness/items')) return ok([{
       id: 1, worker_session_id: 'r', card_id: ROW.id, track_id: 'w', thread_id: SESSION, turn_id: null,
       turn_error_text: null, item_uuid: 'output', item_type: 'agentMessage', method: 'item/completed',

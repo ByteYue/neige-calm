@@ -25,7 +25,8 @@ const CONNECT = '/api/tracks/w/opencode-conversations';
 const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
 
 function mount(options: { bound?: Partial<typeof BOUND> | null; existing?: boolean;
-  runRead?: () => ApiTransportResponse;
+  runRead?: () => ApiTransportResponse; history?: readonly unknown[];
+  input?: (request: ApiRequest) => Promise<ApiTransportResponse>;
   connect?: (request: ApiRequest) => Promise<ApiTransportResponse> } = {}) {
   const requests: ApiRequest[] = [];
   let connected = options.existing === true;
@@ -45,16 +46,19 @@ function mount(options: { bound?: Partial<typeof BOUND> | null; existing?: boole
     if (request.path.endsWith('/planner/run') && options.runRead) return options.runRead();
     if (request.path.endsWith('/planner/run')) return ok({ card_id: ROW.id, worker_session_id: 'runtime',
       phase: options.bound?.status === 'running' ? 'turn_running' : 'idle', model: 'deepseek/flash', reasoning_effort: null,
-      blocked_reason: null, supports_steer: false,
+      blocked_reason: null, running_turn: null, supports_steer: false,
       ...(options.bound === null ? {} : { attached_session: { ...BOUND, ...options.bound } }),
       pending: options.bound?.status === 'running' ? [{ entry_id: 'entry', text: 'Queued elsewhere', rev: 1, queued_at_ms: 2 }] : [],
     });
+    if (request.path.endsWith('/harness/live')) return ok({ turn_id: null, items: [] });
+    if (request.path.includes('/harness/items') && options.history) return ok(options.history);
     if (request.path.includes('/harness/items')) return ok([{
       id: 1, worker_session_id: 'runtime', card_id: ROW.id, track_id: 'w', thread_id: 'ses_existing',
       turn_id: null, turn_error_text: null, item_uuid: 'original', item_type: 'agentMessage', method: 'item/completed',
       params: JSON.stringify({ item: { id: 'original', type: 'agentMessage', text: 'Original ETL output' } }), created_at_ms: 1,
     }]);
-    if (request.path.endsWith('/planner/input')) return ok({ card_id: ROW.id, worker_session_id: 'runtime' });
+    if (request.path.endsWith('/planner/input')) return options.input ? options.input(request)
+      : ok({ card_id: ROW.id, worker_session_id: 'runtime', entry_id: 'queued-input' });
     if (request.path.startsWith('/api/models')) return ok({ models: [], default: { model: null, reasoning_effort: null,
       supported_reasoning_efforts: null }, default_source: 'unknown', source: 'unavailable', fetched_at_ms: 1 });
     if (request.path === '/api/settings') return ok({});
@@ -109,7 +113,9 @@ it('observes a foreign running turn without sending, stopping, steering or chang
   expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Say it now' })).toBeNull();
   expect(screen.getByRole('button', { name: /^Model:/ }).hasAttribute('disabled')).toBe(true);
-  expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
+  fireEvent.keyDown(screen.getByRole('combobox', { name: 'Message' }), { key: 'Escape' });
+  await act(async () => { await Promise.resolve(); });
+  expect(requests.filter(request => request.method !== 'GET')).toHaveLength(0);
 });
 
 
@@ -167,7 +173,7 @@ it.each(['unavailable', 'running', 'initial failure'] as const)(
     const { requests, client } = mount({ existing: true, runRead: () => {
       if (status === 'initial failure') return { status: 503, statusText: 'Unavailable', body: { error: 'OpenCode connection unavailable' } };
       return ok({ card_id: ROW.id, worker_session_id: 'runtime', phase: status === 'running' ? 'turn_running' : 'idle',
-        model: 'deepseek/flash', reasoning_effort: null, blocked_reason: null, supports_steer: false, pending: [],
+        model: 'deepseek/flash', reasoning_effort: null, blocked_reason: null, running_turn: null, supports_steer: false, pending: [],
         attached_session: { connection_id: 'ops', label: BOUND.label, session_id: BOUND.session_id, directory: BOUND.directory,
           model: BOUND.model, status, can_submit: status === 'idle', can_stop: false } });
     } });
@@ -194,3 +200,53 @@ it.each(['unavailable', 'running', 'initial failure'] as const)(
     expect(requests.filter(request => request.path.endsWith('/planner/run'))).toHaveLength(runReads);
   },
 );
+
+
+it('retains a lost input acknowledgement key while the native session becomes busy', async () => {
+  const bound = { status: 'idle', can_submit: true };
+  let attempts = 0;
+  const mounted = mount({ existing: true, bound, input: async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      bound.status = 'running'; bound.can_submit = false;
+      await mounted.client.invalidateQueries({ queryKey: queryKeys.plannerRun(ROW.id) });
+      return { status: 504, statusText: 'Timeout', body: { error: 'Input acknowledgement lost' } };
+    }
+    return ok({ card_id: ROW.id, worker_session_id: 'runtime', entry_id: 'same-native-input' });
+  } });
+  fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
+  await screen.findByText('Original ETL output');
+  const field = screen.getByRole('combobox', { name: 'Message' });
+  field.textContent = 'Check ETL progress'; fireEvent.input(field); fireEvent.keyDown(field, { key: 'Enter' });
+  await waitFor(() => expect(mounted.requests.filter(request => request.path.endsWith('/planner/input'))).toHaveLength(2));
+  const [first, replay] = mounted.requests.filter(request => request.path.endsWith('/planner/input'));
+  expect(first?.headers?.['Idempotency-Key']).toBeTruthy();
+  expect(replay?.headers).toEqual(first?.headers);
+  expect(replay?.body).toEqual(first?.body);
+  expect(replay?.body).toEqual({ text: 'Check ETL progress' });
+  expect(field.getAttribute('contenteditable')).toBe('false');
+  expect(mounted.requests.filter(request => request.path.endsWith('/planner/interrupt'))).toHaveLength(0);
+});
+
+it('keeps native completed history readable without offering a local replacement Edit', async () => {
+  const base = { worker_session_id: 'runtime', card_id: ROW.id, track_id: 'w', thread_id: 'ses_existing',
+    turn_id: 'native-turn', turn_error_text: null, created_at_ms: 1 };
+  const { requests } = mount({ existing: true, history: [
+    { ...base, id: 1, item_uuid: 'native-user', item_type: 'userMessage', method: 'item/completed',
+      input_segments: [{ presentation: 'user', text: 'User says:\nCheck ETL progress', attachments: [] }],
+      params: JSON.stringify({ item: { id: 'native-user', type: 'userMessage', content: [{ text: 'Check ETL progress' }] } }) },
+    { ...base, id: 2, item_uuid: 'native-answer', item_type: 'agentMessage', method: 'item/completed',
+      params: JSON.stringify({ item: { id: 'native-answer', type: 'agentMessage', text: 'Original ETL output' } }) },
+    { ...base, id: 3, item_uuid: null, item_type: null, method: 'turn/completed',
+      params: JSON.stringify({ id: 'native-turn', status: 'completed', error: null }) },
+  ] });
+  fireEvent.click((await screen.findAllByRole('button', { name: /^Conversation iFood progress/ }))[0]);
+  await screen.findByText('Original ETL output');
+  expect(screen.getByRole('combobox', { name: 'Message' }).getAttribute('contenteditable')).toBe('true');
+  expect(screen.queryByRole('button', { name: 'Edit message' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Edit message (not available now)' }).getAttribute('aria-disabled')).toBe('true');
+  expect(screen.getByRole('button', { name: 'Regenerate response' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Regenerate response' }));
+  await waitFor(() => expect(requests.filter(request => request.path.endsWith('/planner/input'))).toHaveLength(1));
+  expect(requests.find(request => request.path.endsWith('/planner/input'))?.body).toEqual({ text: 'Check ETL progress' });
+});

@@ -7,7 +7,8 @@ import type { Conversation } from '../../../../core/domain/conversation.ts';
 import { useState } from '../../ui/state/public.ts';
 import { useConversationRegistry } from '../conversations/public.tsx';
 import { admitTransport } from './recovery-mutation.ts';
-import { ApiError, OfflineSubmissionError, queryKeys, runOperation } from './queries.ts';
+import { ApiError, NotSentError } from '../../../../core/domain/failure-class.ts';
+import { queryKeys, runOperation } from './queries.ts';
 
 /** App composition: typed operations, request lease, query reconciliation and conversation selection. */
 export function useOpenCodeConnection(transport: ApiTransportPort, unauthorized: UnauthorizedChannel, trackId: string) {
@@ -44,7 +45,7 @@ export function useOpenCodeConnection(transport: ApiTransportPort, unauthorized:
         store.update(trackId, { connected: row });
         accept(row); setOpen(false);
       }).catch((error: unknown) => {
-        const refused = current.request === null && (error instanceof OfflineSubmissionError
+        const refused = current.request === null && (error instanceof NotSentError
           || (error instanceof ApiError && error.failure.kind === 'http'
             && error.failure.status >= 400 && error.failure.status < 500
             && error.failure.status !== 408 && error.failure.status !== 409));

@@ -38,6 +38,7 @@ export type { BuiltinCardType } from './builtins/register.js';
 export { BUILTIN_CARD_ORDER, registerAvailableBuiltinCards } from './builtins/register.js';
 export { isPlannerHarnessPayload, plannerCardIn } from './builtins/planner.js';
 export { isAssistantHarnessPayload } from './builtins/assistant.js';
+export { isPlainChatPayload } from './builtins/plain-chat.js';
 export type {
   UnknownCardSlot,
   VisibleCardSlot,

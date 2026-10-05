@@ -1,3 +1,7 @@
+import { useOpenCodeConnection } from '../providers/opencode-connections.tsx';
+import { ConnectOpenCodeDialog } from '../../features/track/opencode-session/connect.tsx';
+import { AttachedSessionNotice } from '../../features/planner/attached-session.tsx';
+import { Button as AstryxButton } from '@astryxdesign/core/Button';
 import type { PaneResizeGroup } from '../../ui/drawer/resize-group.ts';
 import { sideConversationSnapshot } from '../../../../core/domain/side-conversation.ts';
 import type { SideConversation } from '../../../../core/domain/conversation.ts';
@@ -40,7 +44,7 @@ import type {
   BoardHostItem, CardAddMenuEntry, CardHost, CardRegistry,
 } from '../../systems/cards/public.js';
 import {
-  cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, plannerCardIn, partitionTrackCards,
+  cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, plannerCardIn, isPlainChatPayload, partitionTrackCards,
 } from '../../systems/cards/public.js';
 import { mintIdempotencyKey, useKeyedIntent, type KeyedRequest } from '../providers/idempotency-key.ts';
 import footerStyles from './composer-footer.module.css';
@@ -140,6 +144,8 @@ import { useCompactViewport } from '../../ui/viewport/public.ts';
 export const APP_BASEPATH = '/next';
 
 type ConversationStore = Readonly<{
+  attachedSession: import('../../../../core/domain/conversation.ts').AttachedOpenCodeSession | null;
+  canStop: boolean;
   conversations: readonly Conversation[];
   /** Messages *and* the actions between them, in the order they happened. */
   turnsOf: (conversationId: string) => readonly TranscriptEntry[];
@@ -294,6 +300,8 @@ function withRememberedTitle(
   };
 }
 
+const ATTACHED_SESSION_STATUS_POLL_MS = 3000;
+
 export function useConversationStore(
   transport: ApiTransportPort,
   unauthorized: UnauthorizedChannel,
@@ -324,13 +332,20 @@ export function useConversationStore(
   const runQuery = useMemo(
     () => runReads.track(plannerRunQueryOptions(transport, cardId, unauthorized)), [runReads, transport, cardId, unauthorized],
   );
-  const run = useQuery({ ...runQuery, enabled: scope !== null });
+  const requiresAttachedSession = scope?.kind === 'track-opencode';
+  const run = useQuery({ ...runQuery, enabled: scope !== null,
+    // Native liveness can change without a transcript event, including a failed initial read.
+    refetchInterval: requiresAttachedSession ? ATTACHED_SESSION_STATUS_POLL_MS : false,
+  });
   /* The catalog rides alongside the run query: the trigger has to render the chosen
        model's name, and `planner-run` gives only its slug. */
   const modelCatalog = useQuery({
     ...modelCatalogQueryOptions(transport, { kind: 'card', cardId }, unauthorized), enabled: scope !== null,
   });
   const phase = run.data?.phase ?? null;
+  const attachedSession = run.data?.attached_session ?? null;
+  const attachmentBlocksInput = requiresAttachedSession && (attachedSession === null || !attachedSession.can_submit);
+  const canStop = requiresAttachedSession ? attachedSession?.can_stop === true : true;
   const stalled = phase === 'wedged';
   /* Anchored on the response's arrival (`dataUpdatedAt`); the fold keeps the earlier anchor for one turn. */
   const [runningAnchor, setRunningAnchor] = useState<RunningTurnAnchor | null>(null);
@@ -404,7 +419,7 @@ export function useConversationStore(
   });
   const working = phase === 'issuing_turn' || phase === 'turn_running';
   const stop = useConversationStop({
-    cardId, canStop: working && !stalled,
+    cardId, canStop: working && !stalled && canStop,
     responseEnded: phase === 'idle' || phase === 'turn_completed',
     historyKnown: history.data !== undefined,
     newestRowId: items.reduce((latest, row) => Math.max(latest, row.id), 0),
@@ -502,7 +517,7 @@ export function useConversationStore(
     });
   /* On a steer's `done` the entry is forgotten but its send is NOT: a steer delivers the sentence, and the
        kernel's transcript row shows it. */
-  const steerQueuedEntry = phase === 'turn_running'
+  const steerQueuedEntry = phase === 'turn_running' && run.data?.supports_steer === true
     ? (entry: PendingQueueEntry) =>
       mutations.steerQueued(entry.entry_id, entry.rev).then((outcome) => {
         if (outcome.kind === 'done') forgetQueuedEntry(entry);
@@ -511,6 +526,7 @@ export function useConversationStore(
     : undefined;
 
   return {
+    attachedSession, canStop,
     conversations,
     turnsOf: (conversationId) => conversation?.id === conversationId ? view.transcript : registry.turnsOf(conversationId),
     pending: pendingConversationIds(conversation, working, !stalled && view.sending),
@@ -519,7 +535,7 @@ export function useConversationStore(
     stopping,
     stopFeedback,
     sending: view.sending,
-    sendBlocked: view.blocked,
+    sendBlocked: attachmentBlocksInput || view.blocked,
     pendingQueue,
     pendingQueueOverflow,
     deleteQueuedEntry,
@@ -534,7 +550,10 @@ export function useConversationStore(
     retrySend: outbox.retrySend,
     discardFailedSend: outbox.discardFailedSend,
     dismissFailedSend: outbox.dismissFailedSend,
-    send: outbox.send,
+    // Keyed recovery retries keep going through the original outbox; only a new send needs native admission.
+    send: (conversationId, text, attachments, fromComposer, replaces) => attachmentBlocksInput
+      || (requiresAttachedSession && replaces !== null) ? null
+      : outbox.send(conversationId, text, attachments, fromComposer, replaces),
     attachmentsSupported: run.data?.attachments_supported ?? false,
     contextUsage: run.data?.token_usage ?? null,
     runningAnchor: nextRunningAnchor,
@@ -972,7 +991,7 @@ function useConversationPane(
     if (open === null) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!store.working || store.stopping) return;
+      if (!store.canStop || !store.working || store.stopping) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
       const region = target.closest('[data-nc-drawer]');
@@ -1303,6 +1322,7 @@ function useConversationPane(
           </>
         ) : open === null ? undefined : (
           <>
+            {store.attachedSession !== null && <AttachedSessionNotice session={store.attachedSession} />}
             {store.historyError !== null && (
               <ChatFooterNotice>
                 <ChatFooterError message={store.historyError} />
@@ -1388,7 +1408,7 @@ function useConversationPane(
               sendAdornment={<ContextRing usage={store.contextUsage} />}
               /* `stopping` keeps Stop shown while the interrupt is in flight; `interrupt()`
                                already refuses a second one. */
-              onStop={store.working || store.stopping ? store.interrupt : undefined}
+              onStop={store.canStop && (store.working || store.stopping) ? store.interrupt : undefined}
               onNewConversation={options?.inline === true ? undefined : startAnother}
               mentionTrigger={mentionTrigger}
               /* The kernel reads the selection when it hands a batch to codex, so a change
@@ -1412,7 +1432,7 @@ function useConversationPane(
                     provider={scopeProvider}
                     selection={store.model}
                     onChange={store.setModel}
-                    isDisabled={!store.historyReady}
+                    isDisabled={!store.historyReady || scope?.kind === 'track-opencode'}
                   />
                 </HStack>
               )}
@@ -1463,7 +1483,7 @@ function useConversationPane(
                 regenerateMessage={respondable
                   ? async (message) => { await store.send(open.id, message.text, message.attachments ?? [], false, null); }
                   : undefined}
-                editMessage={respondable && store.pendingQueue.length === 0 && store.pendingQueueOverflow === 0
+                editMessage={respondable && scope?.kind !== 'track-opencode' && store.pendingQueue.length === 0 && store.pendingQueueOverflow === 0
                   && isComposerEmpty(composer) && !attachments.busy ? edit.start : undefined}
                 canContinue={canContinue}
                 stalledReason={store.blockedReason}
@@ -1797,7 +1817,7 @@ function TrackRoute({ transport, unauthorized, cardRuntime, recentFiles }: {
    * live producer. */
   const requestedCard = detail.data?.cards.find((card) => card.id === registry.requestedOpenId
     && card.kind === 'codex'
-    && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload)));
+    && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload) || isPlainChatPayload(card.payload)));
   const detailMatchesRoute = trackId !== undefined && detail.data?.track.id === trackId;
   useEffect(() => {
     if (registry.requestedOpenId === null || detail.isLoading || detail.isFetching) return;
@@ -1862,6 +1882,7 @@ function TrackRouteBody({
   useReadReceipt('track', track.id, track.activityAt ?? 0);
   const trackMutations = useTrackMutations(transport, unauthorized);
   const conversationMutations = useTrackConversationMutations(transport, track.id, unauthorized);
+  const openCodeConnection = useOpenCodeConnection(transport, unauthorized, track.id);
   const openMobileSection = useOpenMobileSection();
   const mobileHeaderActionsHost = useMobileHeaderActionsHost();
   const mobileHeaderTitleHost = useMobileHeaderTitleHost();
@@ -1962,7 +1983,8 @@ function TrackRouteBody({
          * comparison rests on, and written the other way it would be a tautology. */
         return row === undefined ? null : {
           id: row.trackId,
-          provider: plannerCard !== undefined && row.id === plannerCard.id ? plannerProviderOf(plannerCard.payload) : 'codex',
+          provider: plannerCard !== undefined && row.id === plannerCard.id ? plannerProviderOf(plannerCard.payload)
+            : row.kind === 'track-opencode' ? 'opencode' : 'codex',
           title: trackTitle, cardId: row.id, cardTitle: row.title,
           updatedAt: row.updatedAt, kind: row.kind, state: row.state,
         };
@@ -2322,7 +2344,8 @@ function TrackRouteBody({
           />
         )
         : undefined}
-      conversationList={chat.list}
+      conversationList={<>{chat.list}<AstryxButton label="Connect OpenCode session" size="sm" variant="ghost"
+        onClick={openCodeConnection.show} /></>}
       conversationAction={chat.action}
       onStartConversation={chat.startConversation}
       conversationOpen={chat.isOpen}
@@ -2340,6 +2363,7 @@ function TrackRouteBody({
       onTrackDeleted={() => go({ name: 'today' })}
     />
     </TrackStage>
+    <ConnectOpenCodeDialog {...openCodeConnection.dialog} />
     {/* Keyed by kind: switching kinds is a different form, and a shared mount
         would carry the previous kind's typed values into it. */}
     <Dialog

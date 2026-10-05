@@ -18,7 +18,7 @@ export type SideConversation = Readonly<{ source_card_id: string; context: strin
 
 /** What kind of thing the conversation is; `'track-assistant'` is derived server-side from the card's own marker. */
 export type ConversationKind =
-  | 'terminal' | 'codex' | 'claude' | 'shared-spec' | 'track-assistant';
+  | 'terminal' | 'codex' | 'claude' | 'shared-spec' | 'track-assistant' | 'track-opencode';
 
 /** Mirrors `WorkerSessionState`. */
 export type ConversationState =
@@ -57,6 +57,7 @@ export const CONVERSATION_KIND_LABEL: Readonly<Record<ConversationKind, string>>
   claude: 'Claude',
   'shared-spec': 'Planner',
   'track-assistant': 'Assistant',
+  'track-opencode': 'OpenCode',
 });
 
 /**
@@ -70,6 +71,7 @@ export const CONVERSATION_STATE_SOURCE: Readonly<Record<ConversationKind, 'serve
   claude: 'route',
   'shared-spec': 'route',
   'track-assistant': 'server',
+  'track-opencode': 'server',
 });
 
 /** The one name a conversation shows, wherever it is shown. */
@@ -208,6 +210,14 @@ const pendingQueueEntrySchema: z.ZodType<PendingQueueEntry> = z.object({
   queued_at_ms: z.number(),
 });
 
+/** Metadata supplied by the connection owner; the UI never guesses native liveness. */
+export const attachedOpenCodeSessionSchema = z.object({
+  connection_id: z.string(), label: z.string(), session_id: z.string(), directory: z.string(),
+  model: z.string().nullable(), status: z.enum(['idle', 'running', 'unavailable', 'unknown']),
+  can_submit: z.boolean(), can_stop: z.boolean(),
+});
+export type AttachedOpenCodeSession = z.infer<typeof attachedOpenCodeSessionSchema>;
+
 export type PlannerRun = Readonly<{
   card_id: string;
   worker_session_id?: string | null;
@@ -236,6 +246,8 @@ export type PlannerRun = Readonly<{
   token_usage: PlannerRunTokenUsage | null;
   /** The turn the harness is running; non-null exactly when `phase` is `turn_running`. */
   running_turn: PlannerRunningTurn | null;
+  supports_steer: boolean;
+  attached_session?: AttachedOpenCodeSession | null;
 }>;
 
 /**
@@ -299,6 +311,8 @@ export function plannerRunOperation(cardId: string): ApiOperation<PlannerRun> {
       /* Absent on older servers and whenever the harness has never reported a usage frame; `null` draws no meter. */
       token_usage: plannerRunTokenUsageSchema.nullable().optional().default(null),
       running_turn: plannerRunningTurnSchema.nullable(),
+      supports_steer: z.boolean(),
+      attached_session: attachedOpenCodeSessionSchema.nullable().optional(),
     }),
   };
 }
@@ -664,11 +678,11 @@ export const CONVERSATION_TEXT_MAX = 32768;
 /* Track conversations: written out rather than aliased to the area schema, and living here
    rather than in `core/api/schemas.ts` because `kind: 'track-assistant'` is not in the event vocabulary. */
 
-const trackConversationSummarySchema: z.ZodType<TrackConversationSummary> = z.object({
+export const trackConversationSummarySchema: z.ZodType<TrackConversationSummary> = z.object({
   id: z.string(),
   trackId: z.string(),
   title: z.string().nullable(),
-  kind: z.string(),
+  kind: z.enum(['track-assistant', 'track-opencode']),
   state: conversationStateSchema.nullable(),
   updatedAt: z.number(),
   // Required and nullable, as the kernel sends it; an older kernel's rows lack it and are rejected.
@@ -677,8 +691,8 @@ const trackConversationSummarySchema: z.ZodType<TrackConversationSummary> = z.ob
 });
 
 /**
- * `trackTitle` is absent because this endpoint does not send it; `kind` is pinned because it is the
- * only value this endpoint produces.
+ * `trackTitle` is absent because this endpoint does not send it; the declared conversation kind
+ * preserves an existing native connection when the list is refreshed.
  */
 export function toTrackConversation(row: TrackConversationSummary): Conversation {
   return {
@@ -686,7 +700,7 @@ export function toTrackConversation(row: TrackConversationSummary): Conversation
     trackId: row.trackId,
     ...(row.sourceCardId === undefined ? {} : { sourceCardId: row.sourceCardId }),
     title: row.title,
-    kind: 'track-assistant',
+    kind: row.kind === 'track-opencode' ? 'track-opencode' : 'track-assistant',
     state: row.state,
     updatedAt: row.updatedAt,
     lastTurnCompletedAt: row.lastTurnCompletedAt,
