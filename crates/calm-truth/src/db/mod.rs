@@ -527,8 +527,8 @@ pub trait RepoOutOfDomain: RepoRead {
     async fn transcript_projection_id(&self, card_id: &str, client_id: &str)
     -> Result<Option<i64>>;
 
-    /// Upgrade the projection row in place with codex's echo (turn, item id, verbatim `params`); `input_segments` is
-    /// untouched. `None` when no projection stands (the echo is then an ordinary insert).
+    /// Upgrade a projection or update its correlated native echo in place. Preserve the kernel's
+    /// internal batch proof and input segments. `None` when neither row exists.
     async fn transcript_projection_upgrade(
         &self,
         card_id: &str,

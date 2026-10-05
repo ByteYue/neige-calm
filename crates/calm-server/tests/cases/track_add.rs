@@ -713,27 +713,40 @@ async fn track_creator_does_not_keep_the_state_alive() {
     );
 }
 
-/// A creator whose Planner runs on Claude, on a server where Claude is not ready, gets the
-/// dependency refusal: -32503, nothing created.
+/// Unavailable inherited Planner providers refuse before minting a Track or its input.
 #[tokio::test]
 async fn track_add_refuses_while_the_creators_provider_is_unavailable() {
-    let boot = boot(16).await;
-    let (creator, planner) = boot.user_track("portfolio").await;
-    sqlx::query(
-        "UPDATE cards SET payload = json_set(payload, '$.planner_provider', 'claude') \
-         WHERE track_id = ?1 AND role = 'planner'",
-    )
-    .bind(&creator)
-    .execute(boot.repo.pool())
-    .await
-    .unwrap();
-    let before = boot.track_count().await;
-    let error = boot
-        .add(&planner, boot.args("k1"))
+    for provider in ["claude", "opencode"] {
+        let boot = boot(16).await;
+        let (creator, mut planner) = boot.user_track("portfolio").await;
+        sqlx::query(
+            "UPDATE cards SET payload = json_set(payload, '$.planner_provider', ?1) \
+             WHERE track_id = ?2 AND role = 'planner'",
+        )
+        .bind(provider)
+        .bind(&creator)
+        .execute(boot.repo.pool())
         .await
-        .expect_err("Claude is not configured here");
-    assert_eq!(error.code, -32503, "{error:?}");
-    assert_eq!(boot.track_count().await, before);
+        .unwrap();
+        planner.identity.provider = match provider {
+            "claude" => AgentProvider::Claude,
+            "opencode" => AgentProvider::OpenCode,
+            _ => unreachable!(),
+        };
+        sqlx::query("UPDATE worker_sessions SET provider=?1 WHERE id=?2")
+            .bind(provider)
+            .bind(&planner.identity.session_id)
+            .execute(boot.repo.pool())
+            .await
+            .unwrap();
+        let before = boot.track_count().await;
+        let error = boot
+            .add(&planner, boot.args("k1"))
+            .await
+            .expect_err("the inherited provider is not configured here");
+        assert_eq!(error.code, -32503, "{provider}: {error:?}");
+        assert_eq!(boot.track_count().await, before, "{provider}");
+    }
 }
 
 /// A closed creator adds nothing: the refusal is state (-32409), and no Track is created.

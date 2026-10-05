@@ -286,7 +286,7 @@ impl<'a> IssueTurnHandle<'a> {
         selection: &TurnModelSelection,
         client_user_message_id: &str,
         pending_rewind: Option<&BackendRewind>,
-    ) -> std::result::Result<String, TurnStartFailure> {
+    ) -> std::result::Result<crate::planner_submission::TurnAdmission, TurnStartFailure> {
         self.backend
             .turn_start(
                 thread_id,
@@ -1483,6 +1483,7 @@ async fn handle_steer(
                 &thread_id,
                 entry_id.as_str(),
                 &segments,
+                None,
             )
             .await
             {
@@ -1906,6 +1907,22 @@ async fn on_notification(
     }
 
     match kind {
+        PlannerEventKind::SubmissionUnknown { turn_id, reason } => {
+            if inner
+                .backend
+                .active_turn_id_for_thread(thread_id.as_deref().unwrap_or_default())
+                .as_deref()
+                != Some(turn_id.as_str())
+            {
+                return Ok(());
+            }
+            *inner.issuance_block.lock().await = Some(reason);
+            *inner.issued_turn_id.lock().await = Some(turn_id.clone());
+            *inner.state.lock().await = HarnessState::TurnRunning {
+                turn_id,
+                started_at: Instant::now(),
+            };
+        }
         PlannerEventKind::Approval { method } => {
             tracing::warn!(
                 method,
@@ -1952,7 +1969,13 @@ async fn on_notification(
                     turn_id: active, ..
                 } => active == &turn_id,
                 HarnessState::Idle => last_seen.is_none(),
-                HarnessState::Resumed { .. } => last_seen.as_deref() == Some(turn_id.as_str()),
+                HarnessState::Resumed { .. } => {
+                    last_seen.as_deref() == Some(turn_id.as_str())
+                        || (inner.backend.accepts_recovered_turn(
+                            thread_id.as_deref().unwrap_or_default(),
+                            &turn_id,
+                        ))
+                }
                 _ => false,
             };
             if !accept {
@@ -2009,6 +2032,8 @@ async fn on_notification(
                     );
                     return persist_snapshot(inner).await;
                 }
+                *inner.issuance_block.lock().await = None;
+                *inner.projection_client_id.lock().await = None;
                 *inner.last_turn_id.lock().await = Some(target_turn_id.clone());
                 *inner.state.lock().await = HarnessState::TurnCompleted {
                     last_turn_id: target_turn_id,
@@ -2059,6 +2084,8 @@ async fn on_notification(
                 );
                 return persist_snapshot(inner).await;
             }
+            *inner.issuance_block.lock().await = None;
+            *inner.projection_client_id.lock().await = None;
             *inner.last_turn_id.lock().await = Some(turn_id.clone());
             *inner.state.lock().await = HarnessState::TurnCompleted {
                 last_turn_id: turn_id.clone(),
@@ -2438,8 +2465,14 @@ async fn write_projection_row(
     thread_id: &str,
     client_id: &str,
     segments: &[HarnessInputSegment],
+    entries: &[QueueEntry],
 ) -> Result<i64> {
-    let item_db_id = insert_projection_row(inner, thread_id, client_id, segments).await?;
+    let proof = inner
+        .backend
+        .claims_queued_batch()
+        .then(|| super::submission_recovery::claimed_queue_entries(entries));
+    let item_db_id =
+        insert_projection_row(inner, thread_id, client_id, segments, proof.as_ref()).await?;
     // The existing per-row event, so every client refetches the transcript now rather than at the echo.
     emit_item_added(
         inner,
@@ -2460,6 +2493,7 @@ async fn insert_projection_row(
     thread_id: &str,
     client_id: &str,
     segments: &[HarnessInputSegment],
+    proof: Option<&Value>,
 ) -> Result<i64> {
     let stale = inner
         .repo
@@ -2481,7 +2515,7 @@ async fn insert_projection_row(
         .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "item": {
             "id": client_id,
             "clientId": client_id,
@@ -2490,6 +2524,9 @@ async fn insert_projection_row(
         },
         "_projection": true,
     });
+    if let Some(proof) = proof {
+        params["calmQueueEntries"] = proof.clone();
+    }
     let params_json = serde_json::to_string(&params)?;
     let input_segments = serde_json::to_string(segments)?;
     let item_db_id = inner
@@ -3139,7 +3176,7 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
     let pending_rewind = inner.pending_rewind.lock().await.clone();
     let issued = async {
         // Written before `turn/start` goes out, so the row says what codex is told.
-        write_projection_row(inner, &thread_id, client_id.as_str(), &segments)
+        write_projection_row(inner, &thread_id, client_id.as_str(), &segments, &drained)
             .await
             .map_err(IssueFailure::ProjectionWrite)?;
         let turn = IssueTurnHandle::from_reconciliation(inner)
@@ -3155,6 +3192,21 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
         Ok::<_, IssueFailure>(turn)
     }
     .await;
+    // An unknown external attempt is an admitted local turn, never a retryable batch.
+    let (issued, unknown_reason) = match issued {
+        Ok(crate::planner_submission::TurnAdmission::Accepted { turn_id }) => (Ok(turn_id), None),
+        Ok(crate::planner_submission::TurnAdmission::Unknown { turn_id, reason }) => {
+            (Ok(turn_id), Some(reason))
+        }
+        Ok(crate::planner_submission::TurnAdmission::Rejected { reason }) => (
+            Err(IssueFailure::TurnStart(TurnStartFailure::Refused {
+                error: CalmError::PlannerProviderRefused(reason.clone()),
+                reader: reason,
+            })),
+            None,
+        ),
+        Err(error) => (Err(error), None),
+    };
     match issued {
         Ok(turn_id) => {
             tracing::debug!(
@@ -3168,13 +3220,20 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
             );
             // A turn that went out ends the run of refusals, so the notice and
             // the clock behind it both go with it.
-            *inner.issuance_block.lock().await = None;
+            *inner.issuance_block.lock().await = unknown_reason.clone();
             *inner.refusing_since.lock().await = None;
             *inner.last_turn_id.lock().await = Some(turn_id.clone());
             *inner.issued_turn_id.lock().await = Some(turn_id.clone());
             *inner.issued_turn_head.lock().await = diff.current_head.clone();
             // Cleared in the same snapshot that empties the queue, so no restart can pair this key with a later batch.
             *inner.projection_client_id.lock().await = None;
+            if unknown_reason.is_some() {
+                *inner.projection_client_id.lock().await = Some(client_id.clone());
+                *inner.state.lock().await = HarnessState::TurnRunning {
+                    turn_id: turn_id.clone(),
+                    started_at: Instant::now(),
+                };
+            }
             // Known gap (#1923): a crash between this start and the snapshot write below replays the
             // cut on restart. Codex answers `turn not found` (applied); the Claude CLI guard fails that
             // one turn loudly. Either way the cut is then consumed and later turns are unaffected.
@@ -3454,7 +3513,7 @@ async fn watchdog_tick(inner: &Arc<Inner>) -> Result<()> {
             _ => false,
         }
     };
-    if resume_elapsed {
+    if resume_elapsed && !inner.backend.has_unresolved_submission().await? {
         let mut state = inner.state.lock().await;
         if let HarnessState::Resumed { resumed_at } = &*state
             && Instant::now().duration_since(*resumed_at) >= inner.config.resumed_reconcile_budget

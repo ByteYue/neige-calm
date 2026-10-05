@@ -7,7 +7,7 @@ use calm_types::planner_attachment::{AttachmentFormat, AttachmentId};
 
 use crate::error::{CalmError, Result};
 use crate::ids::CardId;
-use crate::model::{TrackWorkspace, TrackWorkspaceKind};
+use crate::model::{Card, CardRole, TrackWorkspace, TrackWorkspaceKind};
 
 pub mod bind;
 pub mod dir;
@@ -46,6 +46,25 @@ fn server_side_fault(summary: &str, paths: &[(&str, &Path)]) -> CalmError {
         );
     }
     CalmError::Internal(format!("planner attachments: {summary}"))
+}
+
+/// The conversation input capability shared by the run surface, upload and queue admission.
+/// Historical attachment reads remain available independently of current input support.
+pub fn require_image_input(card: &Card, role: CardRole) -> Result<()> {
+    let binding =
+        crate::harness::profile::PlannerBinding::from_card(card, role).ok_or_else(|| {
+            CalmError::Forbidden(format!(
+                "card {} has no conversation input capability",
+                card.id
+            ))
+        })?;
+    match binding.provider {
+        crate::session_projection_repo::AgentProvider::OpenCode => Err(CalmError::BadRequest(
+            "OpenCode Planner accepts text input only; image attachments are unsupported".into(),
+        )),
+        crate::session_projection_repo::AgentProvider::Codex
+        | crate::session_projection_repo::AgentProvider::Claude => Ok(()),
+    }
 }
 
 /// `<workspace>/.neige/attachments` for a managed workspace; `Attached` workspaces are user-owned and refused, which also keeps this module free of any recursive delete.

@@ -61,11 +61,17 @@ fn runtime_init_session_identity(
     init: &WorkerSessionInit,
 ) -> WorkerSessionProjectionResult<(WorkerProviderKind, SessionMode, WorkerContract)> {
     if init.kind != WorkerSessionKind::SharedPlanner {
+        if init.agent_provider == Some(AgentProvider::OpenCode) {
+            return Err(runtime_message(
+                "OpenCode requires the shared planner contract",
+            ));
+        }
         return Ok(derive_session_identity(&init.kind));
     }
     let provider = match init.agent_provider {
         Some(AgentProvider::Codex) => WorkerProviderKind::Codex,
         Some(AgentProvider::Claude) => WorkerProviderKind::Claude,
+        Some(AgentProvider::OpenCode) => WorkerProviderKind::OpenCode,
         None => {
             return Err(runtime_message(format!(
                 "planner runtime init {} names no provider",
@@ -253,9 +259,12 @@ async fn session_mirror_card_mcp_token_tx(
     if !session.state.is_active_authority() || session.mcp_token_hash.is_some() {
         return Ok(());
     }
-    // A Claude Planner row's hash is written only by its first-turn mint (#1791 §5.1 token
-    // invariant): the card's hash may be a predecessor's, which must never authenticate it.
-    if session.provider == WorkerProviderKind::Claude && session.contract == WorkerContract::Planner
+    // Owned Planner credentials are minted for their session; a predecessor's card hash
+    // must never authenticate the successor.
+    if matches!(
+        session.provider,
+        WorkerProviderKind::Claude | WorkerProviderKind::OpenCode
+    ) && session.contract == WorkerContract::Planner
     {
         return Ok(());
     }
@@ -369,7 +378,7 @@ pub async fn session_supersede_active_tx(
               SET state = 'superseded',
                   updated_at_ms = ?1,
                   completed_at_ms = COALESCE(completed_at_ms, ?1),
-                  mcp_token_hash = CASE WHEN provider = 'claude' AND contract = 'planner'
+                  mcp_token_hash = CASE WHEN provider IN ('claude', 'opencode') AND contract = 'planner'
                                         THEN NULL ELSE mcp_token_hash END
             WHERE id = ?2
               AND state IN ('starting', 'running', 'idle', 'turn_pending')"#,
@@ -601,7 +610,7 @@ pub(super) async fn session_mark_superseded_tx(
               SET state = 'superseded',
                   updated_at_ms = ?1,
                   completed_at_ms = COALESCE(completed_at_ms, ?1),
-                  mcp_token_hash = CASE WHEN provider = 'claude' AND contract = 'planner'
+                  mcp_token_hash = CASE WHEN provider IN ('claude', 'opencode') AND contract = 'planner'
                                         THEN NULL ELSE mcp_token_hash END
             WHERE id = ?2"#,
     )

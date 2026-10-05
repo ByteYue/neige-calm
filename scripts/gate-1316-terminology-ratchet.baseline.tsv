@@ -1,8 +1,6 @@
 # #1316 retiring-vocabulary ratchet baseline. Regenerate with:
 #   ./scripts/gate-1316-terminology-ratchet.sh --update-baseline
 # Counts are OCCURRENCES per (term, scope). Only-down is enforced.
-# #2129 upgrade compatibility: two existing event_spec protocol field references
-# in the frozen descriptor and predecessor reconstruction; no new domain term.
 # term	scope	count
 cove	crates	143
 cove	fe	0
@@ -20,7 +18,7 @@ runtime_id	crates	1246
 runtime_id	fe	0
 runtime_id	docs	1
 runtime_id	e2e	4
-harness_item	crates	273
+harness_item	crates	272
 harness_item	fe	95
 harness_item	docs	2
 harness_item	e2e	0

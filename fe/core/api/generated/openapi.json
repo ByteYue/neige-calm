@@ -1236,7 +1236,7 @@
             }
           },
           "400": {
-            "description": "Not one of PNG/JPEG/GIF/WebP, the track has an attached workspace, or the card's attachment budget is exhausted",
+            "description": "Unsupported image format, text-only provider, attached workspace, or exhausted attachment budget",
             "content": {
               "application/json": {
                 "schema": {
@@ -4390,7 +4390,7 @@
           {
             "name": "provider",
             "in": "query",
-            "description": "Agent provider: codex or claude; defaults to codex",
+            "description": "Agent provider: codex, claude or opencode; defaults to codex",
             "required": false,
             "schema": {
               "type": "string"
@@ -7627,7 +7627,8 @@
         "type": "string",
         "enum": [
           "codex",
-          "claude"
+          "claude",
+          "opencode"
         ]
       },
       "Area": {
@@ -8737,6 +8738,7 @@
           "config_read",
           "config_toml",
           "claude_cli",
+          "opencode_config",
           "unknown"
         ]
       },

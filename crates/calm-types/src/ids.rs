@@ -42,6 +42,8 @@ pub enum ActorId {
     AiCodexSession(WorkerSessionId),
     #[schema(value_type = String)]
     AiClaudeSession(WorkerSessionId),
+    #[schema(value_type = String)]
+    AiOpenCodeSession(WorkerSessionId),
 }
 
 impl std::fmt::Display for ActorId {
@@ -65,6 +67,10 @@ impl std::fmt::Display for ActorId {
             Self::AiCodexSession(id) => write!(f, "ai:codex-session:{}", id.as_str()),
             Self::AiClaudeSession(id) if id.as_str().is_empty() => f.write_str("ai:claude-session"),
             Self::AiClaudeSession(id) => write!(f, "ai:claude-session:{}", id.as_str()),
+            Self::AiOpenCodeSession(id) if id.as_str().is_empty() => {
+                f.write_str("ai:opencode-session")
+            }
+            Self::AiOpenCodeSession(id) => write!(f, "ai:opencode-session:{}", id.as_str()),
         }
     }
 }
@@ -158,6 +164,14 @@ mod tests {
         let back: ActorId = serde_json::from_str(&s).unwrap();
         assert_eq!(back, claude_session);
 
+        let opencode_session = ActorId::AiOpenCodeSession(WorkerSessionId::from("sess-oc"));
+        let s = serde_json::to_string(&opencode_session).unwrap();
+        assert_eq!(s, r#"{"kind":"AiOpenCodeSession","id":"sess-oc"}"#);
+        assert_eq!(
+            serde_json::from_str::<ActorId>(&s).unwrap(),
+            opencode_session
+        );
+
         let u = ActorId::User;
         let back: ActorId = serde_json::from_str(&serde_json::to_string(&u).unwrap()).unwrap();
         assert_eq!(back, u);
@@ -167,6 +181,14 @@ mod tests {
     fn actor_id_display_is_commit_author_label() {
         assert_eq!(ActorId::User.to_string(), "user");
         assert_eq!(ActorId::Kernel.to_string(), "kernel");
+        assert_eq!(
+            ActorId::AiOpenCodeSession(WorkerSessionId::from("sess-oc")).to_string(),
+            "ai:opencode-session:sess-oc"
+        );
+        assert_eq!(
+            ActorId::AiOpenCodeSession(WorkerSessionId::from("")).to_string(),
+            "ai:opencode-session"
+        );
         assert_eq!(
             ActorId::AiPlanner(CardId::from("card-7")).to_string(),
             "ai:planner:card-7"

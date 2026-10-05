@@ -317,12 +317,15 @@ export function isBlankForKernel(text: string): boolean {
 
 /**
  * The backend of a Planner card, from its server-owned `planner_provider` key (#1791). Read only for
- * copy: the server refuses to run a Planner card whose key is missing or unknown, so any value other
- * than `claude` reads as Codex, the one backend such a card could have been minted with.
+ * copy: the server refuses to run a Planner card whose key is missing or unknown. Legacy payloads
+ * still read as Codex; every declared newer provider must preserve its own identity.
  */
 export function plannerProviderOf(payload: unknown): AgentProvider {
-  return typeof payload === 'object' && payload !== null
-    && (payload as { planner_provider?: unknown }).planner_provider === 'claude' ? 'claude' : 'codex';
+  const provider = typeof payload === 'object' && payload !== null
+    ? (payload as { planner_provider?: unknown }).planner_provider : undefined;
+  if (provider === 'claude') return 'claude';
+  if (provider === 'opencode') return 'opencode';
+  return 'codex';
 }
 
 export type NewTrackBody = Readonly<{

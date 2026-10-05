@@ -55,7 +55,8 @@ pub async fn enforce_role_resolving_session<T: WriteTx + ?Sized + Send>(
     let session_id = match actor {
         ActorId::AiPlannerSession(session)
         | ActorId::AiCodexSession(session)
-        | ActorId::AiClaudeSession(session) => session.clone(),
+        | ActorId::AiClaudeSession(session)
+        | ActorId::AiOpenCodeSession(session) => session.clone(),
         _ => return enforce_role(actor, event, scope, cache, track_area_cache),
     };
 
@@ -88,7 +89,15 @@ pub async fn enforce_role_resolving_session<T: WriteTx + ?Sized + Send>(
         })?;
 
     let synthetic = match actor {
-        ActorId::AiPlannerSession(_) => {
+        ActorId::AiPlannerSession(_) | ActorId::AiOpenCodeSession(_) => {
+            if matches!(actor, ActorId::AiOpenCodeSession(_))
+                && (session.provider != crate::worker::WorkerProviderKind::OpenCode
+                    || session.contract != crate::worker::WorkerContract::Planner)
+            {
+                return Err(RoleViolation::SessionProviderContractMismatch {
+                    session: session_id,
+                });
+            }
             // enforce_role does not re-check role for the AiPlanner path, so verify the
             // card is Planner-roled before granting planner authority; fail closed.
             if cache.get(&card_id) != Some(CardRole::Planner) {
@@ -124,6 +133,7 @@ pub async fn enforce_role_resolving_session_from_tx<T: WriteTx + ?Sized + Send>(
         ActorId::AiPlannerSession(session)
         | ActorId::AiCodexSession(session)
         | ActorId::AiClaudeSession(session)
+        | ActorId::AiOpenCodeSession(session)
             if !session.as_str().is_empty() =>
         {
             tx.read_worker_session(session)
@@ -150,7 +160,8 @@ fn actor_card_id(actor: &ActorId) -> Option<&CardId> {
         | ActorId::Plugin(_)
         | ActorId::AiPlannerSession(_)
         | ActorId::AiCodexSession(_)
-        | ActorId::AiClaudeSession(_) => None,
+        | ActorId::AiClaudeSession(_)
+        | ActorId::AiOpenCodeSession(_) => None,
     }
 }
 
@@ -1324,6 +1335,55 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn opencode_session_actor_requires_live_opencode_planner_identity() {
+        let mut world = matrix_world();
+        let actor = ActorId::AiOpenCodeSession(WorkerSessionId::from("s-live"));
+        for (provider, contract, accepted) in [
+            (
+                crate::worker::WorkerProviderKind::OpenCode,
+                crate::worker::WorkerContract::Planner,
+                true,
+            ),
+            (
+                crate::worker::WorkerProviderKind::Claude,
+                crate::worker::WorkerContract::Planner,
+                false,
+            ),
+            (
+                crate::worker::WorkerProviderKind::OpenCode,
+                crate::worker::WorkerContract::Executor,
+                false,
+            ),
+        ] {
+            let session = world.session.as_mut().unwrap();
+            session.provider = provider;
+            session.contract = contract;
+            let mut tx = world.tx();
+            let (cache, area_cache) = world.caches();
+            let result = enforce_role_resolving_session(
+                &mut tx,
+                &actor,
+                &track_updated(),
+                &track_scope("w", "c"),
+                &cache,
+                &area_cache,
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "{provider:?}/{contract:?}: {result:?}"
+            );
+            if !accepted {
+                assert!(matches!(
+                    result,
+                    Err(RoleViolation::SessionProviderContractMismatch { .. })
+                ));
+            }
+        }
+    }
+
     fn matrix_actors() -> Vec<ActorId> {
         vec![
             ActorId::User,
@@ -1345,6 +1405,7 @@ mod tests {
             ActorId::AiCodexSession(WorkerSessionId::from("s-live")),
             ActorId::AiPlannerSession(WorkerSessionId::from("s-live")),
             ActorId::AiClaudeSession(WorkerSessionId::from("s-live")),
+            ActorId::AiOpenCodeSession(WorkerSessionId::from("s-live")),
             ActorId::AiCodexSession(WorkerSessionId::from("s-ghost")),
             ActorId::AiCodexSession(WorkerSessionId::from("")),
         ]

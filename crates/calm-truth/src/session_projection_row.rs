@@ -149,9 +149,10 @@ fn runtime_kind_from_session_identity(
     match (provider, contract) {
         (WorkerProviderKind::Terminal, WorkerContract::Executor) => Ok(WorkerSessionKind::Terminal),
         (WorkerProviderKind::Codex, WorkerContract::Executor) => Ok(WorkerSessionKind::CodexCard),
-        (WorkerProviderKind::Codex | WorkerProviderKind::Claude, WorkerContract::Planner) => {
-            Ok(WorkerSessionKind::SharedPlanner)
-        }
+        (
+            WorkerProviderKind::Codex | WorkerProviderKind::Claude | WorkerProviderKind::OpenCode,
+            WorkerContract::Planner,
+        ) => Ok(WorkerSessionKind::SharedPlanner),
         (WorkerProviderKind::Claude, WorkerContract::Executor) => Ok(WorkerSessionKind::ClaudeCard),
         _ => Err(WorkerSessionProjectionRepoError::Message {
             message: format!(
@@ -166,6 +167,7 @@ fn agent_provider_from_session_provider(provider: WorkerProviderKind) -> Option<
         WorkerProviderKind::Terminal => None,
         WorkerProviderKind::Codex => Some(AgentProvider::Codex),
         WorkerProviderKind::Claude => Some(AgentProvider::Claude),
+        WorkerProviderKind::OpenCode => Some(AgentProvider::OpenCode),
     }
 }
 
@@ -357,6 +359,8 @@ mod tests {
         for (provider, contract) in [
             (WorkerProviderKind::Codex, WorkerContract::Validator),
             (WorkerProviderKind::Terminal, WorkerContract::Planner),
+            (WorkerProviderKind::OpenCode, WorkerContract::Executor),
+            (WorkerProviderKind::OpenCode, WorkerContract::Validator),
         ] {
             let ws = worker_session(provider, contract, WorkerSessionState::Running);
             let err = card_runtime_from_session(&ws, "card-1".into(), None).unwrap_err();

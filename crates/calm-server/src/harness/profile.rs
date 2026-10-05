@@ -128,6 +128,7 @@ mod tests {
         for (value, provider) in [
             ("codex", AgentProvider::Codex),
             ("claude", AgentProvider::Claude),
+            ("opencode", AgentProvider::OpenCode),
         ] {
             assert_eq!(
                 PlannerBinding::from_card(&planner(Some(json!(value))), CardRole::Planner),

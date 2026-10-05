@@ -13,7 +13,7 @@ import { Fragment, useRef, type KeyboardEvent, type ReactNode } from 'react';
 
 import type { AgentProvider } from '../../../../../core/api/generated/wire.ts';
 import {
-  CREATE_REFUSED_WHEN_UNAVAILABLE, STILL_CREATES_NOTE, type ProviderAvailability,
+  CREATE_REFUSED_WHEN_UNAVAILABLE, PLANNER_PROVIDER_LABELS, STILL_CREATES_NOTE, type ProviderAvailability,
 } from '../../../../../core/domain/agent-providers.ts';
 import type { ModelCatalog, ModelSelection } from '../../../../../core/domain/conversation.ts';
 import { useState } from '../../../ui/state/public.ts';
@@ -22,25 +22,30 @@ import styles from './model-pill.module.css';
 const FOLLOW_DEFAULT_LABEL = 'Default';
 
 /** A standing note rather than a per-switch warning: the catalog carries no context window, so whether a switch compacts is unknowable here. */
-const SWITCH_NOTE = 'Switching to a model with a smaller context window can make codex compact the history first.';
+const SWITCH_NOTE = 'Switching to a model with a smaller context window can make the provider compact the history first.';
 
 /**
  * Total over `AgentProvider`, so a new backend is a compile error here rather than a missing group.
- * `unavailable` says why that provider's `source: 'unavailable'` catalog is empty. A Claude group waits for
+ * `unavailable` says why that provider's `source: 'unavailable'` catalog is empty. An optional provider waits for
  * its availability and catalog before it joins a menu that offers other providers (`hiddenUntilKnown`); a
  * Codex one stays while the daemon is down, saying so. Only codex compacts (`switchNote`).
  * Whether an unavailable group stays pickable is core's `CREATE_REFUSED_WHEN_UNAVAILABLE` (#1817), the
  * one per-provider flag Settings reads too.
  */
 const PROVIDERS: Readonly<Record<AgentProvider, Readonly<{
-  label: string; unavailable: string; hiddenUntilKnown: boolean; switchNote: boolean;
+  unavailable: string; hiddenUntilKnown: boolean; switchNote: boolean; effortLabel: string; minimumEfforts: number;
 }>>> = Object.freeze({
   codex: Object.freeze({
-    label: 'Codex', unavailable: 'codex is not running', hiddenUntilKnown: false, switchNote: true,
+    unavailable: 'codex is not running', hiddenUntilKnown: false, switchNote: true, effortLabel: 'Reasoning effort', minimumEfforts: 2,
   }),
   claude: Object.freeze({
-    label: 'Claude', unavailable: 'Claude cannot run on this server right now', hiddenUntilKnown: true,
-    switchNote: false,
+    unavailable: 'Claude cannot run on this server right now', hiddenUntilKnown: true,
+    switchNote: false, effortLabel: 'Reasoning effort', minimumEfforts: 2,
+  }),
+  opencode: Object.freeze({
+    unavailable: 'OpenCode cannot run on this server right now', hiddenUntilKnown: true,
+    /* A single optional variant still differs from following the native default. */
+    switchNote: false, effortLabel: 'Variant', minimumEfforts: 1,
   }),
 });
 
@@ -70,7 +75,7 @@ function visibleModelGroups(groups: readonly ModelGroup[], provider: AgentProvid
 /** The name of the default a catalog says is followed (for Claude, the model its CLI default resolves to), or `null` when it cannot say. */
 function defaultNameOf(catalog: ModelCatalog | null): string | null {
   return catalog?.default_source === 'config_read' || catalog?.default_source === 'config_toml'
-    || catalog?.default_source === 'claude_cli'
+    || catalog?.default_source === 'claude_cli' || catalog?.default_source === 'opencode_config'
     ? catalog.default.model
     : null;
 }
@@ -116,7 +121,7 @@ export function ModelPill({
     ? (defaultEntry?.display_name ?? defaultName ?? FOLLOW_DEFAULT_LABEL)
     : (chosen?.display_name ?? selection.model);
   /* With more than one provider on offer, the pick is a provider too, and the trigger says whose. */
-  const label = grouped ? `${PROVIDERS[provider].label} ${named}` : named;
+  const label = grouped ? `${PLANNER_PROVIDER_LABELS[provider]} ${named}` : named;
   /* The accessible name keeps what the visible one dropped. A person reading
      the pill has the menu one press away; a person hearing it does not. */
   const spokenLabel = selection.model === null && defaultName !== null
@@ -130,6 +135,8 @@ export function ModelPill({
     ? catalog?.default.reasoning_effort ?? null
     : chosen?.default_reasoning_effort ?? null;
   const switchNote = shown.some((group) => PROVIDERS[group.provider].switchNote);
+  const effortLabel = PROVIDERS[provider].effortLabel;
+  const hasEffortChoice = efforts.length >= PROVIDERS[provider].minimumEfforts;
   const closeOnEscape = (event: KeyboardEvent<HTMLSpanElement>) => {
     if (event.key !== 'Escape' || !open) return;
     // A host Dialog's document listener would otherwise take Escape first and the trigger would not get its focus back.
@@ -170,18 +177,18 @@ export function ModelPill({
             return grouped ? (
               <Fragment key={group.provider}>
                 {index > 0 && <Divider />}
-                <div role="group" aria-label={PROVIDERS[group.provider].label}>
-                  <div className={styles.groupHeading} aria-hidden="true">{PROVIDERS[group.provider].label}</div>
+                <div role="group" aria-label={PLANNER_PROVIDER_LABELS[group.provider]}>
+                  <div className={styles.groupHeading} aria-hidden="true">{PLANNER_PROVIDER_LABELS[group.provider]}</div>
                   {choices}
                 </div>
               </Fragment>
             ) : <Fragment key={group.provider}>{choices}</Fragment>;
           })}
-          {effortControl === 'in-menu' && efforts.length > 1 && (
+          {effortControl === 'in-menu' && hasEffortChoice && (
             <>
               <Divider />
-              <div role="group" aria-label="Reasoning effort">
-                <div className={styles.groupHeading} aria-hidden="true">Reasoning effort</div>
+              <div role="group" aria-label={effortLabel}>
+                <div className={styles.groupHeading} aria-hidden="true">{effortLabel}</div>
                 <EffortChoices defaultName={effortDefault} efforts={efforts} value={selection.reasoning_effort}
                   onChange={(effort) => onChange({ model: selection.model, reasoning_effort: effort }, provider)} />
               </div>
@@ -197,8 +204,9 @@ export function ModelPill({
           )}
         </DropdownMenu>
       </span>
-      {effortControl === 'separate' && efforts.length > 1 && (
+      {effortControl === 'separate' && hasEffortChoice && (
         <EffortPill
+          controlLabel={effortLabel}
           efforts={efforts}
           value={selection.reasoning_effort}
           /* While a model is chosen the entry's own `default_reasoning_effort` applies; while the default is followed, the catalog's. */
@@ -230,7 +238,7 @@ function GroupChoices({ group, selection, onChange }: Readonly<{
     {reason !== null && (
       <div className={refused ? styles.reason : `${styles.reason} ${styles.warning}`} role="note">
         <Text type="supporting" color={refused ? undefined : 'inherit'}>
-          {`${PROVIDERS[group.provider].label} is unavailable: ${reason}${refused ? '' : ` ${STILL_CREATES_NOTE}`}`}
+          {`${PLANNER_PROVIDER_LABELS[group.provider]} is unavailable: ${reason}${refused ? '' : ` ${STILL_CREATES_NOTE}`}`}
         </Text>
       </div>
     )}
@@ -265,9 +273,10 @@ function GroupChoices({ group, selection, onChange }: Readonly<{
 }
 
 function EffortPill({
-  efforts, value, defaultName, onChange, placement, isDisabled,
+  efforts, value, defaultName, onChange, placement, isDisabled, controlLabel,
 }: Readonly<{
   efforts: CatalogEntry['supported_reasoning_efforts'];
+  controlLabel: string;
   value: string | null;
   /** What "Default" resolves to, or `null` when nothing has said. */
   defaultName: string | null;
@@ -280,8 +289,8 @@ function EffortPill({
   /* Same rule as the model trigger: the effort, not the route to it. */
   const label = value ?? defaultName ?? FOLLOW_DEFAULT_LABEL;
   const spokenLabel = value === null && defaultName !== null
-    ? `Reasoning effort: ${label} (the default)`
-    : `Reasoning effort: ${label}`;
+    ? `${controlLabel}: ${label} (the default)`
+    : `${controlLabel}: ${label}`;
   const closeOnEscape = (event: KeyboardEvent<HTMLSpanElement>) => {
     if (event.key !== 'Escape' || !open) return;
     event.preventDefault();

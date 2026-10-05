@@ -25,8 +25,8 @@ fn harness_turn_start_is_gated() {
         .expect("read harness backend");
     assert_eq!(
         backend.matches(".turn_start(").count(),
-        2,
-        "harness/backend.rs should call .turn_start once per arm (Codex, Claude), inside \
+        3,
+        "harness/backend.rs should call .turn_start once per arm (Codex, Claude, OpenCode), inside \
          PlannerBackend::turn_start; bump when a backend arm is added"
     );
     // The slice ends where the fn body ends, so a call placed after it is not counted as inside.
@@ -37,16 +37,21 @@ fn harness_turn_start_is_gated() {
         .expect("PlannerBackend::turn_start present");
     assert_eq!(
         turn_start_fn.matches(".turn_start(").count(),
-        2,
+        3,
         "every backend .turn_start call should sit inside PlannerBackend::turn_start"
     );
 
+    // Adapter tests deliberately call the native transport directly; they are never runtime code.
+    let opencode = std::fs::read_to_string(manifest_dir.join("src/opencode_planner/mod.rs"))
+        .expect("read OpenCode module");
+    assert!(opencode.contains("#[cfg(all(test, target_os = \"linux\"))]\nmod session_tests;"));
     let allowed = [
         "src/dispatcher/mod.rs",
         "src/harness/backend.rs",
         "src/harness/run_loop.rs",
         "src/operation/codex_adapter/mod.rs",
         "src/shared_codex_appserver.rs",
+        "src/opencode_planner/session_tests.rs",
     ];
     for path in rust_files(&manifest_dir.join("src")) {
         let rel = path
