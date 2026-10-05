@@ -380,7 +380,7 @@
   },
   {
     "name": "neige_dev_publish",
-    "description_sha256": "601a75fc12781251d70d6a60ef0efd7f8f3a10378e6a5fac4903e00436b4e83c",
+    "description_sha256": "99ea201ee839d77c7f48bd349d6c1fa3449ef0881b5b4c91652131709e904dff",
     "input_schema": {
       "properties": {
         "body": {
