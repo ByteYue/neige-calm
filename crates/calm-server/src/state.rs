@@ -278,6 +278,7 @@ impl BootState {
             worker_flow: self.worker_flow,
             raw: self.repo,
             workspace_root_guard: self.workspace_root_guard,
+            track_creator: None,
             route,
             worker,
             codex_shell,
@@ -345,6 +346,10 @@ pub struct AppState {
     /// RAII guard: never read, only dropped (the drop removes the per-`AppState` sandbox).
     #[allow(dead_code)]
     workspace_root_guard: Option<Arc<tempfile::TempDir>>,
+    /// The one strong handle on `neige_track_add`'s creator; the MCP context holds a `Weak`
+    /// because the creator holds `route`, which holds that context.
+    #[allow(dead_code)]
+    track_creator: Option<Arc<dyn crate::mcp_server::tools::track_add::TrackCreator>>,
     route: RouteState,
     worker: WorkerState,
     codex_shell: CodexShellState,
@@ -523,6 +528,31 @@ impl AppState {
     pub fn with_ws_replay_cap(mut self, cap: i64) -> Self {
         self.ws_replay_cap = cap;
         self
+    }
+
+    /// Hand `neige_track_add` the keyed Track create over this state's routes, with its
+    /// `--track-add-max-open` cap. Bound once; the creator keeps the route state it is given, so a
+    /// test binds it after its last fixture builder. This state (and its clones) owns the creator;
+    /// the MCP context only borrows it, so dropping every clone drops the route state too.
+    pub fn bind_track_creator(&mut self, max_open: u32) {
+        let creator: Arc<dyn crate::mcp_server::tools::track_add::TrackCreator> = Arc::new(
+            crate::routes::tracks::RouteTrackCreator::new(self.route.clone(), max_open),
+        );
+        if self
+            .route
+            .mcp_context
+            .track_creator
+            .set(Arc::downgrade(&creator))
+            .is_ok()
+        {
+            self.track_creator = Some(creator);
+        }
+    }
+
+    /// The MCP tools' context, for a test that drives a tool handler against this state.
+    #[cfg(feature = "fixtures")]
+    pub fn mcp_context(&self) -> Arc<crate::mcp_server::registry::AppContext> {
+        self.route.mcp_context.clone()
     }
 
     /// The managed workspace root this process was booted with.
@@ -1329,7 +1359,8 @@ impl AppState {
             claude_planner,
             activity_wake,
         };
-        let state = state.into_app_state();
+        let mut state = state.into_app_state();
+        state.bind_track_creator(cfg.track_add_max_open);
 
         // Orphan-terminal sweeper; emits `TerminalDeleted` through the audited write pipeline. The
         // same tick also ends worker sessions left running on completed tracks.
