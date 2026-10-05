@@ -353,7 +353,10 @@ fn lowers_gh_pr_checks() {
                 "42",
                 "owner/repo",
                 "15",
-                PR_CHECKS_WAIT_JQ
+                PR_CHECKS_WAIT_JQ,
+                PR_CHECKS_READ_SCRIPT,
+                PR_CHECKS_QUERY,
+                PR_CHECKS_PAGES_JQ
             ],
             "idem_key": idem_key,
             "event_spec": {
@@ -361,6 +364,8 @@ fn lowers_gh_pr_checks() {
                 "fields": {
                     "conclusion": { "json_field": { "path": "/conclusion" } },
                     "head_sha": { "json_field": { "path": "/head_sha" } },
+                    "snapshot": { "json_field": { "path": "/snapshot" } },
+                    "failed_checks": { "json_field": { "path": "/failed_checks" } },
                     "mergeable": { "json_field": { "path": "/mergeable" } }
                 }
             },
@@ -378,28 +383,39 @@ fn lowers_gh_pr_checks() {
                     "state"
                 ],
                 "output_probe_argv": [
-                    "gh",
-                    "pr",
-                    "view",
+                    "sh",
+                    "-c",
+                    PR_CHECKS_READ_SCRIPT,
+                    "sh",
                     "42",
-                    "--repo",
                     "owner/repo",
-                    "--json",
-                    "headRefOid,mergeable,statusCheckRollup",
-                    "--jq",
-                    PR_CHECKS_JQ
+                    PR_CHECKS_JQ,
+                    PR_CHECKS_QUERY,
+                    PR_CHECKS_PAGES_JQ
                 ]
             },
             "parked": true
         })
     };
+    let mut payload = payload;
+    let mut attempt_payload = attempt_payload;
+    for value in [&mut payload, &mut attempt_payload] {
+        assert_eq!(
+            value["compatible_payload_hashes"].as_array().unwrap().len(),
+            1
+        );
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compatible_payload_hashes");
+    }
     assert_eq!(payload, expected_payload("gh.pr.checks:owner/repo:42"));
     assert_eq!(
         attempt_payload,
         expected_payload("gh.pr.checks:owner/repo:42:7")
     );
     assert!(
-        PR_CHECKS_WAIT_SCRIPT.contains("--json headRefOid,mergeable,statusCheckRollup --jq"),
+        payload["argv"][8] == PR_CHECKS_READ_SCRIPT,
         "the wait reads what the output probe reads"
     );
     assert!(
