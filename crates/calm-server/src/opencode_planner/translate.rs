@@ -185,7 +185,7 @@ impl TurnProjection {
         let mut item = if tool == "bash" {
             json!({"id":part["id"],"type":"commandExecution","command":state["input"]["command"],"cwd":self.cwd,"status":status,"aggregatedOutput":state["output"],"exitCode":state["metadata"]["exit"]})
         } else if let Some(name) = self.mcp_names.get(tool) {
-            json!({"id":part["id"],"type":"mcpToolCall","server":"calm","tool":name,"arguments":state["input"],"status":status,"result":{"content":[{"type":"text","text":state["output"]}]}})
+            json!({"id":part["id"],"type":"mcpToolCall","server":crate::mcp_server::wiring::MCP_SERVER_KEY,"tool":name,"arguments":state["input"],"status":status,"result":{"content":[{"type":"text","text":state["output"]}]}})
         } else {
             json!({"id":part["id"],"type":"dynamicToolCall","tool":tool,"arguments":state["input"],"status":status,"result":{"content":[{"type":"text","text":state["output"]}]}})
         };
@@ -352,7 +352,10 @@ pub(crate) fn mcp_name_map<'a>(
                 }
             })
             .collect();
-        if let Some(prior) = map.insert(format!("calm_{sanitized}"), name.to_owned()) {
+        if let Some(prior) = map.insert(
+            format!("{}_{sanitized}", crate::mcp_server::wiring::MCP_SERVER_KEY),
+            name.to_owned(),
+        ) {
             return Err(crate::error::CalmError::Conflict(format!(
                 "OpenCode MCP name collision: {prior} and {name}"
             )));

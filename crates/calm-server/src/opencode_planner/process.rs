@@ -37,7 +37,7 @@ impl ServerProcess {
             "compaction":{"auto":false,"prune":false}});
         if let Some(token) = token {
             let kernel_path = crate::kernel_bin_path::kernel_led_path()?;
-            settings["mcp"] = json!({"calm": {"type":"local", "command":[host.mcp_shim], "environment": {
+            settings["mcp"] = json!({crate::mcp_server::wiring::MCP_SERVER_KEY: {"type":"local", "command":[host.mcp_shim], "environment": {
                 "NEIGE_MCP_SOCKET":host.mcp_socket, "NEIGE_MCP_TOKEN":token,
                 "PATH":kernel_path.path_utf8()?,
                 (crate::claude_planner::stop::MARKER_KEY):host.instance.marker(&stop::identity(id)),

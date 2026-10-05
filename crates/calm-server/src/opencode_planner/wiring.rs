@@ -8,7 +8,7 @@ use crate::{
     db::Repo,
     error::{CalmError, Result},
     plugin_host::PluginHost,
-    shared_codex_appserver::SharedCodexAppServer,
+    thread_seals::ThreadSeals,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ impl OpenCodePlannerWiring {
     pub async fn open_session(
         &self,
         repo: Arc<dyn Repo>,
-        seals: Arc<SharedCodexAppServer>,
+        seals: Arc<ThreadSeals>,
         row: OpenCodePlannerRow<'_>,
     ) -> Result<Arc<OpenCodePlannerSession>> {
         let track = repo
@@ -46,7 +46,7 @@ impl OpenCodePlannerWiring {
             .await?;
         instructions.push_str(&workspace_instructions(&cwd)?);
         let settings = crate::routes::settings::load_settings(repo.as_ref()).await?;
-        let proxy = SharedCodexAppServer::resolved_proxy_env_pairs(
+        let proxy = crate::proxy_env::resolved_proxy_env_pairs(
             settings.http_proxy.as_deref(),
             settings.https_proxy.as_deref(),
             |key| std::env::var(key).ok(),

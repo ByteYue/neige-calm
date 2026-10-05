@@ -7,7 +7,7 @@ use crate::error::{CalmError, Result};
 use crate::planner_model::TurnModelSelection;
 use crate::planner_submission::TurnAdmission;
 use crate::session_projection_repo::{AgentProvider, ThreadAttribution};
-use crate::shared_codex_appserver::SharedCodexAppServer;
+use crate::thread_seals::ThreadSeals;
 use calm_truth::opencode_submission::{
     OpenCodeSubmission, OpenCodeSubmissionIntent, OpenCodeSubmissionState,
 };
@@ -29,7 +29,7 @@ pub struct OpenCodePlannerSessionParams {
     pub proxy: Vec<(String, String, String)>,
     pub prior_total_tokens: i64,
     pub repo: Arc<dyn Repo>,
-    pub seals: Arc<SharedCodexAppServer>,
+    pub seals: Arc<ThreadSeals>,
 }
 pub(crate) struct Active {
     pub(crate) submission: OpenCodeSubmission,
@@ -46,7 +46,7 @@ pub(crate) struct Shared {
     pub(crate) state: Mutex<State>,
     pub(crate) process: tokio::sync::Mutex<Option<ServerProcess>>,
     pub(crate) issue: tokio::sync::Mutex<()>,
-    pub(crate) notifications: broadcast::Sender<Notification>,
+    pub(crate) notifications: broadcast::Sender<provider::events::PlannerEvent>,
     installed: AtomicBool,
 }
 impl Shared {
@@ -146,7 +146,9 @@ impl Shared {
         Ok(())
     }
     pub(crate) fn send(&self, notification: Notification) {
-        let _ = self.notifications.send(notification);
+        let _ = self
+            .notifications
+            .send(super::events::from_notification(notification));
     }
     pub(crate) fn unknown(&self, thread: &str, turn: &str, reason: &str) {
         self.send(Notification::Other {
@@ -229,10 +231,10 @@ impl OpenCodePlannerSession {
     pub fn host(&self) -> &Arc<OpenCodePlannerHost> {
         &self.shared.params.host
     }
-    pub fn codex(&self) -> &Arc<SharedCodexAppServer> {
-        &self.shared.params.seals
+    pub fn thread_sealed(&self, thread: &str) -> bool {
+        self.shared.params.seals.is_sealed(thread)
     }
-    pub fn subscribe_notifications(&self) -> broadcast::Receiver<Notification> {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<provider::events::PlannerEvent> {
         self.shared.notifications.subscribe()
     }
     pub fn mark_installed(&self) {
@@ -348,7 +350,7 @@ impl OpenCodePlannerSession {
                 "OpenCode Planner is not installed or is shutting down".into(),
             ));
         }
-        if shared.params.seals.turn_thread_is_sealed(thread) {
+        if shared.params.seals.is_sealed(thread) {
             return Err(CalmError::Conflict(
                 "OpenCode Planner thread is sealed".into(),
             ));
@@ -406,7 +408,7 @@ impl OpenCodePlannerSession {
         let (provider, model) = super::models::split_model(&effective_model)?;
         let client = shared.ensure_server().await?;
         let native = shared.native_session(&client, thread).await?;
-        if shared.params.seals.turn_thread_is_sealed(thread) {
+        if shared.params.seals.is_sealed(thread) {
             return Err(CalmError::Conflict(
                 "OpenCode Planner thread was sealed before admission".into(),
             ));

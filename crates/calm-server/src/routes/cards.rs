@@ -1023,14 +1023,17 @@ pub(crate) async fn get_planner_run(
     // Unreadable model keys are reported as 'no selection' by this READ rather than as a 500; the turn-issuing path refuses on the same payload, so the conversation still stops but this surface can show why.
     let selection =
         crate::planner_model::CardModelSelection::from_payload(&card.payload).unwrap_or_default();
-    // The same predicate the upload endpoint enforces, so the answer cannot drift from the refusal.
-    let attachments_supported = match s.repo.track_get(card.track_id.as_str()).await? {
-        Some(track) => {
-            crate::planner_attachments::attachment_root(&track.workspace, &s.workspace_root).is_ok()
-        }
-        // No track means no workspace to write into; this field is not the place to raise it, and 'supported' would be the wrong guess.
-        None => false,
-    };
+    // The same input capability and workspace predicates the upload endpoint enforces.
+    let attachments_supported = crate::planner_attachments::require_image_input(&card, role)
+        .is_ok()
+        && match s.repo.track_get(card.track_id.as_str()).await? {
+            Some(track) => {
+                crate::planner_attachments::attachment_root(&track.workspace, &s.workspace_root)
+                    .is_ok()
+            }
+            // No track means no workspace to write into; this field is not the place to raise it, and 'supported' would be the wrong guess.
+            None => false,
+        };
     let mut dormant = GetPlannerRunResponse {
         card_id: card.id.clone(),
         worker_session_id: None,

@@ -1,9 +1,9 @@
 //! Recover durable provider admission into the kernel's queue and correlation state.
 //! Queue ownership is proved by the exact pre-dispatch batch, never by matching user text.
+use super::backend::RecoveryAdmission;
 use super::{HarnessPhaseTag, HarnessSnapshot, PlannerBackend, QueueEntry};
 use crate::db::Repo;
 use crate::error::{CalmError, Result};
-use calm_truth::opencode_submission::OpenCodeSubmission;
 use serde_json::{Value, json};
 
 /// Internal projection metadata produced from the real drained queue entries.
@@ -35,7 +35,9 @@ fn retire_claimed_prefix(snapshot: &mut HarnessSnapshot, proof: &Value) -> Resul
         .as_array()
         .filter(|claims| !claims.is_empty())
         .ok_or_else(|| {
-            CalmError::Conflict("OpenCode recovery has no exact queued-batch proof".into())
+            CalmError::Conflict(
+                "provider admission recovery has no exact queued-batch proof".into(),
+            )
         })?;
     let entries = snapshot.pending_entries();
     if entries.len() < claims.len()
@@ -45,14 +47,15 @@ fn retire_claimed_prefix(snapshot: &mut HarnessSnapshot, proof: &Value) -> Resul
             .any(|(entry, claim)| claimed_entry(entry) != *claim)
     {
         return Err(CalmError::Conflict(
-            "OpenCode recovery queued batch changed; refusing to discard unrelated input".into(),
+            "provider admission recovery queued batch changed; refusing to discard unrelated input"
+                .into(),
         ));
     }
     snapshot.set_pending_entries(entries.into_iter().skip(claims.len()).collect());
     Ok(())
 }
 
-async fn batch_proof(repo: &dyn Repo, receipt: &OpenCodeSubmission) -> Result<Value> {
+async fn batch_proof(repo: &dyn Repo, receipt: &RecoveryAdmission) -> Result<Value> {
     let mut cursor = 0;
     // The original projection may precede the native tool tail. Walk the storage owner's
     // bounded pages instead of assuming the most recent user echo still has the proof.
@@ -83,7 +86,7 @@ async fn batch_proof(repo: &dyn Repo, receipt: &OpenCodeSubmission) -> Result<Va
         cursor = first.id;
     }
     Err(CalmError::Conflict(
-        "OpenCode recovery could not find its queued-batch proof".into(),
+        "provider admission recovery could not find its queued-batch proof".into(),
     ))
 }
 
@@ -93,25 +96,21 @@ pub(crate) async fn adopt(
     backend: &PlannerBackend,
     snapshot: &mut HarnessSnapshot,
 ) -> Result<Option<String>> {
-    let PlannerBackend::OpenCode(session) = backend else {
-        return Ok(None);
-    };
-    let receipt = session
-        .recovery_submission(snapshot.projection_client_id.as_ref().map(|id| id.as_str()))
+    let receipt = backend
+        .recovery_admission(snapshot.projection_client_id.as_ref().map(|id| id.as_str()))
         .await?;
     let Some(receipt) = receipt else {
         return Ok(None);
     };
-    session.adopt_recovery_binding(&receipt).await?;
     // IssuingTurn is the pre-drain checkpoint. Later phases already committed the drain;
     // their pending queue belongs to later input, even when its text happens to match.
     if snapshot.phase == HarnessPhaseTag::IssuingTurn && !snapshot.pending_entries().is_empty() {
         retire_claimed_prefix(snapshot, &batch_proof(repo, &receipt).await?)?;
     }
     snapshot.last_thread_id = Some(receipt.thread_id.clone());
-    snapshot.last_turn_id = Some(receipt.id);
+    snapshot.last_turn_id = Some(receipt.turn_id);
     snapshot.issued_input_segments = None;
-    if receipt.state.is_terminal() {
+    if receipt.terminal {
         snapshot.phase = HarnessPhaseTag::TurnCompleted;
         snapshot.projection_client_id = None;
     } else {

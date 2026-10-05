@@ -5,7 +5,7 @@ use super::{
     session::{OpenCodePlannerSession, OpenCodePlannerSessionParams},
 };
 use crate::{
-    codex_appserver::{InputItem, Notification},
+    codex_appserver::InputItem,
     db::{Repo, sqlite::*},
     model::{CardRole, NewArea, NewCard, NewTrack, RequestTheme},
     planner_model::TurnModelSelection,
@@ -218,7 +218,9 @@ impl Fixture {
             instructions: "workspace instructions".into(),
             proxy: vec![],
             prior_total_tokens: 10,
-            seals: SharedCodexAppServer::new_stub(repo.clone()),
+            seals: SharedCodexAppServer::new_stub(repo.clone())
+                .thread_seals()
+                .clone(),
             repo,
         })
         .await
@@ -264,18 +266,18 @@ impl Fixture {
     }
 }
 async fn terminal(
-    notifications: &mut tokio::sync::broadcast::Receiver<Notification>,
+    notifications: &mut tokio::sync::broadcast::Receiver<provider::events::PlannerEvent>,
 ) -> (Value, i64) {
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut total = 0;
         loop {
-            match notifications.recv().await.unwrap() {
-                Notification::Other { method, params } if method == "thread/tokenUsage/updated" => {
+            match notifications.recv().await.unwrap().kind {
+                provider::events::PlannerEventKind::TokenUsage { params } => {
                     total = params["tokenUsage"]["total"]["totalTokens"]
                         .as_i64()
                         .unwrap()
                 }
-                Notification::TurnCompleted { turn, .. } => return (turn, total),
+                provider::events::PlannerEventKind::TurnCompleted { turn } => return (turn, total),
                 _ => {}
             }
         }
@@ -288,7 +290,7 @@ async fn opencode_production_prepared_recovery_is_visible_failure_without_spawn_
     let f = Fixture::new("complete").await;
     let id = f.intent(false).await;
     let session = f.session().await;
-    let mut notifications = session.subscribe_notifications();
+    let mut notifications = session.subscribe_events();
     session.mark_installed();
     let (outcome, total) = terminal(&mut notifications).await;
     assert_eq!(outcome["status"], "failed");
@@ -360,7 +362,7 @@ async fn opencode_production_shutdown_barrier_forbids_delayed_recovery_mint_and_
 async fn opencode_production_second_turn_accumulates_usage_and_resets_to_profile_default() {
     let f = Fixture::new("complete").await;
     let session = f.session().await;
-    let mut notifications = session.subscribe_notifications();
+    let mut notifications = session.subscribe_events();
     session.mark_installed();
     let explicit = TurnModelSelection {
         model: Some("fixture/other".into()),
@@ -421,12 +423,12 @@ async fn opencode_production_recovery_identity_error_cleans_up_and_keeps_unknown
     let f = Fixture::new("identity-error").await;
     f.intent(true).await;
     let session = f.session().await;
-    let mut notifications = session.subscribe_notifications();
+    let mut notifications = session.subscribe_events();
     session.mark_installed();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Notification::Other { method, .. } = notifications.recv().await.unwrap()
-                && method == "opencode/submission/unknown"
+            if let provider::events::PlannerEventKind::SubmissionUnknown { .. } =
+                notifications.recv().await.unwrap().kind
             {
                 break;
             }
@@ -575,7 +577,7 @@ async fn opencode_production_recovery_adopts_original_identity_across_worker_inc
     .await
     .unwrap();
     assert_eq!(identity, (Some("thread".into()), Some("ses_owned".into())));
-    let mut notifications = session.subscribe_notifications();
+    let mut notifications = session.subscribe_events();
     session.mark_installed();
     assert_eq!(terminal(&mut notifications).await.0["status"], "failed");
     assert!(!f.cwd.join("serve-starts").exists());
@@ -587,7 +589,7 @@ async fn opencode_production_denied_tool_loop_return_settles_failed_without_nati
     for mode in ["deny", "deny-snapshot-transient"] {
         let f = Fixture::new(mode).await;
         let session = f.session().await;
-        let mut notifications = session.subscribe_notifications();
+        let mut notifications = session.subscribe_events();
         session.mark_installed();
         let model = TurnModelSelection {
             model: Some("fixture/model".into()),
@@ -632,7 +634,7 @@ async fn opencode_production_claim_error_retains_receipt_and_fails_unsent_intent
     .await
     .unwrap();
     let session = f.session().await;
-    let mut notifications = session.subscribe_notifications();
+    let mut notifications = session.subscribe_events();
     session.mark_installed();
     let model = TurnModelSelection {
         model: Some("fixture/model".into()),

@@ -46,7 +46,7 @@ def messages(sid):
             "SELECT body FROM messages WHERE sid=? ORDER BY json_extract(body, '$.info.time.created'), id", (sid,))]
 
 def mcp():
-    env = SETTINGS["mcp"]["calm"]["environment"]
+    env = SETTINGS["mcp"]["neige"]["environment"]
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(10)
         sock.connect(env["NEIGE_MCP_SOCKET"])
@@ -65,7 +65,7 @@ def mcp():
         stream.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         stream.flush()
         reply = call({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "calm.user.notify", "arguments": {"text": "native MCP notification"}}})
+            "name": "neige_user_notify", "arguments": {"text": "native MCP notification"}}})
         record("mcp.jsonl", reply)
         if "error" in reply or reply.get("result", {}).get("isError"):
             raise RuntimeError(reply)
@@ -91,7 +91,7 @@ def assistant(sid, user, running=False, aborted=False, stop_step=False):
               "type": "tool", "tool": "bash", "state": state}]
     if not running and not aborted:
         parts.extend([
-            {"id": "prt_" + uuid.uuid4().hex, "type": "tool", "tool": "calm_calm_user_notify",
+            {"id": "prt_" + uuid.uuid4().hex, "type": "tool", "tool": "neige_neige_user_notify",
              "state": {"status": "completed", "input": {"text": "native MCP notification"},
                        "output": mcp(), "time": {"start": now, "end": now + 1}}}])
     return {"info": info, "parts": parts}

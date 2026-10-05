@@ -187,6 +187,10 @@ pub(crate) async fn send_planner_input_keyed(
     )
     .await;
 
+    if !attachments.is_empty() {
+        crate::planner_attachments::require_image_input(&card, role)?;
+    }
+
     // `_recovery_guard` holds the per-card recovery lock until end of scope, so a concurrent `/planner/reset` can't supersede the just-recovered runtime before the observe/audit below.
     let (runtime, harness, _recovery_guard) = match replaces_turn {
         None => ensure_live_planner_harness(s, w, cs, &card.id, actor.as_str() == "user").await?,
@@ -409,6 +413,10 @@ async fn ensure_live_planner_harness(
         && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::Claude)
     {
         s.claude_planner.check_ready().await?;
+    } else if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
+        && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::OpenCode)
+    {
+        s.opencode_planner.check_ready().await?;
     } else if !cs.shared_codex_appserver.is_running() {
         return Err(CalmError::ServiceUnavailable(
             cs.shared_codex_appserver.not_running_message(),
@@ -423,6 +431,7 @@ async fn ensure_live_planner_harness(
         cs.shared_codex_appserver.clone(),
         s.thread_seals.clone(),
         &s.claude_planner_wiring(),
+        &s.opencode_planner_wiring(),
         &s.harness,
         &s.track_delete_locks,
         runtime.clone(),

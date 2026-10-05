@@ -228,18 +228,19 @@ fn opencode_workspace_rules_are_injected_despite_disabled_project_config() {
 }
 
 #[test]
-fn opencode_mcp_projection_preserves_registered_dotted_identity_and_rejects_collisions() {
-    assert!(super::translate::mcp_name_map(["calm.foo.bar", "calm.foo_bar"].into_iter()).is_err());
+fn opencode_mcp_projection_preserves_registered_identity_and_rejects_collisions() {
+    assert!(super::translate::mcp_name_map(["fixture.a", "fixture_a"].into_iter()).is_err());
     let mut p = projection();
     let descriptors = crate::mcp_server::build_default_registry()
         .descriptors_for_role(calm_types::model::CardRole::Planner);
     let name = &descriptors
         .iter()
-        .find(|d| d.name.contains('.'))
+        .find(|d| d.name == "neige_user_notify")
         .unwrap()
         .name;
     let native = format!(
-        "calm_{}",
+        "{}_{}",
+        crate::mcp_server::wiring::MCP_SERVER_KEY,
         name.chars()
             .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
                 c
@@ -250,7 +251,7 @@ fn opencode_mcp_projection_preserves_registered_dotted_identity_and_rejects_coll
     );
     let frames=p.snapshot(&[assistant("stop",vec![json!({"id":"prt_mcp","type":"tool","tool":native,"state":{"status":"completed","input":{},"output":"result"}})])]);
     assert!(
-        matches!(&frames[0],Notification::Item{params,..} if params["item"]["type"]=="mcpToolCall" && params["item"]["server"]=="calm" && params["item"]["tool"]==*name)
+        matches!(&frames[0],Notification::Item{params,..} if params["item"]["type"]=="mcpToolCall" && params["item"]["server"]==crate::mcp_server::wiring::MCP_SERVER_KEY && params["item"]["tool"]==*name)
     );
 }
 

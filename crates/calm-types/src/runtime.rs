@@ -39,6 +39,7 @@ impl AgentProvider {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::OpenCode => "opencode",
         }
     }
 }
@@ -72,7 +73,11 @@ mod tests {
 
     #[test]
     fn agent_provider_wire_name_is_its_serde_spelling() {
-        for provider in [AgentProvider::Codex, AgentProvider::Claude] {
+        for provider in [
+            AgentProvider::Codex,
+            AgentProvider::Claude,
+            AgentProvider::OpenCode,
+        ] {
             assert_eq!(
                 serde_json::to_value(&provider).unwrap(),
                 provider.wire_name()

@@ -5,6 +5,7 @@
 mod client;
 pub mod config;
 mod driver;
+pub(crate) mod events;
 pub mod lifecycle;
 pub mod models;
 mod process;

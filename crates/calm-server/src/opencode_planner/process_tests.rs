@@ -78,17 +78,17 @@ async fn opencode_managed_serve_auth_config_and_stop_are_scope_isolated() {
     );
     assert_eq!(
         first
-            .pointer("/settings/mcp/calm/environment/NEIGE_MCP_TOKEN")
+            .pointer("/settings/mcp/neige/environment/NEIGE_MCP_TOKEN")
             .and_then(Value::as_str),
         Some("token-one")
     );
     assert_eq!(
         second
-            .pointer("/settings/mcp/calm/environment/NEIGE_MCP_TOKEN")
+            .pointer("/settings/mcp/neige/environment/NEIGE_MCP_TOKEN")
             .and_then(Value::as_str),
         Some("token-two")
     );
-    let mcp = &first["settings"]["mcp"]["calm"];
+    let mcp = &first["settings"]["mcp"]["neige"];
     assert!(
         mcp["environment"]
             .as_object()
@@ -99,7 +99,7 @@ async fn opencode_managed_serve_auth_config_and_stop_are_scope_isolated() {
     );
     let kernel_path = crate::kernel_bin_path::kernel_led_path().unwrap();
     assert_eq!(mcp["environment"]["PATH"], kernel_path.path_utf8().unwrap());
-    // This owned definition must override a disabled calm entry in the private profile.
+    // This owned definition must override a disabled neige entry in the private profile.
     assert_eq!(mcp["enabled"], true);
     assert_eq!(
         first["environment"]["HOME"].as_str(),

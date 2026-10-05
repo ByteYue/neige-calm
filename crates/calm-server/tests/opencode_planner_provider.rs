@@ -80,7 +80,7 @@ impl Root {
             .rev()
             .find_map(|spawn| {
                 spawn
-                    .pointer("/settings/mcp/calm/environment/NEIGE_MCP_TOKEN")
+                    .pointer("/settings/mcp/neige/environment/NEIGE_MCP_TOKEN")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
@@ -168,7 +168,8 @@ impl Stack {
         let builder = Request::builder()
             .method(method)
             .uri(path)
-            .header("x-calm-actor", "user");
+            .header("x-calm-actor", "user")
+            .header("idempotency-key", uuid::Uuid::new_v4().to_string());
         let request = match body {
             Some(value) => builder
                 .header("content-type", "application/json")
@@ -415,7 +416,7 @@ async fn opencode_rest_catalog_turns_recovery_reset_and_delete() {
     );
     assert!(
         rows.iter().any(|row| row["item"]["type"] == "mcpToolCall"
-            && row["item"]["tool"] == "calm.user.notify"
+            && row["item"]["tool"] == "neige_user_notify"
             && row["item"]["arguments"]["text"] == "native MCP notification"),
         "{rows:?}"
     );
