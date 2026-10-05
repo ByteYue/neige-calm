@@ -26,6 +26,8 @@
 # Rust names say `transcript` and `turn_input`.
 # Patterns are boundary-anchored per case; the two words' uppercase branches are deliberately
 # asymmetric (`COVE[A-Z]+` is English, `WAVE[A-Z]+` is oracle ids) and `.spec.ts` is excluded by lookahead.
+# OpenCode attachment bounded exception: harness_item/crates 272 -> 274 comes from
+# native-history checkpoint SQL and a fixture observer of the existing event.
 
 set -uo pipefail
 
