@@ -1066,6 +1066,16 @@ impl SharedCodexAppServer {
         self.home.path()
     }
 
+    /// The boot entry point: start or take over, then replace an adopted daemon whose env
+    /// signature is stale before any caller resumes threads on it. A thread resumed on such a
+    /// daemon keeps the tool catalog that daemon listed, and only a thread start drains it. The
+    /// replace is a no-op unless the takeover marked a mismatch. A failed replace is returned as
+    /// a boot error, so harness recovery waits for the self-healed daemon.
+    pub async fn boot(self: &Arc<Self>) -> Result<()> {
+        self.start_or_takeover().await?;
+        self.ensure_respawn_for_current_settings().await
+    }
+
     pub async fn start_or_takeover(self: &Arc<Self>) -> Result<()> {
         // The whole boot sequence is ONE serialized transition: the owned serial is threaded down
         // the `_locked` chain by value and released only after the terminal Running/Failed write.
@@ -1838,8 +1848,10 @@ impl SharedCodexAppServer {
     ) -> String {
         let mut h = Sha256::new();
         // Schema-version salt: the first boot of an upgraded binary mismatches every pre-upgrade
-        // signature, so the takeover path replaces a daemon spawned with the old inherited env.
-        h.update(b"env-schema-v3:1784|");
+        // signature, so `boot` replaces a daemon spawned with the old inherited env.
+        // v4: the kernel tool names changed separator (#2087 B0), and a daemon from before would
+        // keep offering the dotted names it listed.
+        h.update(b"env-schema-v4:2087|");
         // The daemon loads `[mcp_servers.<key>]` at spawn, so an adopted daemon from before a key
         // rename would keep serving the old key (#2003).
         h.update(crate::mcp_server::wiring::MCP_SERVER_KEY.as_bytes());
@@ -2002,9 +2014,10 @@ impl SharedCodexAppServer {
                 return Err(CalmError::CodexAppServer(msg));
             }
         };
-        // Signature mismatch + verified healthy daemon ⇒ ADOPT-AND-DRAIN, never reap-for-respawn:
-        // the v2 salt mismatches on every first boot after an upgrade, and every mint path crosses
-        // the needs_respawn drain boundary; only `turn_start` on an EXISTING thread does not.
+        // Signature mismatch + verified healthy daemon ⇒ adopt and mark needs_respawn; the takeover
+        // itself never reaps. `boot` replaces the adopted daemon right after this, before harness
+        // recovery, because `turn_start` on an EXISTING thread never crosses the drain boundary.
+        // A settings change while running still drains at the next thread start.
         let signature_mismatch =
             record.daemon_env_signature.as_deref() != Some(current_env_signature.as_str());
         if signature_mismatch {
@@ -2015,7 +2028,7 @@ impl SharedCodexAppServer {
                 persisted = ?record.daemon_env_signature,
                 current = %current_env_signature,
                 "shared daemon was spawned with stale env signature; \
-                 adopting and marking for drain at the next thread-start boundary"
+                 adopting and marking it for replacement"
             );
         }
         let Some(sock_path) = &record.sock_path else {
@@ -4962,7 +4975,29 @@ mod tests {
             SharedCodexAppServer::compute_env_signature(ingest, None, None, Path::new("/k/bin"));
         assert_ne!(
             salted, pre_salt,
-            "compute_env_signature must be salted (env-schema-v3:1784)"
+            "compute_env_signature must be salted (env-schema-v4:2087)"
+        );
+    }
+
+    /// A daemon adopted from before the tool-name separator change lists dotted kernel tool names;
+    /// its signature (salt v3 with the `neige` key) must not match, so the first boot replaces it.
+    #[test]
+    fn env_signature_replaces_a_daemon_from_before_the_separator_change() {
+        let (ingest, bin) = ("http://127.0.0.1:8765", Path::new("/k/bin"));
+        let mut h = Sha256::new();
+        h.update(b"env-schema-v3:1784|");
+        h.update(crate::mcp_server::wiring::MCP_SERVER_KEY.as_bytes());
+        h.update(b"|");
+        h.update(bin.as_os_str().as_encoded_bytes());
+        h.update(b"|");
+        h.update(ingest.as_bytes());
+        h.update(b"|");
+        h.update(b"|");
+        let pre_separator = hex::encode(h.finalize())[..16].to_string();
+
+        assert_ne!(
+            SharedCodexAppServer::compute_env_signature(ingest, None, None, bin),
+            pre_separator
         );
     }
 

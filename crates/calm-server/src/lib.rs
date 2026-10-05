@@ -624,7 +624,7 @@ pub mod workspace_reports;
 pub mod ws;
 
 pub async fn boot_harnesses(state: &state::AppState) -> error::Result<usize> {
-    let daemon_start = state.shared_codex_appserver.start_or_takeover().await;
+    let daemon_start = state.shared_codex_appserver.boot().await;
     recover_harnesses_after_daemon_boot(state, daemon_start).await
 }
 
@@ -641,7 +641,7 @@ pub async fn recover_harnesses_after_daemon_boot(
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "shared codex app-server start/takeover failed; continuing boot"
+                "shared codex app-server boot (start, takeover or replace) failed; continuing boot"
             );
             // Deferred, not skipped forever: the first observed Running triggers a claim-based recovery
             // pass that never stomps a runtime the user resumed in the meantime. Armed first, so the
@@ -659,6 +659,26 @@ pub async fn recover_harnesses_after_daemon_boot(
 
 #[cfg(test)]
 mod boot_order_tests {
+    /// Boot goes through `SharedCodexAppServer::boot`, which replaces a daemon with a stale env
+    /// signature before recovery; a bare `start_or_takeover` would recover Planners onto it (#2087).
+    #[test]
+    fn boot_harnesses_replaces_a_stale_daemon_before_recovery() {
+        let lib_rs = include_str!("lib.rs");
+        let start = lib_rs
+            .find("pub async fn boot_harnesses(")
+            .expect("lib.rs defines boot_harnesses");
+        let end = start
+            + lib_rs[start..]
+                .find("pub async fn recover_harnesses_after_daemon_boot(")
+                .expect("recover_harnesses_after_daemon_boot follows boot_harnesses");
+        let body = &lib_rs[start..end];
+        assert!(
+            body.contains(".shared_codex_appserver.boot().await"),
+            "{body}"
+        );
+        assert!(!body.contains("start_or_takeover"), "{body}");
+    }
+
     #[test]
     fn main_boot_order_card_id_assert_harness_supervisor_operations() {
         let main_rs = include_str!("main.rs");
