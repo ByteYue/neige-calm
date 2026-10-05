@@ -27,11 +27,11 @@ import {
 import { trackSourceOperation, type TrackSourceDetail } from '../../../../core/domain/report-source.ts';
 import { dismissActivityItemOperation } from '../../../../core/domain/activity.ts';
 import {
-  checkConnectorOperation, type ConnectorCheckResult,
+  checkConnectorOperation, connectorCheckFailureText, type ConnectorCheckResult,
   installConnectorOperation, installLocalPathOperation, patchPluginConfigOperation,
   pluginDetailOperation, pluginsOperation, reloadPluginOperation, setPluginEnabledOperation,
-  uninstallPluginOperation,
-  type ConnectorInstallDraft, type PluginApiFailure, type PluginConfigApplyResult,
+  uninstallPluginOperation, PLUGIN_TOGGLE_FAILURES, PLUGIN_TOGGLE_TEXT, PLUGIN_UNINSTALL_FAILURES,
+  type ConnectorInstallDraft, type InstalledPlugin, type PluginConfigApplyResult,
   type PluginConfigSaveResult, type PluginConfigValue, type PluginDetail, type PluginListItem,
   type PluginRestartFacts,
 } from '../../../../core/domain/plugins.ts';
@@ -62,7 +62,9 @@ import {
   type PlannerQueueWriteOutcome,
 } from '../../../../core/domain/conversation.ts';
 import { harnessLiveOperation } from '../../../../core/domain/conversation-live.ts';
-import { ApiError, classifyFailure, DELETE_FAILURES, refusalText, writeFailureOf } from '../../../../core/domain/failure-class.ts';
+import {
+  ApiError, classifyFailure, DELETE_FAILURES, DELETE_TEXT, refusalText, writeFailureOf, writeFailureText,
+} from '../../../../core/domain/failure-class.ts';
 import { useState } from '../../ui/state/public.ts';
 import type { ServerVersionInfo } from './public.tsx';
 import type { HarnessItem, UploadAttachmentResponse } from '../../../../core/api/generated/wire.ts';
@@ -994,6 +996,10 @@ export function usePluginMutations(transport: ApiTransportPort, unauthorized: Un
       return next;
     });
   };
+  /* `null` is `done`: the answer proves the intent already holds, so the row shows nothing. */
+  const showFailure = (id: string, text: string | null) => {
+    if (text !== null) setErrors((current) => new Map(current).set(id, text));
+  };
   const write = useRecoveryMutation(transport, {
     acquireLocal: ({ id }) => acquirePending(id),
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }, transport: ApiTransportPort) =>
@@ -1016,10 +1022,7 @@ export function usePluginMutations(transport: ApiTransportPort, unauthorized: Un
     onSuccess: (_data, { id }) => {
       setBoundary((current) => (current.has(id) ? current : new Set(current).add(id)));
     },
-    onError: (error, { id }) => {
-      setErrors((current) => new Map(current)
-        .set(id, error instanceof Error ? error.message : 'Could not change this plugin.'));
-    },
+    onError: (error, { id }) => { showFailure(id, writeFailureText(PLUGIN_TOGGLE_FAILURES, PLUGIN_TOGGLE_TEXT)(error)); },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: queryKeys.plugins() });
     },
@@ -1037,10 +1040,7 @@ export function usePluginMutations(transport: ApiTransportPort, unauthorized: Un
         return next;
       });
     },
-    onError: (error, id) => {
-      setErrors((current) => new Map(current)
-        .set(id, error instanceof Error ? error.message : 'Could not remove this plugin.'));
-    },
+    onError: (error, id) => { showFailure(id, writeFailureText(PLUGIN_UNINSTALL_FAILURES, DELETE_TEXT)(error)); },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: queryKeys.plugins() });
     },
@@ -1055,14 +1055,15 @@ export function usePluginMutations(transport: ApiTransportPort, unauthorized: Un
 }
 
 /**
- * The two install sources, as one write. Resolves rather than rejects, with the kernel's message or
- * `null`: the form must stay on screen with the operator's typing. The credential never enters this layer's state.
+ * The two install sources, as one write through the recovery runner: refused at the press while offline, rejecting
+ * with the write's error for the form to read through its table. The credential rides only in the request: a settled
+ * mutation is reset and kept by no cache (`gcTime: 0`).
  */
 export type PluginInstallMutation = Readonly<{
   pending: boolean;
   checkConnector: (draft: ConnectorInstallDraft) => Promise<ConnectorCheckResult>;
-  installConnector: (draft: ConnectorInstallDraft) => Promise<string | null>;
-  installLocalPath: (path: string) => Promise<string | null>;
+  installConnector: (draft: ConnectorInstallDraft) => Promise<void>;
+  installLocalPath: (path: string) => Promise<void>;
 }>;
 
 export function usePluginInstall(
@@ -1070,27 +1071,21 @@ export function usePluginInstall(
   unauthorized: UnauthorizedChannel,
 ): PluginInstallMutation {
   const client = useQueryClient();
-  const [pending, setPending] = useState(false);
-  const run = async <T,>(operation: ApiOperation<T>): Promise<string | null> => {
-    setPending(true);
-    try {
-      await runOperation(transport, operation, unauthorized);
-      return null;
-    } catch (error) {
-      return pluginFailureOf(error).message;
-    } finally {
-      setPending(false);
-      void client.invalidateQueries({ queryKey: queryKeys.plugins() });
-    }
-  };
+  const install = useRecoveryMutation(transport, {
+    gcTime: 0,
+    mutationFn: (operation: ApiOperation<InstalledPlugin>, admitted: ApiTransportPort) => runOperation(admitted, operation, unauthorized),
+    onSettled: () => { void client.invalidateQueries({ queryKey: queryKeys.plugins() }); },
+  });
+  const run = (operation: ApiOperation<InstalledPlugin>) => install.mutateAsync(operation)
+    .finally(() => { install.reset(); }).then(() => undefined);
   return {
-    pending,
+    pending: install.isPending,
     checkConnector: async (draft) => {
       try {
         const result = await runOperation(transport, checkConnectorOperation(draft), unauthorized);
         return { ok: true, tools: result.tools };
       } catch (error) {
-        return { ok: false, message: pluginFailureOf(error).message };
+        return { ok: false, message: connectorCheckFailureText(error instanceof ApiError ? error.failure : null) };
       }
     },
     installConnector: (draft) => run(installConnectorOperation(draft)),
@@ -1115,17 +1110,6 @@ export function pluginDetailQueryOptions(
   };
 }
 
-/** The kernel's refusal reduced to a `code`; transport and decode failures get `transport_failure`, which no branch matches and so falls through. */
-function pluginFailureOf(error: unknown): PluginApiFailure {
-  if (error instanceof ApiError) {
-    const { failure } = error;
-    return failure.kind === 'transport' || failure.kind === 'decode'
-      ? { code: 'transport_failure', message: failure.message }
-      : { code: failure.code, message: failure.message };
-  }
-  return { code: 'transport_failure', message: 'The request could not be completed.' };
-}
-
 export type PluginConfigMutations = Readonly<{
   save: (
     id: string,
@@ -1140,92 +1124,74 @@ export type PluginConfigMutations = Readonly<{
 }>;
 
 /**
- * The two configuration writes. Both resolve rather than reject: every branch turns on the kernel's
- * `code` or the plugin's state afterwards, which a thrown `Error` cannot carry. Classifies nothing.
+ * The two configuration writes, each through the recovery runner: refused at the press while offline, never sent. Both
+ * resolve rather than reject, carrying the rejection as thrown for the pane to read through the route's table, and the
+ * plugin's state afterwards. A settled mutation is reset and kept by no cache: a value may be a credential.
  */
 export function usePluginConfigMutations(
   transport: ApiTransportPort,
   unauthorized: UnauthorizedChannel,
 ): PluginConfigMutations {
   const client = useQueryClient();
+  type ConfigWrite = Readonly<{ id: string; patch: Readonly<Record<string, PluginConfigValue | null>>; options: Readonly<{ reset: boolean }> }>;
+  /* Settles after the re-read, which the runner skips for an intent that lost ownership (and then rejects it). */
   const refresh = (id: string) => Promise.all([
     client.invalidateQueries({ queryKey: queryKeys.plugins() }),
     client.invalidateQueries({ queryKey: queryKeys.pluginDetail(id) }),
   ]);
-
-  const staleFailure = (intent: ApiTransportPort): PluginApiFailure | null => {
-    try { intent.recovery?.checkpoint()(); return null; }
-    catch (error) { return pluginFailureOf(error); }
-  };
-  const finishRestart = async (intent: ApiTransportPort, id: string, restart: PluginRestartFacts): Promise<PluginConfigApplyResult> => {
-    if (staleFailure(intent) === null) await refresh(id);
-    const failure = staleFailure(intent);
-    // A previous acknowledgement does not prove the plugin's current state once this attempt lost ownership of its readback.
-    return { saved: true, restart: failure === null ? restart : { failure, state: 'unknown' } };
-  };
-
-  const write = async (
-    intent: ApiTransportPort,
-    id: string,
-    patch: Readonly<Record<string, PluginConfigValue | null>>,
-    options: Readonly<{ reset: boolean }>,
-  ): Promise<PluginConfigSaveResult> => {
-    try {
-      await runOperation(intent, patchPluginConfigOperation(id, patch, options), unauthorized);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, failure: pluginFailureOf(error) };
-    }
-  };
-
-  return {
-    save: async (id, patch, options) => {
-      try {
-        const intent = admitTransport(transport);
-        const result = await write(intent, id, patch, options);
-        if (staleFailure(intent) === null) await refresh(id);
-        const failure = staleFailure(intent);
-        return failure === null ? result : { ok: false, failure };
-      } catch (error) { return { ok: false, failure: pluginFailureOf(error) }; }
-    },
-    applyRestart: async (id, patch, options) => {
-      let intent: ApiTransportPort;
-      try { intent = admitTransport(transport); }
-      catch (error) { return { saved: false, failure: pluginFailureOf(error) }; }
-      /* An empty patch with no reset is not a write: PATCHing `{}` would take the lifecycle lock for nothing and could 409 the restart. */
-      if (Object.keys(patch).length > 0 || options.reset) {
-        const saved = await write(intent, id, patch, options);
-        if (!saved.ok) {
-          if (staleFailure(intent) === null) await refresh(id);
-          return { saved: false, failure: staleFailure(intent) ?? saved.failure };
-        }
-      }
+  const write = useRecoveryMutation(transport, {
+    gcTime: 0,
+    mutationFn: ({ id, patch, options }: ConfigWrite, admitted: ApiTransportPort) =>
+      runOperation(admitted, patchPluginConfigOperation(id, patch, options), unauthorized),
+    onSettled: (_data, _error, { id }) => refresh(id),
+  });
+  const restart = useRecoveryMutation(transport, {
+    gcTime: 0,
+    mutationFn: async (id: string, admitted: ApiTransportPort): Promise<PluginRestartFacts> => {
       /* Read the plugin's state back after the attempt on BOTH branches: a 2xx `reload` answers as of the
        * handler's return, and a connector's bring-up can fail after it. Best-effort; falls back to what is known. */
       const readBack = async (fallback: PluginRestartFacts): Promise<PluginRestartFacts> => {
         try {
-          const after = await runOperation(intent, pluginDetailOperation(id), unauthorized);
+          const after = await runOperation(admitted, pluginDetailOperation(id), unauthorized);
           return { ...fallback, state: after.state, lastError: after.last_error };
         } catch {
           return fallback;
         }
       };
-
       try {
-        const detail = await runOperation(intent, reloadPluginOperation(id), unauthorized);
-        const restart = await readBack({
-          failure: null,
-          state: detail.state,
-          lastError: detail.last_error,
-        });
-        return finishRestart(intent, id, restart);
+        const detail = await runOperation(admitted, reloadPluginOperation(id), unauthorized);
+        return await readBack({ rejection: null, state: detail.state, lastError: detail.last_error });
       } catch (error) {
-        const failure = pluginFailureOf(error);
         /* The refusal is not the verdict: a non-200 covers a held lock, a failed bring-up sitting in
          * `unavailable`, or a stopped `app`, and only the plugin's own state tells them apart. */
-        const restart = await readBack({ failure, state: 'unknown' });
-        return finishRestart(intent, id, restart);
+        return readBack({ rejection: { error }, state: 'unknown' });
       }
+    },
+    onSettled: (_data, _error, id) => refresh(id),
+  });
+
+  return {
+    save: async (id, patch, options) => {
+      try {
+        await write.mutateAsync({ id, patch, options });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error };
+      } finally { write.reset(); }
+    },
+    applyRestart: async (id, patch, options) => {
+      /* An empty patch with no reset is not a write: PATCHing `{}` would take the lifecycle lock for nothing and could 409 the restart. */
+      if (Object.keys(patch).length > 0 || options.reset) {
+        try { await write.mutateAsync({ id, patch, options }); }
+        catch (error) { return { saved: false, error }; }
+        finally { write.reset(); }
+      }
+      try {
+        return { saved: true, restart: await restart.mutateAsync(id) };
+      } catch (error) {
+        // A restart never sent reads as one that did not run. A previous acknowledgement does not prove the plugin's current state once this attempt lost ownership of its readback.
+        return { saved: true, restart: { rejection: { error }, state: 'unknown' } };
+      } finally { restart.reset(); }
     },
   };
 }
