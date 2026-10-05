@@ -491,7 +491,7 @@ async fn native_agent_model_variant_and_identity_survive_neige_restart() {
                 "POST",
                 &format!("/api/cards/{card}/planner/input"),
                 Some(json!({"text":format!("check progress {round}")})),
-                None,
+                Some(&format!("progress-{round}")),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -539,7 +539,7 @@ async fn native_agent_model_variant_and_identity_survive_neige_restart() {
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"check after reboot"})),
-            None,
+            Some("progress-after-reboot"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -588,7 +588,7 @@ async fn running_foreign_turn_is_observed_but_never_stopped_or_sent_into() {
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"do another ETL"})),
-            None,
+            Some("foreign-busy-input"),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -624,7 +624,7 @@ async fn unresolved_external_submission_is_fenced_and_never_resent_on_reboot() {
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"one operational side effect"})),
-            None,
+            Some("unresolved-intent"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -651,7 +651,7 @@ async fn unresolved_external_submission_is_fenced_and_never_resent_on_reboot() {
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"try it again"})),
-            None,
+            Some("new-intent-after-unknown"),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -722,7 +722,7 @@ async fn configuration_generation_change_retains_history_and_blocks_repoint() {
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"do not repoint"})),
-            None,
+            Some("changed-registration-input"),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -776,7 +776,7 @@ async fn partial_paginated_history_cannot_claim_ready_or_repeat_native_writes() 
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"do not submit with incomplete history"})),
-            None,
+            Some("partial-history-input"),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);

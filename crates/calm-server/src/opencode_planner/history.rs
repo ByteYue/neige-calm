@@ -7,10 +7,10 @@ use super::{
     translate::TurnProjection,
 };
 use crate::{
-    codex_appserver::Notification,
     error::{CalmError, Result},
     harness::{
         HarnessSnapshot,
+        planner_event::{PlannerEvent, PlannerEventKind},
         transcript::{ItemMetadata, TranscriptItem, TranscriptOwner, live_turn_pending},
     },
 };
@@ -207,19 +207,21 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
         }
         let mut candidate = projections.get(id).expect("history projection").clone();
         candidate.return_anchor = anchors.get(id).cloned();
-        for notification in candidate.snapshot(&messages) {
+        for native_frame in candidate.snapshot(&messages) {
+            let notification = super::events::from_notification(native_frame);
             if shared.state().shutting_down {
                 return Ok(());
             }
-            let Notification::Item { method, params } = &notification else {
+            let PlannerEventKind::Item { phase, params } = &notification.kind else {
                 continue;
             };
+            let method = phase.method();
             // Durable equality avoids duplicate rows after restarts. Changed partial output is
             // appended through the same Harness owner path as other provider item updates.
             let previous:Option<(String,String)>=sqlx::query_as("SELECT method,params FROM harness_items WHERE card_id=?1 AND thread_id=?2 AND item_uuid=?3 ORDER BY id DESC LIMIT 1")
                 .bind(&shared.params.card_id).bind(&thread).bind(params["item"]["id"].as_str()).fetch_optional(&shared.pool()?).await?;
             if let Some((previous_method, previous_params)) = previous
-                && previous_method == *method
+                && previous_method == method
                 && serde_json::from_str::<Value>(&previous_params)? == *params
             {
                 continue;
@@ -241,10 +243,11 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
     Ok(())
 }
 
-async fn persist_item(shared: &Shared, notification: &Notification) -> Result<()> {
-    let Notification::Item { method, params } = notification else {
+async fn persist_item(shared: &Shared, notification: &PlannerEvent) -> Result<()> {
+    let PlannerEventKind::Item { phase, params } = &notification.kind else {
         return Ok(());
     };
+    let method = phase.method();
     let item = &params["item"];
     let thread = params["threadId"]
         .as_str()

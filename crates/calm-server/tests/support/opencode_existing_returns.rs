@@ -138,7 +138,7 @@ async fn start(kind: Reply) -> (Fixture, Stack, String) {
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"audit native progress"})),
-            None,
+            Some("native-progress-intent"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{value}");

@@ -19,7 +19,7 @@ async fn settled_native_reply_waits_for_kernel_transcript_before_passive_import(
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"audit native persistence order"})),
-            None,
+            Some("persistence-order-intent"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");

@@ -19,7 +19,7 @@ async fn terminal_receipt_recovery_persists_kernel_retirement_before_history_imp
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"audit once across kernel crash"})),
-            None,
+            Some("crash-checkpoint-intent"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");

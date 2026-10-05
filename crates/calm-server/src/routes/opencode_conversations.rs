@@ -77,7 +77,7 @@ pub(crate) async fn attach_conversation(
         "attach OpenCode session",
         "Only the owner can attach an existing native session.",
     )?;
-    let key = super::terminal_cards::parse_idempotency_key_header(&headers)?.ok_or_else(|| {
+    let key = super::idempotency_key::parse_idempotency_key_header(&headers)?.ok_or_else(|| {
         CalmError::BadRequest("Idempotency-Key is required when attaching a conversation".into())
     })?;
     super::super::opencode_planner::client::native_id(&body.session_id, "ses")
@@ -275,6 +275,7 @@ pub(crate) async fn attach_conversation(
             s.write.role_cache().clone(),
             s.write.area_cache().clone(),
             cs.shared_codex_appserver.clone(),
+            s.thread_seals.clone(),
             &s.claude_planner_wiring(),
             &s.opencode_planner_wiring(),
             &s.harness,

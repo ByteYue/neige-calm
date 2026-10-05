@@ -17,7 +17,7 @@ async fn native_empty_session_preserves_explicit_agent_and_variant_on_first_inpu
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"first audit"})),
-            None,
+            Some("first-audit-intent"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -47,7 +47,7 @@ async fn attached_watchdog_preserves_running_turn_and_accepts_later_native_compl
             "POST",
             &format!("/api/cards/{card}/planner/input"),
             Some(json!({"text":"long operational ETL"})),
-            None,
+            Some("long-etl-intent"),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -90,5 +90,109 @@ async fn attached_watchdog_preserves_running_turn_and_accepts_later_native_compl
     }
     stack.wait_submit(&card).await;
     assert_eq!(fixture.posts().len(), 1);
+    stack.shutdown().await;
+}
+
+#[tokio::test]
+async fn attached_input_key_replays_unknown_intent_after_restart_without_resending() {
+    let fixture = Fixture::new().await;
+    let stack = Stack::boot(&fixture).await;
+    let track = stack.track(&fixture).await;
+    let card = stack.attach(&track, "keyed-unknown").await;
+    stack.wait_submit(&card).await;
+    let path = format!("/api/cards/{card}/planner/input");
+    let input = json!({"text":"one keyed operational side effect"});
+    let (missing, _) = stack
+        .request("POST", &path, Some(input.clone()), None)
+        .await;
+    assert_eq!(missing, StatusCode::BAD_REQUEST);
+    assert!(fixture.posts().is_empty());
+    assert!(stack.journals().await.is_empty());
+    fixture.native.0.lock().unwrap().lost = true;
+    let (accepted, answer) = stack
+        .request(
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some("one-native-intent"),
+        )
+        .await;
+    assert_eq!(accepted, StatusCode::OK, "{answer}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while stack.journals().await != vec![(SESSION.into(), "unknown".into())] {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(fixture.posts().len(), 1);
+    let (replayed, replay) = stack
+        .request(
+            "POST",
+            &path,
+            Some(input.clone()),
+            Some("one-native-intent"),
+        )
+        .await;
+    assert_eq!(replayed, StatusCode::OK);
+    assert_eq!(replay, answer);
+    let (changed, body) = stack
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text":"a different intent"})),
+            Some("one-native-intent"),
+        )
+        .await;
+    assert_eq!(changed, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "idempotency_key_reused");
+    stack.shutdown().await;
+    let reboot = Stack::boot(&fixture).await;
+    let (replayed, replay) = reboot
+        .request("POST", &path, Some(input), Some("one-native-intent"))
+        .await;
+    assert_eq!(replayed, StatusCode::OK);
+    assert_eq!(replay, answer);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(fixture.posts().len(), 1);
+    assert_eq!(
+        reboot.journals().await,
+        vec![(SESSION.into(), "unknown".into())]
+    );
+    reboot.shutdown().await;
+}
+
+#[tokio::test]
+async fn attached_replace_turn_refuses_before_native_history_or_receipts_change() {
+    let fixture = Fixture::new().await;
+    let stack = Stack::boot(&fixture).await;
+    let track = stack.track(&fixture).await;
+    let card = stack.attach(&track, "read-only-native-history").await;
+    stack.wait_text(&card, "original progress").await;
+    stack.wait_submit(&card).await;
+    let original_items = stack.items(&card).await;
+    let original_messages = fixture.native.0.lock().unwrap().messages.clone();
+    let (status, error) = stack.request(
+        "POST", &format!("/api/cards/{card}/planner/input"),
+        Some(json!({"text":"replace the existing progress", "replaces_turn":"opencode-history-msg_original"})),
+        Some("unsupported-native-edit"),
+    ).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "planner_turn_not_replaceable");
+    assert_eq!(stack.items(&card).await, original_items);
+    assert_eq!(fixture.native.0.lock().unwrap().messages, original_messages);
+    assert!(stack.journals().await.is_empty());
+    assert!(fixture.posts().is_empty());
+    let key_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM planner_input_idempotency WHERE card_id=?1 AND idempotency_key=?2",
+    )
+    .bind(&card)
+    .bind("unsupported-native-edit")
+    .fetch_one(&stack.state.raw_repo().sqlite_pool().unwrap())
+    .await
+    .unwrap();
+    assert_eq!(
+        key_count, 0,
+        "A refused native edit cannot claim the send key"
+    );
+    assert_eq!(stack.run(&card).await["phase"], "idle");
     stack.shutdown().await;
 }

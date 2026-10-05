@@ -157,6 +157,17 @@ pub(crate) async fn send_planner_input_keyed(
         )));
     }
 
+    if !attachments.is_empty() {
+        crate::planner_attachments::require_image_input(&card, role)?;
+    }
+    if replaces_turn.is_some()
+        && crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some()
+    {
+        return Err(CalmError::PlannerTurnNotReplaceable(
+            "An attached OpenCode session cannot replace native history; continue with a new message in its original session".into(),
+        ));
+    }
+
     // Decided before anything with an effect: a retry's attachments are already bound, and a lazy
     // restart would recover a runtime this request no longer needs. A plain send hashes exactly as
     // before `replaces_turn` existed, so its stored keys still match.
@@ -187,15 +198,12 @@ pub(crate) async fn send_planner_input_keyed(
     )
     .await;
 
-    if !attachments.is_empty() {
-        crate::planner_attachments::require_image_input(&card, role)?;
-    }
-
     // `_recovery_guard` holds the per-card recovery lock until end of scope, so a concurrent `/planner/reset` can't supersede the just-recovered runtime before the observe/audit below.
     let (runtime, harness, _recovery_guard) = match replaces_turn {
         None => ensure_live_planner_harness(s, w, cs, &card.id, actor.as_str() == "user").await?,
         Some(_) => live_planner_harness(s, &card.id).await?,
     };
+    harness.check_external_submission().await?;
     let track = s
         .repo
         .track_get(card.track_id.as_str())
@@ -407,20 +415,35 @@ async fn ensure_live_planner_harness(
     {
         return Err(dormant());
     }
-    // A recovered harness can't issue turns without its backend; surface that instead of spawning a silently-wedged task.
-    // A Claude Planner needs its config and its pinned binary, not the shared app-server (#1791 §4.1 row 11).
-    if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
-        && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::Claude)
-    {
-        s.claude_planner.check_ready().await?;
-    } else if runtime.kind == crate::session_projection_repo::WorkerSessionKind::SharedPlanner
-        && runtime.agent_provider == Some(crate::session_projection_repo::AgentProvider::OpenCode)
-    {
-        s.opencode_planner.check_ready().await?;
-    } else if !cs.shared_codex_appserver.is_running() {
-        return Err(CalmError::ServiceUnavailable(
-            cs.shared_codex_appserver.not_running_message(),
-        ));
+    // Readiness belongs to the row's declared provider; a borrowed OpenCode session
+    // does not require the unrelated Codex daemon to run.
+    match runtime.agent_provider.as_ref() {
+        Some(crate::session_projection_repo::AgentProvider::Claude) => {
+            s.claude_planner.check_ready().await?;
+        }
+        Some(crate::session_projection_repo::AgentProvider::OpenCode) => {
+            let card = s
+                .repo
+                .card_get(card_id.as_str())
+                .await?
+                .ok_or_else(dormant)?;
+            if let Some(binding) =
+                crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?
+            {
+                s.opencode_planner
+                    .resolve_binding(&binding)?
+                    .validate_server()
+                    .await?;
+            } else {
+                s.opencode_planner.check_ready().await?;
+            }
+        }
+        _ if !cs.shared_codex_appserver.is_running() => {
+            return Err(CalmError::ServiceUnavailable(
+                cs.shared_codex_appserver.not_running_message(),
+            ));
+        }
+        _ => {}
     }
     let runtime_id = runtime.id.clone();
     let harness = crate::harness::spawn_recovered_harness(

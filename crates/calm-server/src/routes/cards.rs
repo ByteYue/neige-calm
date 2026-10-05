@@ -685,6 +685,11 @@ pub struct GetPlannerRunResponse {
     pub pending_overflow: u32,
     /// Whether this card can take image attachments at all: not when the track's workspace is an attached directory, since neige never writes into one. Answered by the same function the upload runs (`planner_attachments::attachment_root`).
     pub attachments_supported: bool,
+    /// Whether queued input can join this provider's active turn.
+    pub supports_steer: bool,
+    /// A borrowed native session, absent for managed conversations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached_session: Option<crate::opencode_planner::attachment::AttachedSession>,
     /// The turn the harness is running. Non-null exactly when this response's `phase` is `turn_running`: both come from one read of the harness state.
     pub running_turn: Option<PlannerRunningTurn>,
 }
@@ -957,6 +962,12 @@ pub(crate) async fn interrupt_planner_card(
         .ok_or_else(dormant)?;
     let harness = s.harness.get(&runtime.id).ok_or_else(dormant)?;
 
+    if harness.attached_session().is_some() {
+        return Err(CalmError::Conflict(
+            "Stop is unavailable for an attached OpenCode session; use its original controller"
+                .into(),
+        ));
+    }
     let phase = harness.snapshot().await.phase;
     // Dispatch for IssuingTurn too (best-effort), but only TurnRunning reports `stopped: true`.
     let dispatch = matches!(
@@ -1023,17 +1034,16 @@ pub(crate) async fn get_planner_run(
     // Unreadable model keys are reported as 'no selection' by this READ rather than as a 500; the turn-issuing path refuses on the same payload, so the conversation still stops but this surface can show why.
     let selection =
         crate::planner_model::CardModelSelection::from_payload(&card.payload).unwrap_or_default();
-    // The same input capability and workspace predicates the upload endpoint enforces.
-    let attachments_supported = crate::planner_attachments::require_image_input(&card, role)
-        .is_ok()
-        && match s.repo.track_get(card.track_id.as_str()).await? {
-            Some(track) => {
-                crate::planner_attachments::attachment_root(&track.workspace, &s.workspace_root)
+    // The same predicate the upload endpoint enforces, so the answer cannot drift from the refusal.
+    let attachments_supported = match s.repo.track_get(card.track_id.as_str()).await? {
+        Some(track) => {
+            crate::planner_attachments::require_image_input(&card, role).is_ok()
+                && crate::planner_attachments::attachment_root(&track.workspace, &s.workspace_root)
                     .is_ok()
-            }
-            // No track means no workspace to write into; this field is not the place to raise it, and 'supported' would be the wrong guess.
-            None => false,
-        };
+        }
+        // No track means no workspace to write into; this field is not the place to raise it, and 'supported' would be the wrong guess.
+        None => false,
+    };
     let mut dormant = GetPlannerRunResponse {
         card_id: card.id.clone(),
         worker_session_id: None,
@@ -1046,6 +1056,29 @@ pub(crate) async fn get_planner_run(
         pending: Vec::new(),
         pending_overflow: 0,
         attachments_supported,
+        supports_steer: crate::harness::profile::PlannerBinding::from_card(&card, role)
+            .is_some_and(|binding| {
+                binding.provider == crate::session_projection_repo::AgentProvider::Codex
+            }),
+        attached_session: crate::opencode_planner::attachment::Binding::from_payload(
+            &card.payload,
+        )?
+        .map(|binding| {
+            let connection = s.opencode_planner.resolve_binding(&binding);
+            crate::opencode_planner::attachment::AttachedSession {
+                connection_id: binding.connection_id.clone(),
+                label: connection
+                    .as_ref()
+                    .map(|connection| connection.config.label.clone())
+                    .unwrap_or_else(|_| binding.connection_id.clone()),
+                session_id: binding.session_id,
+                directory: binding.directory.display().to_string(),
+                status: crate::opencode_planner::attachment::AttachedStatus::Unavailable,
+                can_submit: false,
+                can_stop: false,
+                model: None,
+            }
+        }),
         running_turn: None,
     };
     let Some(runtime) = s
@@ -1085,14 +1118,23 @@ pub(crate) async fn get_planner_run(
     // Phase and the running turn come from one state read, so a running turn is never paired with another phase.
     let (snapshot, running_turn) = harness.snapshot_with_running_turn().await;
     let (pending, pending_overflow) = page_pending_entries(&card.id, &snapshot.pending_entries());
+    let attached_session = harness.attached_session();
+    let external_block = attached_session.as_ref().filter(|session| !session.can_submit)
+        .map(|session| match session.status {
+            crate::opencode_planner::attachment::AttachedStatus::Running => "The existing OpenCode session is running. Observe its progress; continue after it settles.",
+            crate::opencode_planner::attachment::AttachedStatus::Unavailable => "The existing OpenCode server is unavailable. History is retained; reconnect to its original server.",
+            _ => "The original OpenCode outcome is being checked. No prompt will be resent.",
+        }.to_string());
     Ok(Json(GetPlannerRunResponse {
+        supports_steer: harness.supports_steer(),
+        attached_session,
         attachments_supported,
         card_id: card.id,
         worker_session_id: Some(runtime.id.clone()),
         phase: Some(snapshot.phase),
         model: selection.model,
         reasoning_effort: selection.reasoning_effort,
-        blocked_reason: harness.issuance_block().await,
+        blocked_reason: harness.issuance_block().await.or(external_block),
         token_usage: snapshot
             .token_usage
             .as_ref()
@@ -1133,6 +1175,11 @@ pub(crate) async fn reset_planner_card(
         return Err(CalmError::Forbidden(format!(
             "card {id} is not a planner codex card",
         )));
+    }
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Err(CalmError::Conflict(
+            "Reset is unavailable for an attached OpenCode session; its original binding and history are retained".into(),
+        ));
     }
     // Recovery declines malformed persisted Planner runtimes so a boot pass can continue; this reset boundary keeps the HTTP 403 contract rather than a generic operation failure.
     if role == CardRole::Planner {
