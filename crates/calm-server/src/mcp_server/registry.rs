@@ -85,7 +85,11 @@ impl ToolCallIdentity {
     }
 }
 
-fn session_actor(role: CardRole, provider: &AgentProvider, session_id: WorkerSessionId) -> ActorId {
+pub(crate) fn session_actor(
+    role: CardRole,
+    provider: &AgentProvider,
+    session_id: WorkerSessionId,
+) -> ActorId {
     match role {
         CardRole::Planner if *provider == AgentProvider::OpenCode => {
             ActorId::AiOpenCodeSession(session_id)

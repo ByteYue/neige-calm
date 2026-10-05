@@ -1447,6 +1447,7 @@ fn event_warrants_planner_push_task_actor_matrix_and_request_kinds_pin() {
     for actor in [
         ActorId::AiPlanner(planner.clone()),
         ActorId::AiPlannerSession(WorkerSessionId::from("sess-planner")),
+        ActorId::AiOpenCodeSession(WorkerSessionId::from("sess-opencode")),
     ] {
         assert!(
             !event_warrants_planner_push(&completed, &actor, &write),

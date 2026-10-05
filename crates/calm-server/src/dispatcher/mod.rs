@@ -114,7 +114,12 @@ pub(crate) fn event_warrants_planner_push_with_role(
     match event {
         Event::TaskCompleted { .. } | Event::TaskFailed { .. } => {
             // Not a planner author, whether card-keyed or session-keyed.
-            !matches!(actor, ActorId::AiPlanner(_) | ActorId::AiPlannerSession(_))
+            !matches!(
+                actor,
+                ActorId::AiPlanner(_)
+                    | ActorId::AiPlannerSession(_)
+                    | ActorId::AiOpenCodeSession(_)
+            )
         }
         // Kernel-only at the role gate (no self-push loop); for a gated task this wake
         // replaces the suppressed worker self-report.

@@ -133,17 +133,13 @@ pub fn policy_for(origin: &WriteOrigin) -> Result<WritePolicy, CalmError> {
     })
 }
 
-/// Mirrors `ToolCallIdentity::to_actor_id`; `Worker` / `ReportCard` are refused by [`policy_for`] first.
+/// Uses the same session identity derivation as MCP writes.
 fn agent_actor(agent: &AgentOrigin) -> ActorId {
-    let session_id = agent.session_id.clone();
-    match agent.role {
-        CardRole::Planner => ActorId::AiPlannerSession(session_id),
-        CardRole::Assistant | CardRole::Worker | CardRole::ReportCard => match agent.provider {
-            AgentProvider::Codex => ActorId::AiCodexSession(session_id),
-            AgentProvider::Claude => ActorId::AiClaudeSession(session_id),
-            AgentProvider::OpenCode => ActorId::AiOpenCodeSession(session_id),
-        },
-    }
+    crate::mcp_server::registry::session_actor(
+        agent.role,
+        &agent.provider,
+        agent.session_id.clone(),
+    )
 }
 
 #[cfg(test)]
@@ -186,6 +182,14 @@ mod tests {
                 "agent/planner/claude",
                 agent(CardRole::Planner, AgentProvider::Claude),
                 ActorId::AiPlannerSession(WorkerSessionId::from("sess_1".to_string())),
+                WriteAttribution::Authored(EditAuthor::Planner),
+                true,
+                RecorderRequirement::AgentGate,
+            ),
+            (
+                "agent/planner/opencode",
+                agent(CardRole::Planner, AgentProvider::OpenCode),
+                ActorId::AiOpenCodeSession(WorkerSessionId::from("sess_1".to_string())),
                 WriteAttribution::Authored(EditAuthor::Planner),
                 true,
                 RecorderRequirement::AgentGate,
