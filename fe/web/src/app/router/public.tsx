@@ -32,7 +32,7 @@ import {
   NO_UPLOAD, type AttachmentStore, type UploadAttachment, usePlannerAttachments,
 } from '../../features/planner/attachments.tsx';
 import {
-  CARD_CREATE_FAILURES, cardCreateText, trackOverlayPayload, plannerProviderOf, toTrack, trackActivityFrom, trackDisplayTitle,
+  trackOverlayPayload, plannerProviderOf, toTrack, trackActivityFrom, trackDisplayTitle,
   type Track, type TrackActivity, type TrackDetailWire,
 } from '../../../../core/domain/track.ts';
 import { cardActivityOf, type CardActivity } from '../../../../core/domain/activity.ts';
@@ -42,7 +42,7 @@ import type {
 import {
   cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, plannerCardIn, partitionTrackCards,
 } from '../../systems/cards/public.js';
-import { mintIdempotencyKey } from '../providers/idempotency-key.ts';
+import { mintIdempotencyKey, useKeyedIntent, type KeyedRequest } from '../providers/idempotency-key.ts';
 import footerStyles from './composer-footer.module.css';
 import { TodayCalendarTasks } from './calendar.tsx';
 import { TodayPage } from '../../features/today/public.tsx';
@@ -51,6 +51,10 @@ import { TrackRow } from '../../features/track/row/public.tsx';
 import { TrackPage, type TrackInputNotification } from '../../features/track/page/public.tsx';
 import { CardGridOverlay, TrackStage } from '../../features/track/grid/public.tsx';
 import { AddCardMenu, NewCardForm, type NewCardValues } from '../../features/track/new-card/public.tsx';
+import {
+  cardCreateEnded, cardCreateFailureText, keyedCardBodyOf, sameCardDraft, sendCardCreate,
+  type CardCreatePort, type CardDraft, type KeyedCardBody,
+} from '../../features/track/new-card/create.ts';
 import { ChatList } from '../../features/chat/list/public.tsx';
 import {
   ChatComposer, ChatFooterError, ChatFooterNotice, ChatFooterRemedy, ChatThread,
@@ -2133,42 +2137,18 @@ function TrackRouteBody({
   const activeCardCreate = useRef<AbortController | null>(null);
   useEffect(() => () => { activeCardCreate.current?.abort(); }, []);
 
-  const createCardOfKind = async (entry: CardAddMenuEntry, values: NewCardValues) => {
-    /* Empty is absent, not `""`: the kernel reads an empty `cwd` as "no directory
-           given" but an empty `title` as a real, blank title. */
-    const given = (key: string): string | undefined => {
-      const value = (values[key] ?? '').trim();
-      return value === '' ? undefined : value;
-    };
-    const title = given('title');
-    /* Read at click time from `<html data-theme>`, not `useTheme()`: subscribing
-           would remount any live terminal on every theme toggle. */
-    const theme = readHostThemeRgb();
-    if (entry.type === 'terminal') {
-      return trackMutations.createTerminal(track.id, { theme, ...(title === undefined ? {} : { title }) });
-    }
-    if (entry.type === 'codex') {
-      const cwd = given('cwd');
-      return trackMutations.createCodex(track.id, {
-        theme,
-        ...(title === undefined ? {} : { title }),
-        ...(cwd === undefined ? {} : { cwd }),
-      });
-    }
-    const registered = cardRegistry.get(entry.type);
-    const strategy = registered?.create;
-    if (strategy?.mode !== 'generic' || registered?.claim?.mode !== 'exact') {
-      throw new Error(`CardCreateUnsupported(${entry.type})`);
-    }
-    return trackMutations.createCard(track.id, {
-      kind: registered.claim.kind,
-      payload: strategy.buildPayload(values),
-      ...(title === undefined ? {} : { title }),
-    });
+  /* One add-card intent is one `Idempotency-Key` (#2131): Try again, a Create of the same draft and a pick of the same
+   * fieldless kind resend the held key and body, so a retry after a lost answer joins the card the first attempt made.
+   * A final outcome releases it; another draft is a new intent. The policy is `new-card/create.ts`; this only wires it. */
+  const cardIntent = useKeyedIntent<CardDraft, KeyedCardBody>(sameCardDraft);
+  const cardCreatePort: CardCreatePort = {
+    createTerminal: (body, key) => trackMutations.createTerminal(track.id, body, key),
+    createCodex: (body, key) => trackMutations.createCodex(track.id, body, key),
+    createCard: (body) => trackMutations.createCard(track.id, body),
   };
 
-  /* The create navigates to the new card, the same landing `onOpenCard` gives. */
-  const submitNewCard = (entry: CardAddMenuEntry, values: NewCardValues) => {
+  /* The create navigates to the new card, the same landing `onOpenCard` gives. `resent`: the held request goes again. */
+  const runCardCreate = (draft: CardDraft, keyed: KeyedRequest<CardDraft, KeyedCardBody> | null, resent: boolean) => {
     /* Only the newest gesture may own the landing: a superseded attempt is aborted so
            it neither steers nor clears a busy state that now belongs to the newer attempt. */
     activeCardCreate.current?.abort();
@@ -2177,12 +2157,16 @@ function TrackRouteBody({
     setCreatingCard(true);
     void cardCreateFeedback
       .run(
-        createCardOfKind(entry, values).then((card) => {
+        Promise.resolve().then(() => sendCardCreate(cardCreatePort, cardRegistry, draft, keyed)).then((card) => {
+          if (keyed !== null) cardIntent.release(keyed);
           if (controller.signal.aborted) return;
           setCardDraft(null);
           goSameTrack(track.id, { card: card.id });
+        }, (error: unknown) => {
+          if (keyed !== null && cardCreateEnded(error, resent)) cardIntent.release(keyed);
+          throw error;
         }),
-        writeFailureText(CARD_CREATE_FAILURES, cardCreateText(entry.label)),
+        cardCreateFailureText(draft.entry.label, resent),
         () => controller.signal.aborted,
       )
       .finally(() => {
@@ -2193,6 +2177,19 @@ function TrackRouteBody({
         setCreatingCard(false);
       });
   };
+
+  const submitNewCard = (entry: CardAddMenuEntry, values: NewCardValues) => {
+    const draft: CardDraft = { entry, values };
+    /* Read at click time from `<html data-theme>`, not `useTheme()`: subscribing
+           would remount any live terminal on every theme toggle. A resent request keeps its first press's theme. */
+    const body = keyedCardBodyOf(draft, readHostThemeRgb());
+    if (body === null) { runCardCreate(draft, null, false); return; }
+    const resent = cardIntent.held !== null && sameCardDraft(cardIntent.held.draft, draft);
+    runCardCreate(draft, cardIntent.request(draft, () => body), resent);
+  };
+  const heldCardCreate = cardIntent.held;
+  const retryCardCreate = heldCardCreate === null || creatingCard ? null
+    : () => { runCardCreate(heldCardCreate.draft, heldCardCreate, true); };
 
   /* A kind with nothing to ask is created on the spot; one with fields opens the form. */
   const pickCardKind = (entry: CardAddMenuEntry) => {
@@ -2401,6 +2398,7 @@ function TrackRouteBody({
           entry={cardDraft}
           submitting={creatingCard}
           error={cardCreateFeedback.error}
+          onRetry={retryCardCreate}
           listDirectory={listDirectory}
           firstFieldRef={newCardFieldRef}
           onCancel={() => setCardDraft(null)}
@@ -2420,7 +2418,10 @@ function TrackRouteBody({
     />
     <OperationFeedback feedback={cardDeletion.feedback} />
     {/* Only while the dialog is closed: `NewCardForm` renders the same `error` inline. */}
-    {cardDraft === null && <OperationFeedback feedback={cardCreateFeedback} />}
+    {cardDraft === null && <OperationFeedback feedback={cardCreateFeedback}>
+      <span>{cardCreateFeedback.error}</span>
+      {retryCardCreate !== null && <button type="button" data-nc-action="tertiary" onClick={retryCardCreate}>Try again</button>}
+    </OperationFeedback>}
     {/* The source card is painted over the conversation's, which stays in the DOM
             underneath and so is `inert` for the duration. The wrapper is a static block
             so the drawer's absolute box still resolves against `.main`. */}
