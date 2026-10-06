@@ -128,7 +128,7 @@ database into Neige's private Planner profile.
 
 This branch appends migrations 0152–0154 after upstream migration 0151. Upstream
 migrations are unchanged. A database created by the earlier fork with OpenCode
-migrations numbered 0130–0132 has different SQLx migration checksums and cannot
+migrations numbered 0130–0132 or 0148–0150 has different SQLx migration checksums and cannot
 be opened by this rebased build. Keep that database as evidence and use a fresh
 isolated Neige database for this development build. Do not edit its migration
 ledger or point this build at a production database. The original native

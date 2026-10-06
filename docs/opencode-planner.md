@@ -111,7 +111,7 @@ See the [OpenCode ACP documentation](https://opencode.ai/docs/acp/) and the pinn
 
 Provider migrations 0152 and 0153 follow upstream migration 0151. The upstream
 migration files are unchanged. Earlier fork-only development databases used
-0130 and 0131 for these different migrations; their SQLx checksums conflict with
+0130–0131 or 0148–0149 for these different migrations; their SQLx checksums conflict with
 upstream's migration history. Preserve those databases and use a fresh isolated
 Neige database for this rebased development build. Do not rewrite a migration
 ledger. This boundary does not change native OpenCode session history.
