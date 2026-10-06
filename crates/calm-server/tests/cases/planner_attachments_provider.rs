@@ -19,6 +19,7 @@ async fn request(
                 .method(method)
                 .uri(format!("/api/cards/{}/planner/{suffix}", b.planner_card.id))
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", "opencode-provider-capability")
                 .body(payload.map_or_else(Body::empty, |value| Body::from(value.to_string())))
                 .unwrap(),
         )

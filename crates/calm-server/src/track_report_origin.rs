@@ -259,7 +259,7 @@ mod tests {
     // distinguish pass-through from a hardcoded `ActorId::User`. Add it when the admitted set widens.
 
     /// Bump this alongside a new arm in [`actor_variant_label`].
-    const ACTOR_ID_NON_USER_VARIANTS: usize = 9;
+    const ACTOR_ID_NON_USER_VARIANTS: usize = 10;
 
     /// No `_` arm: adding an `ActorId` variant fails to compile here.
     fn actor_variant_label(actor: &ActorId) -> &'static str {

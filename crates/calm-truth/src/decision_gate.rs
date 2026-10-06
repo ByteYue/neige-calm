@@ -1557,7 +1557,7 @@ mod tests {
 
         // Guard against the matrix silently collapsing to nothing (an empty
         // or all-allow matrix would agree trivially and prove nothing).
-        assert_eq!(compared, 21 * 9 * 13, "matrix size changed unexpectedly");
+        assert_eq!(compared, 22 * 9 * 13, "matrix size changed unexpectedly");
         assert!(
             denials > compared / 4,
             "matrix is too permissive to be evidence: only {denials} of {compared} rows deny"

@@ -160,3 +160,57 @@ async fn attached_opencode_migration_preserves_all_references_and_extends_execut
         assert_eq!(result.is_ok(), accepted, "{mode}/{contract}");
     }
 }
+
+#[tokio::test]
+async fn attached_opencode_index_preserves_corrupt_card_reads_and_native_uniqueness() {
+    let mut db = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    db.ensure_migrations_table().await.unwrap();
+    apply_through(&mut db, 151).await;
+    sqlx::raw_sql(include_str!("fixtures/opencode_migration_before.sql"))
+        .execute(&mut db)
+        .await
+        .unwrap();
+    apply_through(&mut db, 153).await;
+    sqlx::query("UPDATE cards SET payload='{not-json' WHERE id='c'")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    apply_through(&mut db, 154).await;
+    let payload: String = sqlx::query_scalar("SELECT payload FROM cards WHERE id='c'")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        payload, "{not-json",
+        "migration must retain corruption evidence"
+    );
+    assert!(
+        sqlx::query_scalar::<_, String>("SELECT json(payload) FROM cards WHERE id='c'")
+            .fetch_one(&mut db)
+            .await
+            .is_err(),
+        "corrupt payload must still fail a strict read"
+    );
+    let binding = r#"{"opencode_attachment":{"directory":"/native","session_id":"ses_existing"}}"#;
+    for (id, accepted) in [("native-1", true), ("native-2", false)] {
+        let result = sqlx::query("INSERT INTO cards(id,track_id,kind,sort,payload,created_at,updated_at,role) VALUES(?1,'t','codex',0,?2,1,1,'planner')")
+            .bind(id).bind(binding).execute(&mut db).await;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "only one native target binding may exist"
+        );
+        if let Err(error) = result {
+            assert!(
+                error.as_database_error().unwrap().is_unique_violation(),
+                "{error}"
+            );
+        }
+    }
+}

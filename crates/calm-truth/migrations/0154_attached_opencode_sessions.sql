@@ -79,7 +79,7 @@ CREATE INDEX ws_track_idx ON worker_sessions(track_id, created_at_ms, id);
 CREATE INDEX idx_worker_sessions_card_state
   ON worker_sessions(card_id, state);
 
-CREATE UNIQUE INDEX cards_attached_opencode_target ON cards(json_extract(payload, '$.opencode_attachment.directory'),json_extract(payload, '$.opencode_attachment.session_id')) WHERE json_extract(payload, '$.opencode_attachment') IS NOT NULL;
+CREATE UNIQUE INDEX cards_attached_opencode_target ON cards(json_extract(payload, '$.opencode_attachment.directory'),json_extract(payload, '$.opencode_attachment.session_id')) WHERE CASE WHEN json_valid(payload) THEN json_extract(payload, '$.opencode_attachment') IS NOT NULL ELSE 0 END;
 
 -- Noncredential connection identity survives card retirement so a new configuration
 -- generation cannot bypass a request whose native outcome is still unknown.

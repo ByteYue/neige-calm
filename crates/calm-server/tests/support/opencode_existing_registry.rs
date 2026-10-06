@@ -170,3 +170,49 @@ async fn invalid_targets_version_and_cross_track_duplicate_leave_no_native_effec
     assert!(fixture.posts().is_empty());
     stack.shutdown().await;
 }
+
+#[tokio::test]
+async fn attachment_ignores_unrelated_corrupt_cards_without_allowing_duplicate_targets() {
+    let fixture = Fixture::new().await;
+    let stack = Stack::boot(&fixture).await;
+    let track = stack.track(&fixture).await;
+    let other = stack.track(&fixture).await;
+    let note = stack
+        .state
+        .raw_repo()
+        .card_create(calm_server::model::NewCard {
+            track_id: other.clone().into(),
+            kind: "note".into(),
+            sort: None,
+            title: None,
+            payload: json!({}),
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cards SET payload='{not-json' WHERE id=?1")
+        .bind(note.id.as_str())
+        .execute(&stack.state.raw_repo().sqlite_pool().unwrap())
+        .await
+        .unwrap();
+    let card = stack.attach(&track, "attach-with-corrupt-neighbor").await;
+    stack.wait_text(&card, "original progress").await;
+    assert_eq!(
+        stack.attach(&track, "retry-with-corrupt-neighbor").await,
+        card
+    );
+    let (status, _) = stack
+        .request(
+            "POST",
+            &format!("/api/tracks/{other}/opencode-conversations"),
+            Some(json!({"connection_id":"original","session_id":SESSION})),
+            Some("duplicate-native-target"),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "another track cannot attach the same native target"
+    );
+    assert!(fixture.posts().is_empty());
+    stack.shutdown().await;
+}

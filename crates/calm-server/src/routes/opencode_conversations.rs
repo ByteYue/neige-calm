@@ -122,8 +122,9 @@ pub(crate) async fn attach_conversation(
         .await
         .map_err(attachment_precondition)?;
     let target: Option<String> = sqlx::query_scalar(concat!(
-        "SELECT id FROM cards WHERE json_extract(payload,'$.opencode_attachment.directory')=?1 ",
-        "AND json_extract(payload,'$.opencode_attachment.session_id')=?2"
+        "SELECT id FROM cards WHERE CASE WHEN json_valid(payload) THEN ",
+        "json_extract(payload,'$.opencode_attachment.directory')=?1 ",
+        "AND json_extract(payload,'$.opencode_attachment.session_id')=?2 ELSE 0 END"
     ))
     .bind(binding.directory.display().to_string())
     .bind(&binding.session_id)
