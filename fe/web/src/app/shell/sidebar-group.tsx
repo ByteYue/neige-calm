@@ -20,6 +20,7 @@ export type RowProps = Readonly<{
   nowMs?: number;
   onSetPinned: (trackId: string, pinned: boolean) => void;
   onDelete: (trackId: string) => void;
+  trackActions?: (track: Track) => NonNullable<Parameters<typeof TrackRow>[0]['actions']>;
 }>;
 
 export type GroupManagement = Readonly<{
@@ -52,7 +53,7 @@ export function SidebarGroup({ title, label, expanded, onToggle, level, manageme
     ref={disclosureRef}
     type="button"
     data-nc-role="row"
-    className={`${styles.areaRow} ${actions === undefined ? styles.groupSingleAction : ''}`}
+    className={styles.areaRow}
     aria-expanded={disclosure.isOpen}
     aria-label={`${disclosure.isOpen ? 'Collapse' : 'Expand'} ${label}`}
     onClick={disclosure.toggle}
@@ -60,12 +61,12 @@ export function SidebarGroup({ title, label, expanded, onToggle, level, manageme
     <span className={`${styles.chevron} ${disclosure.isOpen ? styles.chevronOpen : ''}`} aria-hidden="true">
       <Icon name="chevron-right" />
     </span>
-    <ListText tone={level === 'section' ? 'section' : 'group'} className={styles.areaName} title={title}>{title}</ListText>
+    <ListText tone={level === 'section' ? 'section' : 'group'} className={styles.areaName} title={title} fadeOverflow>{title}</ListText>
   </button>;
   return <div role="group" aria-label={label} className={level === 'section' ? styles.section : styles.areaGroup}>
     <div className={styles.areaRowWrap}>
       {level === 'section' ? <ListText as="h2" tone="section" className={styles.groupHeading}>{button}</ListText> : button}
-      <span className={`${styles.areaActions} ${actions === undefined ? styles.groupMenuTrailing : ''}`}>
+      <span className={styles.areaActions}>
         <DropdownMenu placement="below" button={{
           label: management.menuLabel, icon: <Icon name="more" size="sm" />,
           isIconOnly: true, variant: 'ghost', size: 'sm', className: styles.areaActionsButton,
@@ -83,7 +84,7 @@ export function SidebarGroup({ title, label, expanded, onToggle, level, manageme
 }
 
 /** One list implementation: retain the active row, limit/reveal, navigate, pin and delete. */
-export function SidebarTrackGroup({ tracks, activeTrackId, areas, markCurrent = true, onGo, nowMs, onSetPinned, onDelete, isUnread, ...group }: GroupProps & RowProps & {
+export function SidebarTrackGroup({ tracks, activeTrackId, areas, markCurrent = true, onGo, nowMs, onSetPinned, onDelete, isUnread, trackActions, ...group }: GroupProps & RowProps & {
   tracks: readonly Track[];
   activeTrackId: string | null;
   /** Cross-Area groups identify the Area on each row; Area groups omit this. */
@@ -115,6 +116,7 @@ export function SidebarTrackGroup({ tracks, activeTrackId, areas, markCurrent = 
         onOpen={(trackId) => onGo({ name: 'track', trackId })}
         onSetPinned={onSetPinned}
         onDelete={onDelete}
+        actions={trackActions?.(track)}
       />)}
       {limited.hiddenCount > 0 && <button
         ref={toggleRef}

@@ -149,10 +149,10 @@
   }
 
   /* Compact rows share the timestamp slot with their hover delete action. */
-  .variantCompact.hasRemove:not(.hasPin) { padding-inline-end: var(--space-2); }
-  .variantCompact.hasRemove:not(.hasPin) .age { min-inline-size: var(--control-h-sm); text-align: end; }
-  .wrapper:hover .variantCompact.hasRemove:not(.hasPin) .age,
-  .wrapper:focus-within .variantCompact.hasRemove:not(.hasPin) .age { opacity: 0; }
+  .variantCompact.hasRemove:not(.hasPin):not(.hasMenu) { padding-inline-end: var(--space-2); }
+  .variantCompact.hasRemove:not(.hasPin):not(.hasMenu) .age { min-inline-size: var(--control-h-sm); text-align: end; }
+  .wrapper:hover .variantCompact.hasRemove:not(.hasPin):not(.hasMenu) .age,
+  .wrapper:focus-within .variantCompact.hasRemove:not(.hasPin):not(.hasMenu) .age { opacity: 0; }
 
   .row.hasPin.hasRemove {
     padding-inline-end: calc(var(--space-2) * 3 + var(--control-h-sm) * 2);
@@ -212,9 +212,16 @@
    * from the next, and by adjacency.
    */
 
-  /* Row-level shortcuts. They are hover-revealed only because every one of them
-     has a second route (the track's own page); the space is reserved at rest so
-     revealing them never reflows the row. */
+  /* Row controls appear on hover/focus. The row keeps its geometry while the
+     rail title yields trailing space when controls are revealed. */
+  .menuButton {
+    inline-size: var(--control-h-sm);
+    block-size: var(--control-h-sm);
+    opacity: 0;
+    pointer-events: none;
+    transition: none;
+  }
+
   .action {
     position: absolute;
     inset-block-start: 50%;
@@ -247,9 +254,18 @@
   }
 
   .wrapper:hover .action,
-  .wrapper:focus-within .action {
+  .wrapper:focus-within .action,
+  .wrapper:has(.menuButton[aria-expanded='true']) .action {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .wrapper:hover .menuButton,
+  .wrapper:focus-within .menuButton,
+  .wrapper:has(.menuButton[aria-expanded='true']) .menuButton {
+    opacity: 1;
+    pointer-events: auto;
+    transition: opacity var(--motion-quick) ease-out;
   }
 
   /*
@@ -323,7 +339,9 @@
   .wrapperRail:hover .statusSlot,
   .wrapperRail:focus-within .statusSlot,
   .wrapperPanel:hover .statusSlot,
-  .wrapperPanel:focus-within .statusSlot {
+  .wrapperPanel:focus-within .statusSlot,
+  .wrapperRail:has(.menuButton[aria-expanded='true']) .statusSlot,
+  .wrapperPanel:has(.menuButton[aria-expanded='true']) .statusSlot {
     opacity: 0;
   }
 
@@ -373,5 +391,49 @@
     .action {
       transition: none;
     }
+  }
+  .variantRail.hasMenu .title { text-overflow: clip; }
+
+  .menuSlot {
+    pointer-events: none;
+    position: absolute;
+    inset-inline-end: calc(var(--space-2) * 2 + var(--control-h-sm));
+    inset-block-start: 50%;
+    translate: 0 -50%;
+  }
+
+
+
+  .row.hasMenu,
+  .row.hasMenu.hasRemove,
+  .row.hasMenu.hasPin.hasRemove { padding-inline-end: calc(var(--space-2) * 4 + var(--control-h-sm) * 3); }
+  .wrapperRail .row.hasMenu,
+  .wrapperRail .row.hasMenu.hasPin { padding-inline-end: calc(var(--space-2) * 2 + var(--control-h-sm)); }
+  .wrapperRail:hover .row.hasMenu,
+  .wrapperRail:focus-within .row.hasMenu,
+  .wrapperRail:has(.menuButton[aria-expanded='true']) .row.hasMenu {
+    padding-inline-end: calc(var(--space-2) * 3 + var(--control-h-sm) * 2);
+  }
+  .wrapper:has(.hasMenu) .remove { inset-inline-end: var(--space-2); }
+  .wrapperPanel:has(.hasMenu) .remove { inset-inline-end: 0; }
+  .wrapperPanel:has(.hasMenu) .menuSlot { inset-inline-end: calc(var(--space-2) + var(--control-h-sm)); }
+  .wrapper:not(.wrapperRail):has(.hasMenu) .pin { inset-inline-end: calc(var(--space-2) * 3 + var(--control-h-sm) * 2); }
+
+  .wrapper:hover .menuSlot,
+  .wrapper:focus-within .menuSlot,
+  .wrapper:has(.menuButton[aria-expanded='true']) .menuSlot { pointer-events: auto; }
+
+  @media (hover: none) {
+    .menuSlot { pointer-events: auto; }
+    .menuButton { opacity: 1; pointer-events: auto; }
+    .wrapperRail .row.hasMenu,
+    .wrapperRail .row.hasMenu.hasPin { padding-inline-end: calc(var(--space-2) * 3 + var(--control-h-sm) * 2); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .menuButton,
+    .wrapper:hover .menuButton,
+    .wrapper:focus-within .menuButton,
+    .wrapper:has(.menuButton[aria-expanded='true']) .menuButton { transition: none; }
   }
 }

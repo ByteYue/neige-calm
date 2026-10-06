@@ -19,7 +19,7 @@ import { admitTransport } from '../providers/recovery-mutation.ts';
 // transport and QueryClient; also the composition point for route-owned surfaces.
 
 import {
-  createRootRoute, createRoute, createRouter, useLocation, type AnyRoute,
+  createRootRoute, createRoute, createRouter, useLocation, useRouterState, type AnyRoute,
 } from '@tanstack/react-router';
 import { useCallback, useEffect, useMemo, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { TrackViewProvider, useTrackViewState } from './track-view-state.tsx';
@@ -49,6 +49,7 @@ import footerStyles from './composer-footer.module.css';
 import { TodayCalendarTasks } from './calendar.tsx';
 import { TodayPage } from '../../features/today/public.tsx';
 import { LAUNCHPAD_ENSURE_FAILURES, LAUNCHPAD_ENSURE_TEXT, REPORT_RESET_FAILURES, REPORT_RESET_TEXT, nameTodaySummaryConversation } from '../../../../core/domain/today.ts';
+import { TRACK_PATCH_FAILURES, TRACK_PATCH_TEXT } from '../../../../core/domain/track.ts';
 import { TrackRow } from '../../features/track/row/public.tsx';
 import { TrackPage, type TrackInputNotification } from '../../features/track/page/public.tsx';
 import { CardGridOverlay, TrackStage } from '../../features/track/grid/public.tsx';
@@ -1498,6 +1499,7 @@ function TodayRoute({ transport, unauthorized }: { transport: ApiTransportPort; 
   const workspace = useWorkspace(transport, unauthorized);
   const go = useGo();
   const preferences = useUiPreferences();
+  const pinFeedback = useOperationFeedback();
   const trackMutations = useTrackMutations(transport, unauthorized);
   const deletion = useDeleteConfirm((trackId, signal) => {
     const track = workspace.tracks.find((candidate) => candidate.id === trackId);
@@ -1680,6 +1682,7 @@ function TodayRoute({ transport, unauthorized }: { transport: ApiTransportPort; 
       <span>{resetConfirm.feedback.error}</span>
       <button type="button" data-nc-action="tertiary" onClick={resetConfirm.feedback.clear}>Dismiss</button>
     </div>}
+    <OperationFeedback feedback={pinFeedback} />
     <TodayPage
       conversationPanel={compact ? undefined : chat.drawer}
       isTrackUnread={(track) => preferences.isUnread('track', track.id, track.activityAt ?? 0)}
@@ -1702,6 +1705,12 @@ function TodayRoute({ transport, unauthorized }: { transport: ApiTransportPort; 
           unread={preferences.isUnread('track', track.id, track.activityAt ?? 0)}
           onOpen={(trackId) => go({ name: 'track', trackId })}
           onDelete={deletion.request}
+          actions={{
+            areaPinned: preferences.areaTrackPinned(track.areaId, track.id),
+            onSetPinned: (id, next) => { void pinFeedback.run(trackMutations.setPinned(id, track.areaId, next, Date.now()), writeFailureText(TRACK_PATCH_FAILURES, TRACK_PATCH_TEXT.pin)); },
+            onSetAreaPinned: (id, next) => preferences.setAreaTrackPinned(track.areaId, id, next),
+            onMarkUnread: (id) => preferences.markUnread('track', id),
+          }}
         />
       )}
       conversationList={conversationList}
@@ -1853,7 +1862,9 @@ function TrackRouteBody({
   useTrackViewState(track.id);
   // The same key and comparison point the rail uses: the overlay's completion
   // high-water mark, never the row's `updatedAt`.
-  useReadReceipt('track', track.id, track.activityAt ?? 0);
+  // A completed navigation also acknowledges a repeated selection of this already rendered Track.
+  const navigationCompletedAt = useRouterState({ select: (state) => state.loadedAt });
+  useReadReceipt('track', track.id, track.activityAt ?? 0, true, navigationCompletedAt);
   const trackMutations = useTrackMutations(transport, unauthorized);
   const conversationMutations = useTrackConversationMutations(transport, track.id, unauthorized);
   const openMobileSection = useOpenMobileSection();

@@ -10,6 +10,7 @@ import { ThemeProvider } from '../theme/public.tsx';
 import styles from './shell.module.css';
 import { readMotionTransition } from '../../ui/motion/transition.ts';
 import { Sidebar } from './sidebar.tsx';
+import { TrackRow } from '../../features/track/row/public.tsx';
 
 afterEach(() => { cleanup(); delete document.documentElement.dataset.theme; });
 
@@ -90,6 +91,23 @@ it('places view options and preserves disclosure and keyboard navigation', async
   const newAreaBox = page.getByRole('button', { name: 'New area', exact: true }).element().getBoundingClientRect();
   expect(newAreaBox.width).toBeCloseTo(28, 0);
   expect(newAreaBox.height).toBeCloseTo(28, 0);
+  const centerX = (element: Element) => {
+    const box = element.getBoundingClientRect();
+    return box.left + box.width / 2;
+  };
+  const areaMenu = page.getByRole('button', { name: 'Area actions for Work', exact: true }).element();
+  const areaPlus = page.getByRole('button', { name: 'New track in Work', exact: true }).element();
+  const workGroup = page.getByRole('group', { name: 'area Work', exact: true });
+  const trackMenu = workGroup.getByRole('button', { name: 'Actions for track Review result', exact: true }).element();
+  const trackDelete = workGroup.getByRole('button', { name: 'Delete Review result', exact: true }).element();
+  expect(centerX(trackMenu)).toBeLessThan(centerX(trackDelete));
+  expect(centerX(trackMenu)).toBeCloseTo(centerX(areaMenu), 0);
+  expect(centerX(trackDelete)).toBeCloseTo(centerX(areaPlus), 0);
+  expect(centerX(options.element())).toBeCloseTo(centerX(areaMenu), 0);
+  expect(centerX(page.getByRole('button', { name: 'Group actions for Pinned', exact: true }).element())).toBeCloseTo(centerX(areaMenu), 0);
+  expect(centerX(page.getByRole('button', { name: 'Group actions for Areas', exact: true }).element())).toBeCloseTo(centerX(areaMenu), 0);
+  expect(centerX(collapse.element())).toBeCloseTo(centerX(areaPlus), 0);
+
   await options.click();
   await expect.element(page.getByRole('menuitem', { name: 'Hidden groups' })).toBeVisible();
   await userEvent.keyboard('{ArrowDown}');
@@ -211,4 +229,143 @@ it('recovers hidden groups through the full pointer list and Escape layers', asy
     await expect.element(page.getByRole('group', { name: title, exact: true })).toBeVisible();
   }
 
+});
+
+
+it('uses the three-dot Track menu with keyboard and keeps actions separate from navigation', async () => {
+  await page.viewport(1400, 900);
+  const preferences = createUiPreferences();
+  preferences.setReadScope('db', 1_000);
+  const area: Area = { id: 'work', name: 'Work', color: '#5B8DEF', sort: 1, kind: 'user',
+    defaultTemplateId: null, defaultCwd: null, createdAt: 1, updatedAt: 1 };
+  const tracks: Track[] = ['Recent', 'Older'].map((title, i) => ({ id: `t${i}`, areaId: area.id, title, sort: i,
+    cwd: '/tmp', agentCwd: '/tmp', pinnedAt: null, closedAt: null, createdAt: 1, updatedAt: 2, ...NEUTRAL_ACTIVITY }));
+  const onGo = vi.fn();
+  const onSetPinned = vi.fn();
+  render(<UiPreferencesProvider preferences={preferences}>
+    <ThemeProvider storage={{ getItem: () => 'light', setItem: () => undefined }}>
+      <div className={`${styles.shell} ${styles.shellExpanded}`} style={{ blockSize: '100dvh' }}>
+        <Sidebar areas={[area]} tracksByArea={new Map([[area.id, tracks]])} tracks={tracks}
+          currentPath="/" onGo={onGo} onRequestCreateArea={vi.fn()} onRequestEditArea={vi.fn()}
+          onDeleteArea={vi.fn()} onNewTrack={vi.fn()} onSetPinned={onSetPinned} onDeleteTrack={vi.fn()}
+          onOpenSettings={vi.fn()} onOpenPlugins={vi.fn()} onSignOut={vi.fn()}
+          collapsed={false} onToggleCollapsed={vi.fn()} />
+        <main />
+      </div>
+    </ThemeProvider>
+  </UiPreferencesProvider>);
+  const menu = page.getByRole('button', { name: 'Actions for track Older' });
+  await expect.element(menu).toBeVisible();
+  const row = page.getByRole('button', { name: 'Track Older', exact: true }).element();
+  await page.elementLocator(row).hover();
+  expect(menu.element().getBoundingClientRect().right).toBeLessThanOrEqual(row.getBoundingClientRect().right);
+  await menu.click();
+  await page.getByRole('menuitem', { name: 'Pin globally', exact: true }).click();
+  expect(onSetPinned).toHaveBeenCalledWith('t1', true);
+  await menu.click();
+  await page.getByRole('menuitem', { name: 'Pin within area', exact: true }).click();
+  const areaGroup = page.getByRole('group', { name: 'area Work', exact: true });
+  const navigationRows = [...areaGroup.element().querySelectorAll<HTMLButtonElement>('button[aria-label^="Track "]')];
+  expect(navigationRows[0]?.getAttribute('aria-label')).toBe('Track Older');
+  await menu.click();
+  await page.getByRole('menuitem', { name: 'Mark as unread', exact: true }).click();
+  expect(preferences.isUnread('track', 't1', 0)).toBe(true);
+  expect(row.getAttribute('aria-describedby')).toBeTruthy();
+  await menu.click();
+  await userEvent.keyboard('{Escape}');
+  await expect.element(menu).toHaveFocus();
+  expect(onGo).not.toHaveBeenCalled();
+});
+
+
+it('reserves room for menu actions and metadata in Today compact rows', async () => {
+  await page.viewport(1400, 900);
+  const track: Track = { id: 't', title: 'Compact row', areaId: 'a', sort: 0, cwd: '/tmp', agentCwd: '/tmp',
+    pinnedAt: null, closedAt: null, createdAt: 1, updatedAt: 1, ...NEUTRAL_ACTIVITY };
+  render(<ThemeProvider storage={{ getItem: () => 'light', setItem: () => undefined }}>
+    <div style={{ inlineSize: '20rem' }}><TrackRow track={track} variant="compact" nowMs={10_000}
+      onOpen={vi.fn()} onDelete={vi.fn()}
+      actions={{ areaPinned: false, onSetPinned: vi.fn(), onSetAreaPinned: vi.fn(), onMarkUnread: vi.fn() }} /></div>
+  </ThemeProvider>);
+  const row = page.getByRole('button', { name: 'Track Compact row', exact: true });
+  await row.hover();
+  const remove = page.getByRole('button', { name: 'Delete Compact row', exact: true }).element().getBoundingClientRect();
+  const age = row.element().lastElementChild!.getBoundingClientRect();
+  const menu = page.getByRole('button', { name: 'Actions for track Compact row', exact: true }).element().getBoundingClientRect();
+  expect(age.right).toBeLessThanOrEqual(menu.left);
+  expect(menu.right).toBeLessThanOrEqual(remove.left);
+});
+
+
+it('fades only overflowing rail titles and keeps the action menu distinct', async () => {
+  await page.viewport(1400, 900);
+  const base: Track = { id: 'long', title: '', areaId: 'a', sort: 0, cwd: '/tmp', agentCwd: '/tmp',
+    pinnedAt: null, closedAt: null, createdAt: 1, updatedAt: 1, ...NEUTRAL_ACTIVITY };
+  const tree = (title: string, width: string) => <ThemeProvider storage={{ getItem: () => 'light', setItem: () => undefined }}>
+    <div style={{ inlineSize: width }}><TrackRow track={{ ...base, title }} variant="rail"
+      onOpen={vi.fn()} onDelete={vi.fn()}
+      actions={{ areaPinned: false, onSetPinned: vi.fn(), onSetAreaPinned: vi.fn(), onMarkUnread: vi.fn() }} /></div>
+  </ThemeProvider>;
+  const english = 'Review the exceptionally long navigation title';
+  const chinese = '验证很长的任务标题与右侧操作菜单是否存在视觉冲突';
+  const view = render(tree(chinese, '14rem'));
+  const titleNode = () => document.querySelector<HTMLElement>('button[data-nc-role="row"] [title]')!;
+  for (const title of [chinese, english]) {
+    view.rerender(tree(title, '14rem'));
+    await page.getByRole('button', { name: `Track ${title}`, exact: true }).hover();
+    expect(titleNode().scrollWidth).toBeGreaterThan(titleNode().clientWidth);
+    await expect.poll(() => getComputedStyle(titleNode()).maskImage).toContain('linear-gradient');
+    expect(getComputedStyle(titleNode()).textOverflow).toBe('clip');
+    expect(page.getByRole('button', { name: `Track ${title}`, exact: true }).element().getAttribute('aria-label')).toBe(`Track ${title}`);
+    const menu = page.getByRole('button', { name: `Actions for track ${title}`, exact: true }).element();
+    expect(titleNode().getBoundingClientRect().right).toBeLessThanOrEqual(menu.getBoundingClientRect().left);
+  }
+  view.rerender(tree('Short', '14rem'));
+  await expect.poll(() => getComputedStyle(titleNode()).maskImage).toBe('none');
+  expect(titleNode().scrollWidth).toBeLessThanOrEqual(titleNode().clientWidth);
+  view.rerender(tree(english, '14rem'));
+  await expect.poll(() => getComputedStyle(titleNode()).maskImage).toContain('linear-gradient');
+  // A layout resize without changing React props must also remove the fade.
+  titleNode().closest('button')!.parentElement!.parentElement!.style.inlineSize = '40rem';
+  await expect.poll(() => getComputedStyle(titleNode()).maskImage).toBe('none');
+});
+
+
+it('reveals Track controls on hover or focus and lets the title use idle space', async () => {
+  await page.viewport(1400, 900);
+  const title = 'A long navigation title used to verify space for hover actions';
+  const track: Track = { id: 'hover', title, areaId: 'a', sort: 0, cwd: '/tmp', agentCwd: '/tmp',
+    pinnedAt: null, closedAt: null, createdAt: 1, updatedAt: 1, ...NEUTRAL_ACTIVITY };
+  render(<ThemeProvider storage={{ getItem: () => 'light', setItem: () => undefined }}>
+    <div style={{ inlineSize: '14rem' }}><TrackRow track={track} variant="rail" unread onOpen={vi.fn()} onDelete={vi.fn()}
+      actions={{ areaPinned: false, onSetPinned: vi.fn(), onSetAreaPinned: vi.fn(), onMarkUnread: vi.fn() }} /></div>
+    <button type="button">Outside row</button>
+  </ThemeProvider>);
+  const outside = page.getByRole('button', { name: 'Outside row', exact: true });
+  await outside.hover();
+  const row = page.getByRole('button', { name: `Track ${title}`, exact: true });
+  const menu = page.getByRole('button', { name: `Actions for track ${title}`, exact: true });
+  const remove = page.getByRole('button', { name: `Delete ${title}`, exact: true });
+  const caption = row.element().querySelector<HTMLElement>('[title]')!;
+  await expect.poll(() => getComputedStyle(menu.element()).opacity).toBe('0');
+  await expect.poll(() => getComputedStyle(remove.element()).opacity).toBe('0');
+  const idleWidth = caption.clientWidth;
+  await row.hover();
+  await expect.poll(() => getComputedStyle(menu.element()).opacity).toBe('1');
+  await expect.poll(() => getComputedStyle(remove.element()).opacity).toBe('1');
+  expect(caption.clientWidth).toBeLessThan(idleWidth);
+  expect(caption.getBoundingClientRect().right).toBeLessThanOrEqual(menu.element().getBoundingClientRect().left);
+  await outside.click();
+  await expect.poll(() => getComputedStyle(menu.element()).opacity).toBe('0');
+  await userEvent.keyboard('{Shift>}{Tab}{/Shift}{Shift>}{Tab}{/Shift}');
+  await expect.element(menu).toHaveFocus();
+  await expect.poll(() => getComputedStyle(menu.element()).opacity).toBe('1');
+  await userEvent.keyboard('{Enter}');
+  await expect.element(page.getByRole('menuitem', { name: 'Pin globally', exact: true })).toHaveFocus();
+  expect(menu.element().getAttribute('aria-expanded')).toBe('true');
+  const status = row.element().parentElement!.querySelector('[data-nc-activity]')!.parentElement!;
+  await expect.poll(() => getComputedStyle(status).opacity).toBe('0');
+  expect(getComputedStyle(menu.element()).opacity).toBe('1');
+  await userEvent.keyboard('{Escape}');
+  await expect.element(menu).toHaveFocus();
 });

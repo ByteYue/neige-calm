@@ -4,7 +4,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider, createMemoryHistory } from '@tanstack/react-router';
-import { render } from '@testing-library/react';
+import { cleanup, render } from '@testing-library/react';
 import { page, userEvent } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -14,9 +14,10 @@ import type { ApiRequest, ApiTransportPort, ApiTransportResponse } from '../../.
 import { createUnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
 import { ThemeProvider } from '../theme/public.tsx';
 import { createAppRouter } from '../router/public.tsx';
+import { createUiPreferences, type UiPreferences } from '../providers/ui-preferences.tsx';
 import { bootTestCardRuntime } from '../router/test-card-runtime.ts';
 
-afterEach(() => { document.body.replaceChildren(); });
+afterEach(cleanup);
 
 const settlePaint = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
@@ -75,7 +76,7 @@ const REVIEW_CARD = {
 
 const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
 
-function setup(path: string, areaName = AREA.name, onRequest: (request: ApiRequest) => void = () => undefined) {
+function setup(path: string, areaName = AREA.name, onRequest: (request: ApiRequest) => void = () => undefined, uiPreferences?: UiPreferences) {
   const transport: ApiTransportPort = {
     send(request) {
       onRequest(request);
@@ -101,6 +102,7 @@ function setup(path: string, areaName = AREA.name, onRequest: (request: ApiReque
     client,
     cards: bootTestCardRuntime(),
     onSignOut: vi.fn(),
+    uiPreferences,
   });
   router.update({ history: createMemoryHistory({ initialEntries: [path] }) });
   render(<QueryClientProvider client={client}><ThemeProvider storage={{ getItem: () => null, setItem: () => undefined }}>
@@ -156,7 +158,7 @@ describe('Track mobile presentation', () => {
     await expect.element(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
     const navigation = await page.getByRole('dialog', { name: 'Tracks and settings' }).findElement();
     const settings = await page.getByRole('button', { name: 'Settings', exact: true }).findElement();
-    const currentTrack = await page.getByRole('button', { name: 'Responsive mobile UI' }).findElement();
+    const currentTrack = await page.getByRole('button', { name: 'Responsive mobile UI', exact: true }).findElement();
     expect(currentTrack.getAttribute('aria-current')).toBe('page');
     const navHeader = navigation.querySelector('[data-nc-workspace-page="tracks"] header')!;
     expect(navHeader.contains(settings)).toBe(false);
@@ -189,7 +191,7 @@ describe('Track mobile presentation', () => {
     expect(document.querySelector('main')?.hasAttribute('inert')).toBe(true);
     openerElement.focus();
     expect(document.activeElement).not.toBe(openerElement);
-    await page.getByRole('button', { name: 'Responsive mobile UI' }).click();
+    await page.getByRole('button', { name: 'Responsive mobile UI', exact: true }).click();
     expect(document.querySelector('nav[aria-label="Primary"]')).toBeNull();
 
     await opener.click();
@@ -258,7 +260,8 @@ describe('Track mobile presentation', () => {
     await expect.poll(() => document.querySelector('[data-nc-workspace-header]')).toBeNull();
     expect(mobileMenu.isConnected).toBe(false);
     await page.viewport(390, 844);
-    const restored = await page.getByRole('button', { name: 'Track actions' }).findElement();
+    await expect.poll(() => document.querySelector('[data-nc-workspace-header]')).not.toBeNull();
+    const restored = await page.getByRole('button', { name: 'Track actions', exact: true }).findElement();
     expect(restored.closest('[data-nc-workspace-header]')).not.toBeNull();
     expect(document.querySelectorAll('[data-nc-workspace-header] button[aria-label="Track actions"]')).toHaveLength(1);
     await page.getByRole('button', { name: 'Track actions' }).click();
@@ -507,7 +510,7 @@ describe('Track mobile presentation', () => {
     await page.getByRole('heading', { name: 'Frontend', exact: true }).findElement();
     expect(document.activeElement).not.toBe(document.body);
     expect(router.state.location.pathname).toBe('/track/w1');
-    expect(page.getByRole('button', { name: 'Responsive mobile UI' }).query()).toBeNull();
+    expect(page.getByRole('button', { name: 'Responsive mobile UI', exact: true }).query()).toBeNull();
     await page.getByText('No tracks in this area yet.').findElement();
     await page.getByRole('button', { name: 'Area actions' }).click();
     await page.getByRole('menuitem', { name: 'Edit area Frontend' }).click();
@@ -631,4 +634,74 @@ describe('Track mobile presentation', () => {
   });
 
 
+});
+
+
+it('clears manual unread when reopening the current Track through mobile navigation', async () => {
+  await page.viewport(390, 844);
+  const preferences = createUiPreferences();
+  preferences.setReadScope('db', 1_000);
+  const router = setup('/track/w1', AREA.name, () => undefined, preferences);
+  await openTrackNavigation();
+  await page.getByRole('button', { name: 'Actions for track Responsive mobile UI', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Mark as unread', exact: true }).click();
+  expect(preferences.isUnread('track', 'w1', 0)).toBe(true);
+  await page.getByRole('button', { name: 'Responsive mobile UI', exact: true }).click();
+  await expect.poll(() => document.querySelector('main')?.hasAttribute('inert')).toBe(false);
+  expect(router.state.location.pathname).toBe('/track/w1');
+  expect(preferences.isUnread('track', 'w1', 0)).toBe(false);
+});
+
+
+it('retains unread when a selected Track detail cannot be loaded', async () => {
+  await page.viewport(1400, 900);
+  const preferences = createUiPreferences();
+  preferences.setReadScope('db', 1_000);
+  setup('/track/w1', AREA.name, () => undefined, preferences);
+  await page.getByRole('button', { name: 'Track Remote access', exact: true }).hover();
+  await page.getByRole('button', { name: 'Actions for track Remote access', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Mark as unread', exact: true }).click();
+  expect(preferences.isUnread('track', 'w2', 0)).toBe(true);
+  await page.getByRole('button', { name: 'Track Remote access', exact: true }).click();
+  await expect.element(page.getByRole('alert')).toBeVisible();
+  expect(preferences.isUnread('track', 'w2', 0)).toBe(true);
+});
+
+
+it('acknowledges a repeated desktop selection only in the rendered Track view', async () => {
+  await page.viewport(1400, 900);
+  const preferences = createUiPreferences();
+  preferences.setReadScope('db', 1_000);
+  setup('/track/w1', AREA.name, () => undefined, preferences);
+  const group = page.getByRole('group', { name: 'area Product', exact: true });
+  await group.getByRole('button', { name: 'Track Responsive mobile UI', exact: true }).hover();
+  await group.getByRole('button', { name: 'Actions for track Responsive mobile UI', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Mark as unread', exact: true }).click();
+  expect(preferences.isUnread('track', 'w1', 0)).toBe(true);
+  await group.getByRole('button', { name: 'Track Responsive mobile UI', exact: true }).click();
+  await expect.poll(() => preferences.isUnread('track', 'w1', 0)).toBe(false);
+});
+
+
+it('keeps every mobile Track action label readable within the viewport', async () => {
+  await page.viewport(390, 844);
+  setup('/track/w1');
+  await openTrackNavigation();
+  await page.getByRole('button', { name: 'Actions for track Responsive mobile UI', exact: true }).click();
+  const menu = page.getByRole('menu', { exact: true }).element();
+  const bounds = menu.getBoundingClientRect();
+  expect(bounds.left).toBeGreaterThanOrEqual(0);
+  expect(bounds.right).toBeLessThanOrEqual(390);
+  for (const label of ['Unpin globally', 'Pin within area', 'Mark as unread']) {
+    const item = page.getByRole('menuitem', { name: label, exact: true }).element();
+    const nodes = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = nodes.nextNode()) !== null && node.textContent?.trim() !== label) { /* find the actual label */ }
+    expect(node).not.toBeNull();
+    const range = document.createRange();
+    range.selectNodeContents(node!);
+    const text = range.getBoundingClientRect();
+    expect(text.left).toBeGreaterThanOrEqual(bounds.left);
+    expect(text.right).toBeLessThanOrEqual(bounds.right);
+  }
 });

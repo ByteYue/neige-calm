@@ -168,16 +168,23 @@ export function Sidebar({
     disclosure?.scrollIntoView?.({ block: 'nearest' });
   }, [collapsed]);
 
+  const setPinned = (trackId: string, next: boolean) => {
+    void writeFeedback.run(Promise.resolve(onSetPinned(trackId, next)), writeFailureText(TRACK_PATCH_FAILURES, TRACK_PATCH_TEXT.pin));
+  };
   const rowProps = {
     // The receipt compares the overlay's completion high-water mark, not `updatedAt`
     // (which moves on every rename and pin); `null` is never unread.
     isUnread,
     onGo,
     nowMs,
-    onSetPinned: (trackId: string, next: boolean) => {
-      void writeFeedback.run(Promise.resolve(onSetPinned(trackId, next)), writeFailureText(TRACK_PATCH_FAILURES, TRACK_PATCH_TEXT.pin));
-    },
+    onSetPinned: setPinned,
     onDelete: trackConfirm.request,
+    trackActions: (track: Track) => ({
+      areaPinned: preferences.areaTrackPinned(track.areaId, track.id),
+      onSetPinned: setPinned,
+      onSetAreaPinned: (id: string, next: boolean) => preferences.setAreaTrackPinned(track.areaId, id, next),
+      onMarkUnread: (id: string) => preferences.markUnread('track', id),
+    }),
   };
 
   return (
@@ -211,7 +218,7 @@ export function Sidebar({
           <div className={styles.brandActions}>
             <DropdownMenu placement="below" button={{
               label: 'Sidebar view options', icon: <Icon name="more" />,
-              isIconOnly: true, variant: 'ghost', size: 'sm', className: styles.iconButton,
+              isIconOnly: true, variant: 'ghost', size: 'sm', className: styles.areaActionsButton,
             }}>
               <DropdownMenuSubMenu label="Hidden groups" isDisabled={hiddenGroups.length === 0}>
                 {hiddenGroups.map((group) => <DropdownMenuItem key={group.id} label={`Show ${group.title}`} onClick={group.restore} />)}
