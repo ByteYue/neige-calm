@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { ApiFailure, ApiOperation } from '../api/types.js';
 import type { McpCheckResult } from '../api/generated/wire.js';
 import {
-  NotSentError, classifyFailure, refusalText, writeFailureOf,
+  NotSentError, classifyFailure, failureReason, refusalText, writeFailureOf,
   type FailureTable, type WriteClass, type WriteText,
 } from './failure-class.js';
 
@@ -260,7 +260,7 @@ export function installConnectorOperation(draft: ConnectorInstallDraft): ApiOper
  * account of the upstream server (400/502 `mcp_setup_failed`); anything else is this fixed sentence.
  */
 export function connectorCheckFailureText(failure: ApiFailure | null): string {
-  return failure?.kind === 'http' && failure.message !== '' ? failure.message : 'The connection check could not finish. Try again.';
+  return failure?.kind === 'http' && failure.message !== '' ? failureReason(failure) : 'The connection check could not finish. Try again.';
 }
 
 /** Check is a transient POST; its body must never become a query key/cache. */
@@ -478,35 +478,33 @@ export type PluginConfigApplyResult =
 export type PluginConfigWriteError = Readonly<{
   /** The sentence to show; the kernel's own wording wherever it refused. */
   message: string;
-  /** The declared key the kernel's message named, when this form renders it; `null` puts the message on the pane. */
+  /** The declared key the refusal's `field` named, when this form renders it; `null` puts the message on the pane. */
   fieldKey: string | null;
   /** Whether `?reset=true` is the kernel's stated exit from this refusal. */
   offersReset: boolean;
 }>;
 
-/** `config.<key>: <reason>`, the shape of every schema violation. Only a key this form renders is a field match. */
-function fieldViolationOf(
-  message: string,
-  fields: readonly PluginConfigField[],
-): Readonly<{ key: string; reason: string }> | null {
-  const match = /^config\.([^\s:]+):\s*(.+)$/s.exec(message);
-  if (match === null) return null;
-  const [, key, reason] = match;
-  if (key === undefined || reason === undefined) return null;
-  return fields.some((field) => field.key === key) ? { key, reason } : null;
-}
+/** The root every config field path starts with: the kernel names a violation of key `k` as field `config.k`. */
+const CONFIG_FIELD_ROOT = 'config.';
 
 /**
  * A rejected `PATCH /config`, read through {@link PLUGIN_CONFIG_FAILURES}: an unknown outcome is the fixed sentence;
- * a refusal is the kernel's reason, on the field a schema violation names, with the `?reset=true` offer where
- * {@link PLUGIN_CONFIG_RESET_OFFERS} says it is the exit.
+ * a refusal is the kernel's reason, on the field its `field` names when this form renders that key (else on the pane,
+ * after the field's path), with the `?reset=true` offer where {@link PLUGIN_CONFIG_RESET_OFFERS} says it is the exit.
  */
 export function configWriteError(error: unknown, fields: readonly PluginConfigField[]): PluginConfigWriteError {
   const failure = writeFailureOf(error);
   const refusal = refusalText(failure, PLUGIN_CONFIG_FAILURES, PLUGIN_CONFIG_TEXT.refused);
   if (refusal === null) return { message: PLUGIN_CONFIG_TEXT.unknown, fieldKey: null, offersReset: false };
-  const violation = fieldViolationOf(refusal, fields);
-  if (violation !== null) return { message: violation.reason, fieldKey: violation.key, offersReset: false };
+  const answered = failure !== null && !(failure instanceof NotSentError) && failure.kind === 'http' ? failure : null;
+  if (answered?.field !== undefined) {
+    /* Placed on its control, the reason is shown alone; any other field stays in the refusal's sentence. */
+    const { field } = answered;
+    const key = field.startsWith(CONFIG_FIELD_ROOT) ? field.slice(CONFIG_FIELD_ROOT.length) : null;
+    return key !== null && fields.some((candidate) => candidate.key === key)
+      ? { message: answered.message, fieldKey: key, offersReset: false }
+      : { message: refusal, fieldKey: null, offersReset: false };
+  }
   const offersReset = !(failure instanceof NotSentError) && classifyFailure(failure, PLUGIN_CONFIG_RESET_OFFERS) === 'reset';
   return { message: refusal, fieldKey: null, offersReset };
 }

@@ -16,6 +16,7 @@ use crate::db::write_with_actor_events_typed;
 use crate::error::{CalmError, ErrorBody, Result};
 use crate::event::{Event, EventScope};
 use crate::ids::{ActorId, CardId, TrackId};
+use crate::json_body::JsonBody;
 use crate::model::{
     AreaKind, Card, CardRole, FolderConflict, FolderConflictKind, NewCard, NewOverlay, NewTrack,
     RequestTheme, Track, TrackDetail, TrackPatch, TrackWorkspace, TrackWorkspaceKind,
@@ -768,7 +769,7 @@ pub(crate) async fn create_track(
     actor: Actor,
     headers: HeaderMap,
     State(codex): State<CodexShellState>,
-    Json(mut request): Json<CreateTrackRequest>,
+    JsonBody(mut request): JsonBody<CreateTrackRequest>,
 ) -> Result<Response> {
     // #1817: a Claude create's availability (the cached check, at most `TTL` old, or a new check
     // of up to ~28 s) is read before the area lock below, which it must not hold; it and the
@@ -1041,13 +1042,21 @@ pub(crate) async fn resolve_template_binding(
     })
 }
 
-/// Adds only the route's error vocabulary to the shared `template_input` validation.
+/// Adds only the route's error vocabulary to the shared `template_input` validation. A violation
+/// of one key answers as that field's refusal; its path already says it is the create's input.
 fn validate_template_input_binding(
     owner: crate::plugin_host::template_input::TemplateInputOwner<'_>,
     input: Option<&serde_json::Value>,
 ) -> Result<()> {
-    crate::plugin_host::template_input::validate_template_input_binding(owner, input)
-        .map_err(|reason| CalmError::BadRequest(format!("track create: {reason}")))
+    use crate::plugin_host::template_input::InstanceViolation;
+    crate::plugin_host::template_input::validate_template_input_binding(owner, input).map_err(
+        |violation| match violation {
+            InstanceViolation::Whole(sentence) => {
+                CalmError::BadRequest(format!("track create: {sentence}"))
+            }
+            field @ InstanceViolation::Field { .. } => field.into(),
+        },
+    )
 }
 
 /// The cwd claim scan runs inside the track-create transaction, so its structured 409 has
@@ -1897,10 +1906,14 @@ fn prepare_fork_report(
             // the prose fences are checked here. Deliberately only the fence check: refusing
             // well-formed fences too would reject already-persisted source tracks.
             if let Some(markdown) = block.payload.get("markdown").and_then(|v| v.as_str()) {
+                // A 400 keeps its kind, so only its reason is wrapped; any other kind passes through.
                 crate::track_report_guard::validate_body_fences(markdown).map_err(|error| {
-                    CalmError::BadRequest(format!(
-                        "track create: invalid forked report block {block_id}: {error}"
-                    ))
+                    match error {
+                        CalmError::BadRequest(reason) => CalmError::BadRequest(format!(
+                            "track create: invalid forked report block {block_id}: {reason}"
+                        )),
+                        other => other,
+                    }
                 })?;
             }
             continue;
@@ -2619,7 +2632,7 @@ pub(crate) async fn update_track(
     State(w): State<WorkerState>,
     actor: Actor,
     Path(id): Path<String>,
-    Json(p): Json<TrackPatch>,
+    JsonBody(p): JsonBody<TrackPatch>,
 ) -> Result<Response> {
     if p.closed.is_some()
         && crate::managed_track::kernel_controls_lifecycle(&s.mcp_context, &id).await?
@@ -3463,7 +3476,7 @@ pub(crate) async fn update_track_report(
     _principal: Principal,
     actor: Actor,
     Path(id): Path<String>,
-    Json(body): Json<UpdateTrackReportBody>,
+    JsonBody(body): JsonBody<UpdateTrackReportBody>,
 ) -> Result<Response> {
     // Direct string check, NOT `to_actor_id()`: its defensive fallback maps unknown headers
     // to `ActorId::User`, which is right for attribution but wrong for gating.
@@ -3888,8 +3901,8 @@ mod tests {
             })
         }
 
-        /// The route prefix is part of every 400 body; asserted on every arm so the wrapper
-        /// cannot silently stop wrapping.
+        /// The route prefix is part of every whole-input 400 body; asserted on every arm so the
+        /// wrapper cannot silently stop wrapping.
         const ROUTE_PREFIX: &str = "track create: ";
 
         fn expect_bad_request(owner: TemplateInputOwner<'_>, input: Option<&Value>, needle: &str) {
@@ -3986,22 +3999,41 @@ mod tests {
                 Some(&json!({ "issue_url": "u", "merge_policy": "auto-merge" })),
             )
             .expect("conforming input accepted");
-            // missing required / extra key / enum still 400.
-            expect_bad_request(
+            // missing required / extra key / enum: the 400 that names the field.
+            expect_invalid_field(
                 owned(&p),
                 Some(&json!({ "merge_policy": "auto-merge" })),
                 "template_input.issue_url",
             );
-            expect_bad_request(
+            expect_invalid_field(
                 owned(&p),
                 Some(&json!({ "issue_url": "u", "ghost": true })),
                 "template_input.ghost",
             );
-            expect_bad_request(
+            expect_invalid_field(
                 owned(&p),
                 Some(&json!({ "issue_url": "u", "merge_policy": "yolo" })),
                 "template_input.merge_policy",
             );
+            // A non-object input names no key: the route's plain 400.
+            expect_bad_request(
+                owned(&p),
+                Some(&json!([])),
+                "template_input: expected a JSON object",
+            );
+        }
+
+        fn expect_invalid_field(owner: TemplateInputOwner<'_>, input: Option<&Value>, path: &str) {
+            match validate_template_input_binding(owner, input) {
+                Err(CalmError::InvalidField { field, reason }) => {
+                    assert_eq!(field, path);
+                    assert!(
+                        !reason.contains(path),
+                        "the reason does not repeat the path: {reason}"
+                    );
+                }
+                other => panic!("expected InvalidField `{path}`, got {other:?}"),
+            }
         }
     }
 

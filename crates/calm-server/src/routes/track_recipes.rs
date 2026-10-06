@@ -4,6 +4,7 @@
 
 use crate::actor::Actor;
 use crate::error::{CalmError, ErrorBody, Result};
+use crate::json_body::JsonBody;
 use crate::model::new_id;
 use crate::operation::OperationKey;
 use crate::operation::track_recipe_create_adapter::{
@@ -109,7 +110,13 @@ fn validate_recipe_body(body: &str) -> Result<()> {
         ));
     }
     crate::track_report_guard::validate_body_fences(body)
-        .map_err(|error| CalmError::BadRequest(format!("track recipe body: {error}")))?;
+        // A 400 keeps its kind, so only its reason is wrapped; any other kind passes through.
+        .map_err(|error| match error {
+            CalmError::BadRequest(reason) => {
+                CalmError::BadRequest(format!("track recipe body: {reason}"))
+            }
+            other => other,
+        })?;
     check_document(body)
         .map(|_| ())
         .map_err(|error| CalmError::BadRequest(format!("report contract header: {error}")))
@@ -206,7 +213,7 @@ pub(crate) async fn create_recipe(
     State(s): State<RouteState>,
     actor: Actor,
     headers: HeaderMap,
-    Json(body): Json<CreateRecipeBody>,
+    JsonBody(body): JsonBody<CreateRecipeBody>,
 ) -> Result<(StatusCode, Json<TrackRecipe>)> {
     require_recipe_user_actor(&actor)?;
     let idempotency_key = parse_idempotency_key_header(&headers)?;
@@ -246,7 +253,7 @@ pub(crate) async fn update_recipe(
     State(s): State<RouteState>,
     actor: Actor,
     Path(id): Path<String>,
-    Json(body): Json<UpdateRecipeBody>,
+    JsonBody(body): JsonBody<UpdateRecipeBody>,
 ) -> Result<Json<TrackRecipe>> {
     require_recipe_user_actor(&actor)?;
     validate_title(&body.title)?;

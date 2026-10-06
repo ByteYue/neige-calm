@@ -248,12 +248,15 @@ async fn git_forge_template_registers_and_track_create_binds() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("template_input.issue_number"),
-        "body={body}"
+    // The exact wire body: the field's path apart from its reason (`fe` tests feed this shape).
+    assert_eq!(
+        body,
+        json!({
+            "error": "expected type `integer` (an integer-encoded JSON number; float-encoded \
+                      values such as `1.0` are rejected)",
+            "code": "bad_request",
+            "field": "template_input.issue_number",
+        }),
     );
     assert_eq!(
         track_count_by_title(&fx.repo, "bound with invalid issue type").await,
@@ -283,13 +286,8 @@ async fn git_forge_template_registers_and_track_create_binds() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("template_input.merge_policy"),
-        "body={body}"
-    );
+    assert_eq!(body["field"], "template_input.merge_policy", "body={body}");
+    assert_eq!(body["code"], "bad_request", "body={body}");
     assert_eq!(
         track_count_by_title(&fx.repo, "bound with invalid input").await,
         0,
@@ -318,13 +316,8 @@ async fn git_forge_template_registers_and_track_create_binds() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("template_input.ghost"),
-        "body={body}"
-    );
+    assert_eq!(body["field"], "template_input.ghost", "body={body}");
+    assert_eq!(body["code"], "bad_request", "body={body}");
     assert_eq!(
         track_count_by_title(&fx.repo, "bound with extra input key").await,
         0,
