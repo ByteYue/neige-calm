@@ -39,7 +39,9 @@ const cases: ReadonlyArray<readonly [string, FailureTable<string>, ReadonlyArray
     [http(404, 'http_error'), 'unknown'], [unauthorized, 'refused'], ...lost,
   ]],
   ['POST /api/auth/login', LOGIN_FAILURES, [
-    [unauthorized, 'credentials'], [http(400), 'refused'], [http(403), 'refused'], [http(422), 'refused'], ...lost,
+    [unauthorized, 'credentials'], [http(400), 'refused'], [http(403), 'refused'], [http(422), 'refused'],
+    /* Repeated failures from one peer: refused before the credentials are read (#2132). */
+    [http(429, 'login_throttled'), 'refused'], ...lost,
   ]],
 ];
 
