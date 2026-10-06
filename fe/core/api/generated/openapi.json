@@ -5016,7 +5016,7 @@
             }
           },
           "500": {
-            "description": "Internal error; `operation_failed` when the create under this key failed and is final for it",
+            "description": "Internal error; final for this key: `operation_failed` (the create failed), `operation_stuck` (the recipe may exist)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7033,7 +7033,7 @@
             }
           },
           "500": {
-            "description": "Internal error; `operation_failed` when the create under this key failed and is final for it",
+            "description": "Internal error; final for this key: `operation_failed` (the create failed), `operation_stuck` (the card may exist)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7147,7 +7147,7 @@
             }
           },
           "500": {
-            "description": "Daemon spawn failed (rows persist; sweeper reaps within ~60s); `operation_failed` is final for this key",
+            "description": "Final for this key: `operation_failed` (spawn failed; the sweeper reaps rows), `operation_stuck` (the card may exist)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7251,7 +7251,7 @@
             }
           },
           "500": {
-            "description": "Daemon spawn failed (rows persist; sweeper reaps within ~60s); `operation_failed` is final for this key",
+            "description": "Final for this key: `operation_failed` (spawn failed; the sweeper reaps rows), `operation_stuck` (the card may exist)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7518,7 +7518,7 @@
             }
           },
           "500": {
-            "description": "Daemon spawn failed; the saga rolled back the transaction (no leaked rows); `operation_failed` is final for this key",
+            "description": "Final for this key: `operation_failed` (spawn failed, the saga rolled back), `operation_stuck` (the card may exist)",
             "content": {
               "application/json": {
                 "schema": {
