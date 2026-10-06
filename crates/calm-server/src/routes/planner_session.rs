@@ -12,7 +12,7 @@ use crate::operation::planner_harness_start_adapter::profile_mints_its_own_card;
 use crate::routes::planner_cards::{HarnessCardStart, start_harness_card};
 use crate::routes::planner_start_fence::CardStartFence;
 use crate::session_projection_repo::{
-    AgentProvider, CardConversation, WorkerSessionKind, WorkerSessionProjection, WorkerSessionState,
+    AgentProvider, CardConversation, WorkerSessionProjection, WorkerSessionState,
 };
 use crate::state::{CodexShellState, RouteState, WorkerState};
 
@@ -33,6 +33,7 @@ async fn require_backend(
 ) -> Result<()> {
     match provider {
         AgentProvider::Claude => s.claude_planner.check_ready().await,
+        AgentProvider::OpenCode => s.opencode_planner.check_ready().await,
         AgentProvider::Codex if cs.shared_codex_appserver.is_running() => Ok(()),
         AgentProvider::Codex => Err(CalmError::ServiceUnavailable(
             cs.shared_codex_appserver.not_running_message(),
@@ -115,14 +116,14 @@ pub(crate) async fn ensure_planner_session(
         return Err(dormant(card_id));
     }
     // A recovered harness can't issue turns without its backend; surface that instead of spawning a silently-wedged task.
-    let provider = if runtime.kind == WorkerSessionKind::SharedPlanner
-        && runtime.agent_provider == Some(AgentProvider::Claude)
-    {
-        AgentProvider::Claude
+    let provider = runtime.agent_provider.clone().unwrap_or(AgentProvider::Codex);
+    let card = s.repo.card_get(card_id.as_str()).await?
+        .ok_or_else(|| CalmError::NotFound(format!("card {card_id}")))?;
+    if let Some(binding) = crate::opencode_planner::attachment::Binding::from_payload(&card.payload)? {
+        s.opencode_planner.resolve_binding(&binding)?;
     } else {
-        AgentProvider::Codex
-    };
-    require_backend(s, cs, provider).await?;
+        require_backend(s, cs, provider).await?;
+    }
     let runtime_id = runtime.id.clone();
     let harness = crate::harness::spawn_recovered_harness(
         w.repo.clone(),
@@ -132,6 +133,7 @@ pub(crate) async fn ensure_planner_session(
         cs.shared_codex_appserver.clone(),
         s.thread_seals.clone(),
         &s.claude_planner_wiring(),
+        &s.opencode_planner_wiring(),
         &s.harness,
         &s.track_delete_locks,
         runtime.clone(),

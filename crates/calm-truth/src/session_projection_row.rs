@@ -149,10 +149,14 @@ fn runtime_kind_from_session_identity(
     match (provider, contract) {
         (WorkerProviderKind::Terminal, WorkerContract::Executor) => Ok(WorkerSessionKind::Terminal),
         (WorkerProviderKind::Codex, WorkerContract::Executor) => Ok(WorkerSessionKind::CodexCard),
-        (WorkerProviderKind::Codex | WorkerProviderKind::Claude, WorkerContract::Planner) => {
-            Ok(WorkerSessionKind::SharedPlanner)
-        }
+        (
+            WorkerProviderKind::Codex | WorkerProviderKind::Claude | WorkerProviderKind::OpenCode,
+            WorkerContract::Planner,
+        ) => Ok(WorkerSessionKind::SharedPlanner),
         (WorkerProviderKind::Claude, WorkerContract::Executor) => Ok(WorkerSessionKind::ClaudeCard),
+        (WorkerProviderKind::OpenCode, WorkerContract::Executor) => {
+            Ok(WorkerSessionKind::OpenCodeCard)
+        }
         _ => Err(WorkerSessionProjectionRepoError::Message {
             message: format!(
                 "unmappable session identity (provider={provider:?}, contract={contract:?})"
@@ -166,6 +170,7 @@ fn agent_provider_from_session_provider(provider: WorkerProviderKind) -> Option<
         WorkerProviderKind::Terminal => None,
         WorkerProviderKind::Codex => Some(AgentProvider::Codex),
         WorkerProviderKind::Claude => Some(AgentProvider::Claude),
+        WorkerProviderKind::OpenCode => Some(AgentProvider::OpenCode),
     }
 }
 
@@ -299,6 +304,23 @@ mod tests {
     }
 
     #[test]
+    fn card_runtime_from_session_maps_opencode_executor() {
+        let ws = worker_session(
+            WorkerProviderKind::OpenCode,
+            WorkerContract::Executor,
+            WorkerSessionState::Idle,
+        );
+        assert_eq!(
+            card_runtime_from_session(&ws, "card-1".into(), Some(40)).unwrap(),
+            expected_runtime(
+                WorkerSessionKind::OpenCodeCard,
+                Some(AgentProvider::OpenCode),
+                WorkerSessionState::Idle
+            )
+        );
+    }
+
+    #[test]
     fn card_runtime_from_session_maps_shared_planner() {
         let ws = worker_session(
             WorkerProviderKind::Codex,
@@ -357,6 +379,7 @@ mod tests {
         for (provider, contract) in [
             (WorkerProviderKind::Codex, WorkerContract::Validator),
             (WorkerProviderKind::Terminal, WorkerContract::Planner),
+            (WorkerProviderKind::OpenCode, WorkerContract::Validator),
         ] {
             let ws = worker_session(provider, contract, WorkerSessionState::Running);
             let err = card_runtime_from_session(&ws, "card-1".into(), None).unwrap_err();

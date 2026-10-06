@@ -21,6 +21,7 @@ use crate::event::Event;
 use crate::extract::{Json, JsonBody, Path};
 use crate::ids::CardId;
 use crate::model::CardPatch;
+use crate::opencode_planner::models::OpenCodeCatalog;
 use crate::operation::codex_adapter::card_payload_get_tx;
 use crate::planner_model::CardModelSelection;
 use crate::routes::cards::card_scope;
@@ -120,6 +121,9 @@ pub(crate) async fn set_planner_model(
             "card {id} is not a planner codex card",
         )));
     }
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Err(CalmError::Conflict("An attached OpenCode conversation follows its native agent/model/variant; change them in its original controller".into()));
+    }
     let claude = crate::harness::profile::PlannerBinding::from_card(&card, role)
         .is_some_and(|binding| binding.provider == AgentProvider::Claude);
 
@@ -127,7 +131,27 @@ pub(crate) async fn set_planner_model(
         model,
         reasoning_effort,
     } = body;
-    let advice = if claude {
+    let opencode = crate::harness::profile::PlannerBinding::from_card(&card, role)
+        .is_some_and(|binding| binding.provider == AgentProvider::OpenCode);
+    let advice = if opencode {
+        let catalog = s
+            .provider_availability
+            .opencode(
+                crate::agent_providers::Freshness::Cached,
+                &s.opencode_planner,
+            )
+            .await
+            .outcome
+            .map_err(|reason| {
+                CalmError::BadRequest(format!("card {id}: OpenCode unavailable: {reason}"))
+            })?;
+        catalog_advice(
+            CatalogSource::OpenCode(&catalog),
+            model.as_deref(),
+            reasoning_effort.as_deref(),
+        )
+        .await
+    } else if claude {
         // #1822 6′: a Claude write needs Claude ready, as its create does (#1817), so the list is
         // in hand: an effort is judged against the chosen entry, and dropped for a model the list
         // does not carry (the CLI would ignore it). Codex is not asked.
@@ -259,6 +283,7 @@ pub(super) enum CatalogSource<'a> {
     Codex(&'a CodexShellState),
     /// The Claude CLI's list, as the ready availability check cached it (#1822).
     Claude(&'a ClaudeCatalog),
+    OpenCode(&'a OpenCodeCatalog),
 }
 
 /// One catalog entry as the advice judges it.
@@ -302,6 +327,22 @@ pub(super) async fn catalog_advice(
                 })
                 .collect();
             advise(&entries, None, Some(model), reasoning_effort)
+        }
+        CatalogSource::OpenCode(catalog) => {
+            let entries: Vec<AdviceEntry<'_>> = catalog
+                .models
+                .iter()
+                .map(|model| AdviceEntry {
+                    model: &model.value,
+                    efforts: model.effort_levels.iter().map(String::as_str).collect(),
+                    default_effort: None,
+                })
+                .collect();
+            let default = catalog
+                .default_model
+                .as_deref()
+                .and_then(|name| entries.iter().find(|entry| entry.model == name));
+            advise(&entries, default, model, reasoning_effort)
         }
         CatalogSource::Claude(catalog) => {
             let entries: Vec<AdviceEntry<'_>> = catalog.models.iter().map(claude_entry).collect();

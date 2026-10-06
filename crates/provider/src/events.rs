@@ -25,6 +25,11 @@ pub struct PlannerEvent {
 pub enum PlannerEventKind {
     /// The thread was created or loaded.
     ThreadStarted,
+    /// A submitted attempt may have executed; retain the turn and never infer permission to retry.
+    SubmissionUnknown {
+        turn_id: String,
+        reason: String,
+    },
     /// The thread failed; the turn it ran fails with it.
     ThreadSystemError,
     /// The thread has nothing running.

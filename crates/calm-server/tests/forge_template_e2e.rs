@@ -1137,6 +1137,10 @@ async fn ask_answer_recovers_into_pending_queue() {
         calm_server::claude_planner::wiring::ClaudePlannerWiring::unconfigured_for_test(
             repo.clone(),
         );
+    let opencode_wiring =
+        calm_server::opencode_planner::wiring::OpenCodePlannerWiring::unconfigured_for_test(
+            repo.clone(),
+        );
     let handle = spawn_recovered_harness(
         repo,
         fx.events.clone(),
@@ -1145,6 +1149,7 @@ async fn ask_answer_recovers_into_pending_queue() {
         daemon.clone(),
         daemon.thread_seals().clone(),
         &claude_wiring,
+        &opencode_wiring,
         &registry,
         &calm_server::harness::new_track_delete_locks(),
         runtime,

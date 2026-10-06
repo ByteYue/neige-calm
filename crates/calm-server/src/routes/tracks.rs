@@ -775,6 +775,18 @@ pub(crate) async fn create_track(
     // #1817: a Claude create's availability (the cached check, at most `TTL` old, or a new check
     // of up to ~28 s) is read before the area lock below, which it must not hold; it and the
     // model list it caches (#1822) gate only a new mint, after the replay arms.
+    let opencode_availability = if request.planner_provider == AgentProvider::OpenCode {
+        Some(
+            s.provider_availability
+                .opencode(
+                    crate::agent_providers::Freshness::Cached,
+                    &s.opencode_planner,
+                )
+                .await,
+        )
+    } else {
+        None
+    };
     let claude_availability = if request.planner_provider == AgentProvider::Claude {
         Some(
             s.provider_availability
@@ -841,14 +853,23 @@ pub(crate) async fn create_track(
         })?),
         None => None,
     };
+    let opencode_catalog = match opencode_availability {
+        Some(checked) => Some(checked.outcome.map_err(|reason| {
+            CalmError::BadRequest(format!("track create: OpenCode unavailable: {reason}"))
+        })?),
+        None => None,
+    };
     let allow_cross_area_cwd = request.allow_cross_area_cwd.clone();
     // Resolve mutable catalog advice only for a new mint, never on replay; one advice for both
     // providers (#1822 6′), only the catalog's source differs.
     let model = request.model.take();
     let reasoning_effort = request.reasoning_effort.take();
-    let source = match &claude_catalog {
-        Some(catalog) => super::planner_model::CatalogSource::Claude(catalog),
-        None => super::planner_model::CatalogSource::Codex(&codex),
+    let source = if let Some(catalog) = &opencode_catalog {
+        super::planner_model::CatalogSource::OpenCode(catalog)
+    } else if let Some(catalog) = &claude_catalog {
+        super::planner_model::CatalogSource::Claude(catalog)
+    } else {
+        super::planner_model::CatalogSource::Codex(&codex)
     };
     let advice =
         super::planner_model::catalog_advice(source, model.as_deref(), reasoning_effort.as_deref())
@@ -2348,20 +2369,28 @@ async fn repoint_track_workspace(
 
     // #1791 §5.1 item 4: no Claude Planner process of this track may outlive the fence into the
     // pristine check and the move; one that cannot be stopped keeps the workspace where it is.
-    if let Err(error) =
+    if let Err(error) = async {
+        crate::opencode_planner::lifecycle::sweep_track(
+            s.repo.as_ref(),
+            &s.opencode_planner,
+            &track_id,
+        )
+        .await?;
         crate::claude_planner::lifecycle::sweep_track(s.repo.as_ref(), &s.claude_planner, &track_id)
             .await
+    }
+    .await
     {
         tracing::error!(
             track_id,
             %error,
-            "workspace repoint: a Claude Planner process of the track could not be stopped"
+            "workspace repoint: a managed Planner process of the track could not be stopped"
         );
         drop(track_guard.take());
         drop(operation_guard.take());
         restart_planner_harness_at(s, actor, track, &fence.old_workspace.path).await;
         return Err(CalmError::Conflict(
-            "a previous Claude Planner process of this track could not be stopped; the \
+            "a previous managed Planner process of this track could not be stopped; the \
              workspace was not moved"
                 .into(),
         ));
@@ -2829,6 +2858,12 @@ async fn teardown_track_deletion(
         plan.track_id.as_str(),
     )
     .await?;
+    crate::opencode_planner::lifecycle::sweep_track(
+        s.repo.as_ref(),
+        &s.opencode_planner,
+        plan.track_id.as_str(),
+    )
+    .await?;
     for terminal in &plan.terminals {
         quiesce_terminal_artifacts_for_deletion(
             Some(w.terminal_renderer.as_ref()),
@@ -3195,6 +3230,7 @@ async fn finish_prepared_track_deletion_owned(
             codex.shared_codex_appserver.clone(),
             route.thread_seals.clone(),
             route.claude_planner_wiring(),
+            route.opencode_planner_wiring(),
             worker.harness.clone(),
             route.track_delete_locks.clone(),
         );

@@ -14,6 +14,7 @@ use utoipa::{IntoParams, ToSchema};
 use crate::claude_planner::models::{ClaudeCatalog, ClaudeModel};
 use crate::codex_appserver::{CodexConfig, CodexModel};
 use crate::error::{CalmError, ErrorBody, Result};
+use crate::opencode_planner::models::{OpenCodeCatalog, OpenCodeModel};
 use crate::session_projection_repo::AgentProvider;
 use crate::state::{AppState, CodexShellState, RouteState};
 
@@ -134,6 +135,9 @@ pub enum DefaultSource {
     /// The Claude CLI's own `default` entry in its model list (#1822): `default.model` is the model
     /// it resolves to. Only for a Claude Planner.
     ClaudeCli,
+    /// The dedicated OpenCode profile configuration and connected native providers.
+    #[serde(rename = "opencode_config")]
+    OpenCodeConfig,
     /// No default could be established: the read failed, no `card_id` was supplied, or a Claude
     /// Planner's CLI is not ready.
     Unknown,
@@ -188,6 +192,7 @@ pub fn router() -> Router<AppState> {
     responses(
         (status = 200, description = "Model catalog and the default this installation follows. Codex: `source: \"live\"`, or `source: \"unavailable\"` with an empty catalog if codex cannot be reached (never an error or a hardcoded list). A Claude Planner: `source: \"live\"` with the Claude CLI's cached model list (its `default` entry as `default`, `default_source: \"claude_cli\"`), or `unavailable` with an empty catalog while Claude is not ready", body = ModelsResponse),
         (status = 404, description = "`card_id` names a card that does not exist", body = ErrorBody),
+        (status = 409, description = "An attached OpenCode session owns its native model configuration and cannot use the managed model catalog", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -207,6 +212,27 @@ pub(crate) async fn list_models(
         Some(card_id) => Some(resolve_card_workspace(&s, card_id).await?),
         None => None,
     };
+    if q.provider == Some(AgentProvider::OpenCode)
+        || card.as_ref().is_some_and(|card| card.opencode_planner)
+    {
+        let checked = s
+            .provider_availability
+            .opencode(
+                crate::agent_providers::Freshness::Cached,
+                &s.opencode_planner,
+            )
+            .await;
+        return Ok(Json(match checked.outcome {
+            Ok(catalog) => opencode_catalog(&catalog),
+            Err(_) => ModelsResponse {
+                models: Vec::new(),
+                default: ModelDefaults::default(),
+                default_source: DefaultSource::Unknown,
+                source: ModelSource::Unavailable,
+                fetched_at_ms: None,
+            },
+        }));
+    }
     // #1822: a Claude Planner's catalog is the CLI's own list, cached by its availability
     // check, and Codex is not asked. A Claude that is not ready has no list to offer.
     if q.provider == Some(AgentProvider::Claude)
@@ -317,6 +343,7 @@ fn defaults_from_config_read(config: CodexConfig) -> ModelDefaults {
 struct ResolvedCard {
     workspace: String,
     claude_planner: bool,
+    opencode_planner: bool,
 }
 
 /// The workspace path a card's codex thread runs in — the same value
@@ -327,9 +354,18 @@ async fn resolve_card_workspace(s: &RouteState, card_id: &str) -> Result<Resolve
         .card_get(card_id)
         .await?
         .ok_or_else(|| CalmError::NotFound(format!("card {card_id}")))?;
+    if crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some() {
+        return Err(CalmError::Conflict(
+            "An attached OpenCode session owns its native model configuration; the managed model catalog is unavailable".into(),
+        ));
+    }
     let claude_planner = s.write.verify_role(&card.id).is_some_and(|role| {
         crate::harness::profile::PlannerBinding::from_card(&card, role)
             .is_some_and(|binding| binding.provider == AgentProvider::Claude)
+    });
+    let opencode_planner = s.write.verify_role(&card.id).is_some_and(|role| {
+        crate::harness::profile::PlannerBinding::from_card(&card, role)
+            .is_some_and(|binding| binding.provider == AgentProvider::OpenCode)
     });
     let track = s
         .repo
@@ -341,5 +377,59 @@ async fn resolve_card_workspace(s: &RouteState, card_id: &str) -> Result<Resolve
     Ok(ResolvedCard {
         workspace: track.workspace.agent_cwd().to_string(),
         claude_planner,
+        opencode_planner,
     })
+}
+
+impl From<&OpenCodeModel> for CatalogModel {
+    fn from(model: &OpenCodeModel) -> Self {
+        Self {
+            id: model.value.clone(),
+            model: model.value.clone(),
+            resolved_model: Some(model.value.clone()),
+            display_name: model.display_name.clone(),
+            description: String::new(),
+            is_default: false,
+            supported_reasoning_efforts: model
+                .effort_levels
+                .iter()
+                .map(|variant| ReasoningEffortOption {
+                    reasoning_effort: variant.clone(),
+                    description: None,
+                })
+                .collect(),
+            default_reasoning_effort: None,
+        }
+    }
+}
+
+pub(crate) fn opencode_catalog(catalog: &OpenCodeCatalog) -> ModelsResponse {
+    let declared_default = catalog
+        .default_model
+        .as_ref()
+        .and_then(|name| catalog.models.iter().find(|model| &model.value == name));
+    ModelsResponse {
+        models: catalog.models.iter().map(CatalogModel::from).collect(),
+        default: ModelDefaults {
+            model: catalog.default_model.clone(),
+            reasoning_effort: None,
+            supported_reasoning_efforts: declared_default.map(|model| {
+                model
+                    .effort_levels
+                    .iter()
+                    .map(|variant| ReasoningEffortOption {
+                        reasoning_effort: variant.clone(),
+                        description: None,
+                    })
+                    .collect()
+            }),
+        },
+        default_source: if catalog.default_model.is_some() {
+            DefaultSource::OpenCodeConfig
+        } else {
+            DefaultSource::Unknown
+        },
+        source: ModelSource::Live,
+        fetched_at_ms: Some(catalog.fetched_at_ms),
+    }
 }

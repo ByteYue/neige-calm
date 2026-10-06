@@ -3,6 +3,7 @@ import { ASSISTANT_CARD_ENTRY } from './assistant.js';
 import { CLAUDE_CARD_ENTRY } from './claude.js';
 import { CODEX_CARD_ENTRY } from './codex.js';
 import { FILE_VIEWER_CARD_ENTRY } from './file-viewer.js';
+import { PLAIN_CHAT_CARD_ENTRY } from './plain-chat.js';
 import { PLANNER_CARD_ENTRY } from './planner.js';
 import { TERMINAL_CARD_ENTRY } from './terminal.js';
 import { TRACK_REPORT_CARD_ENTRY } from './track-report.js';
@@ -11,10 +12,10 @@ export const BUILTIN_CARD_ORDER = Object.freeze([
   'terminal',
   'codex',
   'planner',
-  /* After `planner` and before `claude`: the two headless conversation adapters
-     sit together, and both of them depend on `codex` — registered ahead of
-     both — refusing their markers explicitly (`codex.ts`). */
+  /* Headless conversation adapters share the codex kind; its adapter refuses
+     their markers before the registry scans these entries. */
   'assistant',
+  'plain-chat',
   'claude',
   'track-report',
   'file-viewer',
@@ -63,6 +64,7 @@ export function registerAvailableBuiltinCards(registry: CardRegistry): void {
     codex: BuiltinRegistrar.of(CODEX_CARD_ENTRY),
     planner: BuiltinRegistrar.of(PLANNER_CARD_ENTRY),
     assistant: BuiltinRegistrar.of(ASSISTANT_CARD_ENTRY),
+    'plain-chat': BuiltinRegistrar.of(PLAIN_CHAT_CARD_ENTRY),
     claude: BuiltinRegistrar.of(CLAUDE_CARD_ENTRY),
     'track-report': BuiltinRegistrar.of(TRACK_REPORT_CARD_ENTRY),
     'file-viewer': BuiltinRegistrar.of(FILE_VIEWER_CARD_ENTRY),

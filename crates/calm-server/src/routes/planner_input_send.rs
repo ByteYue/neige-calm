@@ -159,6 +159,17 @@ pub(crate) async fn send_planner_input_keyed(
         )));
     }
 
+    if !attachments.is_empty() {
+        crate::planner_attachments::require_image_input(&card, role)?;
+    }
+    if replaces_turn.is_some()
+        && crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?.is_some()
+    {
+        return Err(CalmError::PlannerTurnNotReplaceable(
+            "An attached OpenCode session cannot replace native history; continue with a new message in its original session".into(),
+        ));
+    }
+
     // Decided before anything with an effect: a retry's attachments are already bound, and a lazy
     // restart would recover a runtime this request no longer needs. A plain send hashes exactly as
     // before `replaces_turn` existed, so its stored keys still match.
@@ -194,6 +205,7 @@ pub(crate) async fn send_planner_input_keyed(
         None => super::planner_session::ensure_planner_session(s, w, cs, &card.id, &actor).await?,
         Some(_) => live_planner_harness(s, &card.id).await?,
     };
+    harness.check_external_submission().await?;
     let track = s
         .repo
         .track_get(card.track_id.as_str())

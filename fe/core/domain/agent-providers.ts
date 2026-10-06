@@ -6,6 +6,13 @@ import { agentProviderSchema, type AgentProvider } from '../api/schemas.js';
 import type { ApiOperation } from '../api/types.js';
 import type { ProbeText } from './read-failure.js';
 
+/** The declared Planner providers, in creation-menu order. Plain chats and task workers have their own contracts. */
+export const PLANNER_PROVIDERS = Object.freeze(['codex', 'claude', 'opencode'] as const satisfies readonly AgentProvider[]);
+
+export const PLANNER_PROVIDER_LABELS: Readonly<Record<AgentProvider, string>> = Object.freeze({
+  codex: 'Codex', claude: 'Claude', opencode: 'OpenCode',
+});
+
 const checkedAtSchema = z.number();
 
 /**
@@ -36,12 +43,13 @@ export const RECHECK_TEXT: ProbeText = Object.freeze({ answered: 'The recheck fa
 
 /**
  * Whether track create refuses `provider` while it is not `ready` (#1817), and so whether a picker may
- * offer it then. Claude: refused with the reason. Codex: never refused — its create answers 201 during a
+ * offer it then. Claude and OpenCode: refused with the reason. Codex: never refused — its create answers 201 during a
  * daemon outage (#293), and the Planner runs once Codex is back.
  */
 export const CREATE_REFUSED_WHEN_UNAVAILABLE: Readonly<Record<AgentProvider, boolean>> = Object.freeze({
   codex: false,
   claude: true,
+  opencode: true,
 });
 
 /**

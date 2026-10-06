@@ -16,6 +16,7 @@ use utoipa::ToSchema;
 
 use crate::claude_planner::availability::ClaudeReadiness;
 use crate::claude_planner::config::ClaudePlannerHost;
+use crate::opencode_planner::{config::OpenCodePlannerHost, models::OpenCodeCatalog};
 use crate::session_projection_repo::AgentProvider;
 use crate::shared_codex_appserver::SharedCodexAppServer;
 
@@ -184,6 +185,7 @@ impl<T: Clone> Slot<T> {
 pub struct ProviderAvailabilityCache {
     codex: Slot<Verdict>,
     claude: Slot<ClaudeReadiness>,
+    opencode: Slot<std::result::Result<std::sync::Arc<OpenCodeCatalog>, String>>,
 }
 
 impl ProviderAvailabilityCache {
@@ -194,6 +196,7 @@ impl ProviderAvailabilityCache {
         provider: &AgentProvider,
         freshness: Freshness,
         claude: &ClaudePlannerHost,
+        opencode: &OpenCodePlannerHost,
         codex: &SharedCodexAppServer,
     ) -> Checked {
         match provider {
@@ -209,6 +212,20 @@ impl ProviderAvailabilityCache {
                 }
             }
             AgentProvider::Claude => self.claude(freshness, claude).await.checked(),
+            AgentProvider::OpenCode => {
+                let stamped = self.opencode(freshness, opencode).await;
+                Checked {
+                    provider: AgentProvider::OpenCode,
+                    verdict: match stamped.outcome {
+                        Ok(_) => Verdict::Ready,
+                        Err(reason) if opencode.configured().is_err() => {
+                            Verdict::NotConfigured(reason)
+                        }
+                        Err(reason) => Verdict::Unavailable(reason),
+                    },
+                    checked_at_ms: stamped.checked_at_ms,
+                }
+            }
         }
     }
 
@@ -227,18 +244,32 @@ impl ProviderAvailabilityCache {
             .await
     }
 
-    /// Every provider: Codex, then Claude.
+    pub async fn opencode(
+        &self,
+        freshness: Freshness,
+        host: &OpenCodePlannerHost,
+    ) -> Stamped<std::result::Result<std::sync::Arc<OpenCodeCatalog>, String>> {
+        self.opencode
+            .get(freshness, |_| async {
+                host.catalog().await.map_err(|e| e.to_string())
+            })
+            .await
+    }
+
+    /// Every provider, in the declared UI order.
     pub async fn all(
         &self,
         freshness: Freshness,
         claude: &ClaudePlannerHost,
+        opencode: &OpenCodePlannerHost,
         codex: &SharedCodexAppServer,
     ) -> Vec<Checked> {
-        let (codex_checked, claude_checked) = tokio::join!(
-            self.get(&AgentProvider::Codex, freshness, claude, codex),
-            self.get(&AgentProvider::Claude, freshness, claude, codex),
+        let (codex_checked, claude_checked, opencode_checked) = tokio::join!(
+            self.get(&AgentProvider::Codex, freshness, claude, opencode, codex),
+            self.get(&AgentProvider::Claude, freshness, claude, opencode, codex),
+            self.get(&AgentProvider::OpenCode, freshness, claude, opencode, codex),
         );
-        vec![codex_checked, claude_checked]
+        vec![codex_checked, claude_checked, opencode_checked]
     }
 
     /// Fixtures only: see [`Slot::age_past_ttl_for_test`].
@@ -246,6 +277,7 @@ impl ProviderAvailabilityCache {
     pub async fn age_past_ttl_for_test(&self) {
         self.codex.age_past_ttl_for_test().await;
         self.claude.age_past_ttl_for_test().await;
+        self.opencode.age_past_ttl_for_test().await;
     }
 }
 
@@ -277,7 +309,12 @@ pub fn spawn_boot_check(state: &crate::state::AppState) -> tokio::task::JoinHand
     tokio::spawn(async move {
         for checked in route
             .provider_availability
-            .all(Freshness::Recheck, &route.claude_planner, &codex)
+            .all(
+                Freshness::Recheck,
+                &route.claude_planner,
+                &route.opencode_planner,
+                &codex,
+            )
             .await
         {
             if let Verdict::Unavailable(reason) = &checked.verdict {

@@ -1,5 +1,6 @@
 import type { CardComponentProps, CardEntry, KernelCardInput } from '../registry.js';
 import { isAssistantHarnessPayload } from './assistant.ts';
+import { isPlainChatPayload } from './plain-chat.ts';
 import { isPlannerHarnessPayload } from './planner.ts';
 import { TerminalCardView } from './terminal-card.tsx';
 import { terminalSessionFromCard, cwdFromPayload, type TerminalCard } from './terminal.ts';
@@ -21,11 +22,6 @@ export type CodexCard = Readonly<{
 }>;
 
 const CODEX_FALLBACK_TITLE = 'codex';
-
-export function isPlainChatPayload(payload: unknown): boolean {
-  return typeof payload === 'object' && payload !== null
-    && (payload as { harness_profile?: unknown }).harness_profile === 'plain_chat';
-}
 
 export const CODEX_CARD_ENTRY = Object.freeze({
   type: 'codex',

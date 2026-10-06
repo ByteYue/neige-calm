@@ -80,6 +80,10 @@ impl Wiring {
                 calm_server::claude_planner::config::ClaudePlannerHost::unconfigured_scratch()
                     .unwrap(),
             ),
+            opencode_planner: Arc::new(
+                calm_server::opencode_planner::config::OpenCodePlannerHost::unconfigured_scratch()
+                    .unwrap(),
+            ),
             activity_wake: calm_server::track_activity::ActivityWake::detached(),
         }
         .into_app_state()

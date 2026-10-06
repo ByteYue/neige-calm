@@ -336,6 +336,7 @@ fn install_failing_planner_start_runtime(boot: &mut Boot) {
                 boot.state.track_area_cache.clone(),
                 None,
                 boot.state.claude_planner_wiring().host,
+                boot.state.opencode_planner_wiring().host,
             ),
         });
     let completion = OperationCompletionBus::new();

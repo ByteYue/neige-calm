@@ -35,6 +35,9 @@ use crate::harness::queue::{
 use crate::harness::snapshot::{HarnessPhaseTag, HarnessSnapshot, IssuedInputSegments, TurnBase};
 use crate::harness::state::{HarnessState, IssuingKind, RunningTurn, run_status_for};
 use crate::harness::token_usage::TokenUsage;
+use crate::harness::transcript::{
+    ItemMetadata, TranscriptItem, TranscriptOwner, is_user_message_type,
+};
 use crate::ids::{ActorId, CardId, TrackId};
 use crate::model::HarnessInputSegment;
 use crate::planner_attachments::bind::BoundAttachment;
@@ -286,7 +289,7 @@ impl<'a> IssueTurnHandle<'a> {
         selection: &TurnModelSelection,
         client_user_message_id: &str,
         pending_rewind: Option<&BackendRewind>,
-    ) -> std::result::Result<String, TurnStartFailure> {
+    ) -> std::result::Result<crate::planner_submission::TurnAdmission, TurnStartFailure> {
         self.backend
             .turn_start(
                 thread_id,
@@ -884,6 +887,18 @@ impl PlannerHarness {
 
     /// Why this conversation's queue is not draining, or `None`. `None` does NOT mean waiting is
     /// the right answer.
+    pub fn owns_provider_process(&self) -> bool {
+        self.inner.backend.owns_provider_process()
+    }
+    pub fn supports_steer(&self) -> bool {
+        self.inner.backend.supports_steer()
+    }
+    pub fn attached_session(&self) -> Option<crate::opencode_planner::attachment::AttachedSession> {
+        self.inner.backend.attached_session()
+    }
+    pub async fn check_external_submission(&self) -> Result<()> {
+        self.inner.backend.check_external_submission().await
+    }
     pub async fn issuance_block(&self) -> Option<String> {
         self.inner.issuance_block.lock().await.clone()
     }
@@ -1013,6 +1028,22 @@ impl PlannerHarness {
         *self.inner.interrupt_deadline.lock().await = None;
         persist_snapshot(&self.inner).await?;
         Ok((old_phase, tag))
+    }
+
+    /// Fixtures advance an actual running turn past the configured duration and invoke
+    /// the production watchdog, preserving its native correlation and permissions.
+    #[cfg(feature = "fixtures")]
+    pub async fn expire_turn_duration_for_test(&self) -> Result<()> {
+        let mut state = self.inner.state.lock().await;
+        let HarnessState::TurnRunning { started_at, .. } = &mut *state else {
+            return Err(CalmError::Conflict(
+                "Fixture requires an actual running turn".into(),
+            ));
+        };
+        *started_at =
+            Instant::now() - self.inner.config.max_turn_duration - Duration::from_millis(1);
+        drop(state);
+        watchdog_tick(&self.inner).await
     }
 
     /// Permanently stop this harness from issuing turns; in replay mode the app-server is a stub
@@ -1440,7 +1471,7 @@ async fn handle_steer(
     // runs as the next turn.
     if !inner.backend.supports_steer() {
         return Ok(Err(SteerRefused::NotTaken {
-            message: "this Planner's provider (Claude) cannot take messages into a running \
+            message: "this conversation's provider cannot take messages into a running \
                       turn; it stays queued"
                 .into(),
             phase,
@@ -1514,6 +1545,7 @@ async fn handle_steer(
                 &thread_id,
                 entry_id.as_str(),
                 &segments,
+                None,
             )
             .await
             {
@@ -1949,6 +1981,22 @@ async fn on_notification(
         return persist_snapshot(inner).await;
     }
     match kind {
+        PlannerEventKind::SubmissionUnknown { turn_id, reason } => {
+            if inner
+                .backend
+                .active_turn_id_for_thread(thread_id.as_deref().unwrap_or_default())
+                .as_deref()
+                != Some(turn_id.as_str())
+            {
+                return Ok(());
+            }
+            *inner.issuance_block.lock().await = Some(reason);
+            *inner.issued_turn_id.lock().await = Some(turn_id.clone());
+            *inner.state.lock().await = HarnessState::TurnRunning {
+                turn_id,
+                started_at: Instant::now(),
+            };
+        }
         PlannerEventKind::Approval { method } => {
             tracing::warn!(
                 method,
@@ -1996,7 +2044,13 @@ async fn on_notification(
                 } => active == &turn_id,
                 HarnessState::Compacting { .. } => last_seen.as_deref() != Some(turn_id.as_str()),
                 HarnessState::Idle => last_seen.is_none(),
-                HarnessState::Resumed { .. } => last_seen.as_deref() == Some(turn_id.as_str()),
+                HarnessState::Resumed { .. } => {
+                    last_seen.as_deref() == Some(turn_id.as_str())
+                        || (inner.backend.accepts_recovered_turn(
+                            thread_id.as_deref().unwrap_or_default(),
+                            &turn_id,
+                        ))
+                }
                 _ => false,
             };
             if !accept {
@@ -2084,6 +2138,8 @@ async fn on_notification(
                     );
                     return persist_snapshot(inner).await;
                 }
+                *inner.issuance_block.lock().await = None;
+                *inner.projection_client_id.lock().await = None;
                 *inner.last_turn_id.lock().await = Some(target_turn_id.clone());
                 *inner.state.lock().await = HarnessState::TurnCompleted {
                     last_turn_id: target_turn_id,
@@ -2134,6 +2190,8 @@ async fn on_notification(
                 );
                 return persist_snapshot(inner).await;
             }
+            *inner.issuance_block.lock().await = None;
+            *inner.projection_client_id.lock().await = None;
             *inner.last_turn_id.lock().await = Some(turn_id.clone());
             *inner.state.lock().await = HarnessState::TurnCompleted {
                 last_turn_id: turn_id.clone(),
@@ -2246,69 +2304,30 @@ async fn on_notification(
             } else {
                 None
             };
-            let item_db_id = match (projection_client_id.as_deref(), phase) {
-                (Some(client_id), ItemPhase::Completed) => {
-                    let upgraded = match item_uuid.as_deref() {
-                        Some(codex_item_id) => {
-                            inner
-                                .repo
-                                .transcript_projection_upgrade(
-                                    inner.card_id.as_str(),
-                                    client_id,
-                                    turn_id.as_deref(),
-                                    codex_item_id,
-                                    &params_json,
-                                )
-                                .await?
-                        }
-                        None => None,
-                    };
-                    match upgraded {
-                        Some(row_id) => row_id,
-                        None => {
-                            insert_item_row(
-                                inner,
-                                &thread_id,
-                                turn_id.as_deref(),
-                                item_uuid.as_deref(),
-                                item_type.as_deref(),
-                                method,
-                                &params_json,
-                                legacy_segments_json.as_deref(),
-                            )
-                            .await?
-                        }
-                    }
-                }
-                (Some(client_id), ItemPhase::Started)
-                    if inner
-                        .repo
-                        .transcript_projection_id(inner.card_id.as_str(), client_id)
-                        .await?
-                        .is_some() =>
-                {
-                    tracing::debug!(
-                        worker_session_id = %inner.worker_session_id,
-                        card_id = %inner.card_id,
-                        client_id,
-                        "planner harness skipping item/started echo of a projected user message"
-                    );
-                    return persist_snapshot(inner).await;
-                }
-                _ => {
-                    insert_item_row(
-                        inner,
-                        &thread_id,
-                        turn_id.as_deref(),
-                        item_uuid.as_deref(),
-                        item_type.as_deref(),
-                        method,
-                        &params_json,
-                        legacy_segments_json.as_deref(),
-                    )
+            if phase == ItemPhase::Started
+                && let Some(client_id) = projection_client_id.as_deref()
+                && inner
+                    .repo
+                    .transcript_projection_id(inner.card_id.as_str(), client_id)
                     .await?
-                }
-            };
+                    .is_some()
+            {
+                return persist_snapshot(inner).await;
+            }
+            let item_db_id = transcript_owner(inner)
+                .record(&TranscriptItem {
+                    thread_id: &thread_id,
+                    metadata: ItemMetadata {
+                        turn_id: turn_id.as_deref(),
+                        item_uuid: item_uuid.as_deref(),
+                        item_type: item_type.as_deref(),
+                        method,
+                    },
+                    params_json: &params_json,
+                    legacy_segments_json: legacy_segments_json.as_deref(),
+                    projection_client_id: projection_client_id.as_deref(),
+                })
+                .await?;
             live_reply::on_item(live, phase, &params);
             if phase == ItemPhase::Completed && legacy_segments_json.is_some() {
                 *inner.legacy_issued_input_segments.lock().await = None;
@@ -2444,40 +2463,18 @@ fn item_turn_id(params: &Value) -> Option<&str> {
         .or_else(|| params.get("turnId").and_then(Value::as_str))
 }
 
-/// Live codex sends `userMessage`; the kernel stores `item.type` verbatim and tests have used snake case.
-pub(super) fn is_user_message_type(item_type: Option<&str>) -> bool {
-    matches!(item_type, Some("userMessage" | "user_message"))
-}
-
-/// One transcript row for a codex `item/*` notification. `input_segments` is NULL for every
-/// turn this binary issued (they live on the projection row); `legacy_segments_json` is the
-/// exception for an older binary's in-flight turn.
-#[allow(clippy::too_many_arguments)]
-async fn insert_item_row(
-    inner: &Arc<Inner>,
-    thread_id: &str,
-    turn_id: Option<&str>,
-    item_uuid: Option<&str>,
-    item_type: Option<&str>,
-    method: &str,
-    params_json: &str,
-    legacy_segments_json: Option<&str>,
-) -> Result<i64> {
-    Ok(inner
-        .repo
-        .harness_item_insert(
-            &inner.worker_session_id,
-            inner.card_id.as_str(),
-            inner.track_id.as_str(),
-            thread_id,
-            turn_id,
-            item_uuid,
-            item_type,
-            method,
-            params_json,
-            legacy_segments_json,
-        )
-        .await?)
+fn transcript_owner(inner: &Inner) -> TranscriptOwner<'_> {
+    TranscriptOwner {
+        repo: inner.repo.as_ref(),
+        events: &inner.events,
+        write: crate::state::WriteContext::new(
+            inner.card_role_cache.clone(),
+            inner.track_area_cache.clone(),
+        ),
+        worker_session_id: &inner.worker_session_id,
+        card_id: inner.card_id.as_str(),
+        track_id: inner.track_id.as_str(),
+    }
 }
 
 async fn emit_item_added(
@@ -2488,29 +2485,18 @@ async fn emit_item_added(
     turn_id: Option<String>,
     method: String,
 ) -> Result<()> {
-    let scope = harness_event_scope(inner, "harness.item.added");
-    inner
-        .repo
-        .log_pure_event(
-            ActorId::Kernel,
-            scope,
-            None,
-            &inner.events,
-            &inner.card_role_cache,
-            &inner.track_area_cache,
-            Event::HarnessItemAdded {
-                worker_session_id: inner.worker_session_id.clone(),
-                card_id: inner.card_id.clone(),
-                track_id: inner.track_id.clone(),
-                item_db_id,
-                item_uuid,
-                item_type,
-                turn_id,
-                method,
+    transcript_owner(inner)
+        .announce(
+            harness_event_scope(inner, "harness.item.added"),
+            item_db_id,
+            &ItemMetadata {
+                turn_id: turn_id.as_deref(),
+                item_uuid: item_uuid.as_deref(),
+                item_type: item_type.as_deref(),
+                method: &method,
             },
         )
-        .await?;
-    Ok(())
+        .await
 }
 
 /// The drained batch, written to the transcript BEFORE `turn/start` goes out, in the shape
@@ -2521,8 +2507,14 @@ async fn write_projection_row(
     thread_id: &str,
     client_id: &str,
     segments: &[HarnessInputSegment],
+    entries: &[QueueEntry],
 ) -> Result<i64> {
-    let item_db_id = insert_projection_row(inner, thread_id, client_id, segments).await?;
+    let proof = inner
+        .backend
+        .claims_queued_batch()
+        .then(|| super::submission_recovery::claimed_queue_entries(entries));
+    let item_db_id =
+        insert_projection_row(inner, thread_id, client_id, segments, proof.as_ref()).await?;
     // The existing per-row event, so every client refetches the transcript now rather than at the echo.
     emit_item_added(
         inner,
@@ -2543,6 +2535,7 @@ async fn insert_projection_row(
     thread_id: &str,
     client_id: &str,
     segments: &[HarnessInputSegment],
+    proof: Option<&Value>,
 ) -> Result<i64> {
     let stale = inner
         .repo
@@ -2564,7 +2557,7 @@ async fn insert_projection_row(
         .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "item": {
             "id": client_id,
             "clientId": client_id,
@@ -2573,6 +2566,9 @@ async fn insert_projection_row(
         },
         "_projection": true,
     });
+    if let Some(proof) = proof {
+        params["calmQueueEntries"] = proof.clone();
+    }
     let params_json = serde_json::to_string(&params)?;
     let input_segments = serde_json::to_string(segments)?;
     let item_db_id = inner
@@ -3222,7 +3218,7 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
     let pending_rewind = inner.pending_rewind.lock().await.clone();
     let issued = async {
         // Written before `turn/start` goes out, so the row says what codex is told.
-        write_projection_row(inner, &thread_id, client_id.as_str(), &segments)
+        write_projection_row(inner, &thread_id, client_id.as_str(), &segments, &drained)
             .await
             .map_err(IssueFailure::ProjectionWrite)?;
         let turn = IssueTurnHandle::from_reconciliation(inner)
@@ -3238,6 +3234,21 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
         Ok::<_, IssueFailure>(turn)
     }
     .await;
+    // An unknown external attempt is an admitted local turn, never a retryable batch.
+    let (issued, unknown_reason) = match issued {
+        Ok(crate::planner_submission::TurnAdmission::Accepted { turn_id }) => (Ok(turn_id), None),
+        Ok(crate::planner_submission::TurnAdmission::Unknown { turn_id, reason }) => {
+            (Ok(turn_id), Some(reason))
+        }
+        Ok(crate::planner_submission::TurnAdmission::Rejected { reason }) => (
+            Err(IssueFailure::TurnStart(TurnStartFailure::Refused {
+                error: CalmError::PlannerProviderRefused(reason.clone()),
+                reader: reason,
+            })),
+            None,
+        ),
+        Err(error) => (Err(error), None),
+    };
     match issued {
         Ok(turn_id) => {
             tracing::debug!(
@@ -3251,13 +3262,20 @@ async fn maybe_issue_turn(inner: &Arc<Inner>) -> Result<()> {
             );
             // A turn that went out ends the run of refusals, so the notice and
             // the clock behind it both go with it.
-            *inner.issuance_block.lock().await = None;
+            *inner.issuance_block.lock().await = unknown_reason.clone();
             *inner.refusing_since.lock().await = None;
             *inner.last_turn_id.lock().await = Some(turn_id.clone());
             *inner.issued_turn_id.lock().await = Some(turn_id.clone());
             *inner.issued_turn_head.lock().await = diff.current_head.clone();
             // Cleared in the same snapshot that empties the queue, so no restart can pair this key with a later batch.
             *inner.projection_client_id.lock().await = None;
+            if unknown_reason.is_some() {
+                *inner.projection_client_id.lock().await = Some(client_id.clone());
+                *inner.state.lock().await = HarnessState::TurnRunning {
+                    turn_id: turn_id.clone(),
+                    started_at: Instant::now(),
+                };
+            }
             // Known gap (#1923): a crash between this start and the snapshot write below replays the
             // cut on restart. Codex answers `turn not found` (applied); the Claude CLI guard fails that
             // one turn loudly. Either way the cut is then consumed and later turns are unaffected.
@@ -3548,7 +3566,7 @@ async fn watchdog_tick(inner: &Arc<Inner>) -> Result<()> {
             _ => false,
         }
     };
-    if resume_elapsed {
+    if resume_elapsed && !inner.backend.has_unresolved_submission().await? {
         let mut state = inner.state.lock().await;
         if let HarnessState::Resumed { resumed_at } = &*state
             && Instant::now().duration_since(*resumed_at) >= inner.config.resumed_reconcile_budget
@@ -3636,6 +3654,9 @@ async fn issue_interrupt_for_turn(
     target_turn_id: String,
     reason: String,
 ) -> Result<()> {
+    if !inner.backend.supports_interrupt() {
+        return Ok(());
+    }
     let Some(thread_id) = inner.thread_id.read().await.clone() else {
         return Ok(());
     };

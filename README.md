@@ -36,7 +36,8 @@ A Track can finish once, like fixing an issue, or remain useful across repeated 
 ## What is here today
 
 - **Areas and Tracks** — separate long-lived context from individual streams of work.
-- **Planning and execution** — choose Codex or a configured Claude Planner to plan tasks, dispatch workers, and react to results. Tracks are open or closed; tasks retain their own execution and verification states.
+- **Planning and execution** — choose Codex, a configured Claude Planner, or an [OpenCode Planner](docs/opencode-planner.md) to plan tasks, dispatch workers, and react to results. Tracks are open or closed; tasks retain their own execution and verification states.
+- **Existing OpenCode conversations** — [connect an original session](docs/opencode-existing-sessions.md) from a registered local server, view its history and progress, and continue operational questions from a Track.
 - **Durable Reports** — block documents with stable IDs and revisions, supporting prose, tasks, tables, candlestick charts, sandboxed app views, and links that open workspace files in the Track.
 - **Track workspaces** — attach a Git repository to create a dedicated Track worktree, or let the kernel provision a managed workspace. Codex and Claude tasks run one at a time in the Track checkout.
 - **Governed execution** — kernel-enforced role, scope, lifecycle, review, and gate boundaries around agent writes and side effects.

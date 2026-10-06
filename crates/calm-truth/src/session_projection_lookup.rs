@@ -46,8 +46,8 @@ pub async fn resolve_session_for_thread(
             repo.session_projection_active_by_thread(AgentProvider::Codex, thread_id)
                 .await?
         }
-        AgentProvider::Claude => {
-            repo.session_projection_active_by_session(AgentProvider::Claude, thread_id)
+        AgentProvider::Claude | AgentProvider::OpenCode => {
+            repo.session_projection_active_by_session(provider.clone(), thread_id)
                 .await?
         }
     };

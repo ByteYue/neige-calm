@@ -3,9 +3,9 @@
 /**
  * Semantic identity of an event producer.
  */
-export type ActorId = { "kind": "User" } | { "kind": "Kernel" } | { "kind": "KernelDispatcher" } | { "kind": "Plugin", "id": string } | { "kind": "AiPlanner", "id": CardId } | { "kind": "AiCodex", "id": CardId } | { "kind": "AiClaude", "id": CardId } | { "kind": "AiPlannerSession", "id": WorkerSessionId } | { "kind": "AiCodexSession", "id": WorkerSessionId } | { "kind": "AiClaudeSession", "id": WorkerSessionId };
+export type ActorId = { "kind": "User" } | { "kind": "Kernel" } | { "kind": "KernelDispatcher" } | { "kind": "Plugin", "id": string } | { "kind": "AiPlanner", "id": CardId } | { "kind": "AiCodex", "id": CardId } | { "kind": "AiClaude", "id": CardId } | { "kind": "AiPlannerSession", "id": WorkerSessionId } | { "kind": "AiCodexSession", "id": WorkerSessionId } | { "kind": "AiClaudeSession", "id": WorkerSessionId } | { "kind": "AiOpenCodeSession", "id": WorkerSessionId };
 
-export type AgentProvider = "codex" | "claude";
+export type AgentProvider = "codex" | "claude" | "opencode";
 
 export type Area = { id: AreaId, name: string, color: string, sort: number, kind: AreaKind, 
 /**
@@ -103,6 +103,10 @@ export type CardRuntimeView = { worker_session_id: string, kind: WorkerSessionKi
  * When the card's last non-interrupted turn ended, or absent when it has none.
  */
 last_turn_completed_ms?: number, };
+
+export type ConnectionSummary = { id: string, label: string, directory: string, };
+
+export type ConnectionsResponse = { connections: Array<ConnectionSummary>, };
 
 export type DailyTrackResolved = { date: string, time_zone: string, track_id: string, };
 
@@ -835,7 +839,7 @@ export type VerifyTargetEvidence = { "kind": "refused", cwd: string, before: Sam
  */
 export type WorkerSessionId = string;
 
-export type WorkerSessionKind = "terminal" | "codex" | "claude" | "shared-spec";
+export type WorkerSessionKind = "terminal" | "codex" | "claude" | "opencode" | "shared-spec";
 
 export type WorkerSessionProjection = { id: string, card_id: string, kind: WorkerSessionKind, agent_provider: AgentProvider | null, status: WorkerSessionState, terminal_run_id: string | null, thread_id: string | null, session_id: string | null, active_turn_id: string | null, handle_state_json: unknown | null, created_at_ms: number, updated_at_ms: number, completed_at_ms: number | null, 
 /**

@@ -73,6 +73,14 @@ impl PlannerBinding {
                 let stored = payload.get(PLANNER_PROVIDER_PAYLOAD_KEY)?;
                 serde_json::from_value(stored.clone()).ok()?
             }
+            HarnessProfile::PlainChat
+                if payload
+                    .get(crate::opencode_planner::attachment::PAYLOAD_KEY)
+                    .is_some() =>
+            {
+                crate::opencode_planner::attachment::Binding::from_payload(payload).ok()??;
+                AgentProvider::OpenCode
+            }
             HarnessProfile::PlainChat | HarnessProfile::Assistant => AgentProvider::Codex,
         };
         Some(Self { profile, provider })
@@ -128,6 +136,7 @@ mod tests {
         for (value, provider) in [
             ("codex", AgentProvider::Codex),
             ("claude", AgentProvider::Claude),
+            ("opencode", AgentProvider::OpenCode),
         ] {
             assert_eq!(
                 PlannerBinding::from_card(&planner(Some(json!(value))), CardRole::Planner),

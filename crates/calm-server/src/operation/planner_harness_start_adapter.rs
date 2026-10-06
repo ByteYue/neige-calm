@@ -33,6 +33,8 @@ use crate::mcp_server::wiring::{
     mint_card_mcp_token_pair, mirror_session_mcp_token, persist_card_mcp_token_hash,
 };
 use crate::model::{Card, CardPatch, CardRole, NewCard, new_id, now_ms};
+use crate::opencode_planner::config::OpenCodePlannerHost;
+use crate::opencode_planner::wiring::OpenCodePlannerWiring;
 use crate::operation::codex_adapter::card_payload_get_tx;
 use crate::operation::planner_plugin_instructions::{
     append_plugin_instructions, plugin_documents_track,
@@ -92,6 +94,7 @@ pub struct PlannerHarnessStartAdapter {
     mcp_socket_path: Option<PathBuf>,
     per_card_mint_locks: PerCardLocks,
     claude_host: Arc<ClaudePlannerHost>,
+    opencode_host: Arc<OpenCodePlannerHost>,
 }
 
 impl PlannerHarnessStartAdapter {
@@ -106,6 +109,7 @@ impl PlannerHarnessStartAdapter {
         track_area_cache: TrackAreaCache,
         mcp_socket_path: Option<PathBuf>,
         claude_host: Arc<ClaudePlannerHost>,
+        opencode_host: Arc<OpenCodePlannerHost>,
     ) -> Self {
         Self {
             repo,
@@ -118,6 +122,7 @@ impl PlannerHarnessStartAdapter {
             mcp_socket_path,
             per_card_mint_locks: new_per_card_locks(),
             claude_host,
+            opencode_host,
         }
     }
 
@@ -128,6 +133,16 @@ impl PlannerHarnessStartAdapter {
             // Message carries the live failure and the background-retry fact; preflights stay non-blocking.
             AgentProvider::Codex => Err(self.daemon.not_running_error()),
             AgentProvider::Claude => self.claude_host.check_ready().await,
+            AgentProvider::OpenCode => self.opencode_host.check_ready().await,
+        }
+    }
+
+    fn opencode_wiring(&self, events: crate::event::EventBus) -> OpenCodePlannerWiring {
+        OpenCodePlannerWiring {
+            host: self.opencode_host.clone(),
+            plugin: self.plugin.clone(),
+            events,
+            write: WriteContext::new(self.card_role_cache.clone(), self.track_area_cache.clone()),
         }
     }
 
@@ -691,6 +706,18 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
                 )));
             }
         }
+        if defer_runtime_start {
+            // The old prompt may already have changed this workspace. A new thread cannot
+            // retire its durable evidence or attach its observer to a different thread.
+            let unresolved: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM opencode_submissions WHERE card_id = ?1 AND state IN ('prepared','sending','unknown'))",
+            ).bind(card_id.as_str()).fetch_one(&mut **tx).await?;
+            if unresolved {
+                return Err(CalmError::Conflict(
+                    "OpenCode still has an unresolved submission. Stop and reconcile it before resetting this Planner.".into(),
+                ));
+            }
+        }
         // Mint the chat card in this very transaction, so the card and its session row commit together and compensation can undo both.
         let mut post_commit_events = Vec::new();
         if let Some(seed) = payload.create_card.as_ref() {
@@ -1063,6 +1090,14 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
                     "planner harness reset: the Claude Planner predecessor's stop did not confirm"
                 );
             }
+            if provider == AgentProvider::OpenCode {
+                crate::opencode_planner::lifecycle::stop_session(
+                    self.repo.as_ref(),
+                    &self.opencode_host,
+                    &old_worker_session_id,
+                )
+                .await?;
+            }
         }
         if let Some(existing) = output_existing_thread_id(output)? {
             return Ok(AppServerInteractOutcome::MintedAndAwaited {
@@ -1104,7 +1139,7 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
                 return Err(CalmError::Conflict(message));
             }
             thread_id
-        } else if provider == AgentProvider::Claude {
+        } else if matches!(provider, AgentProvider::Claude | AgentProvider::OpenCode) {
             // #1791 §4.4: a fresh UUID names the Claude session, with no RPC; the MCP credential is minted at the first turn.
             uuid::Uuid::new_v4().to_string()
         } else {
@@ -1305,12 +1340,14 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
                         // that already exists (`--session-id`) instead of resuming it.
                         let session_id = match provider_for_tx {
                             AgentProvider::Codex => None,
-                            AgentProvider::Claude => crate::db::sqlite::session_get_tx(
-                                tx,
-                                &calm_types::worker::WorkerSessionId(worker_session_id.clone()),
-                            )
-                            .await?
-                            .and_then(|row| row.agent_session_id),
+                            AgentProvider::Claude | AgentProvider::OpenCode => {
+                                crate::db::sqlite::session_get_tx(
+                                    tx,
+                                    &calm_types::worker::WorkerSessionId(worker_session_id.clone()),
+                                )
+                                .await?
+                                .and_then(|row| row.agent_session_id)
+                            }
                         };
                         session_bind_attribution_tx(
                             tx,
@@ -1476,6 +1513,7 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
             self.daemon.clone(),
             self.seals.clone(),
             &self.claude_wiring(),
+            &self.opencode_wiring(ctx.events.clone()),
             self.repo.clone(),
             ClaudePlannerRow {
                 worker_session_id: &worker_session_id,
@@ -1495,11 +1533,14 @@ impl ProviderAdapter for PlannerHarnessStartAdapter {
         if let Some(existing) = previous_live {
             existing.shutdown().await?;
         }
+        let recovered_thread =
+            crate::harness::submission_recovery::adopt(self.repo.as_ref(), &backend, &mut snapshot)
+                .await?;
         let handle = PlannerHarness::run(PlannerHarnessParams {
             worker_session_id: worker_session_id.clone(),
             track_id: TrackId::from(track_id),
             card_id: CardId::from(card_id),
-            thread_id,
+            thread_id: recovered_thread.or(thread_id),
             repo: self.repo.clone(),
             events: ctx.events.clone(),
             card_role_cache: self.card_role_cache.clone(),
@@ -2939,6 +2980,10 @@ mod tests {
             std::sync::Arc::new(
                 crate::claude_planner::config::ClaudePlannerHost::unconfigured_scratch()
                     .expect("scratch claude planner host"),
+            ),
+            std::sync::Arc::new(
+                crate::opencode_planner::config::OpenCodePlannerHost::unconfigured_scratch()
+                    .expect("scratch OpenCode Planner host"),
             ),
         )
     }

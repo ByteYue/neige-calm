@@ -583,6 +583,9 @@ async fn mail_to_a_down_planner_is_woken_on_its_next_harness_start() {
         w.daemon.clone(),
         w.daemon.thread_seals().clone(),
         &claude,
+        &calm_server::opencode_planner::wiring::OpenCodePlannerWiring::unconfigured_for_test(
+            w.repo_dyn.clone(),
+        ),
         &w.registry,
         &new_track_delete_locks(),
         runtime,
