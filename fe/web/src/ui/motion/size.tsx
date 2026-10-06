@@ -1,6 +1,5 @@
-import { animate, type AnimationPlaybackControls } from 'motion';
 import { useEffectEvent, useLayoutEffect, useRef, type ReactNode } from 'react';
-import { readMotionTransition } from './transition.ts';
+import { readSizeTransition } from './transition.ts';
 import styles from './size.module.css';
 
 /**
@@ -13,13 +12,12 @@ export function SizeMotion({ children, motionKey }: Readonly<{ children: ReactNo
   const contentRef = useRef<HTMLDivElement>(null);
   const previousKey = useRef(motionKey);
   const naturalHeight = useRef<number | null>(null);
-  const controls = useRef<AnimationPlaybackControls | null>(null);
-  const generation = useRef(0);
+  const controls = useRef<Animation | null>(null);
   const targetHeight = useRef<number | null>(null);
 
   const clear = useEffectEvent(() => {
-    generation.current += 1;
-    controls.current?.stop();
+    // Discard even a finished effect whose native finish event is still queued.
+    controls.current?.cancel();
     controls.current = null;
     targetHeight.current = null;
     const host = hostRef.current;
@@ -34,20 +32,21 @@ export function SizeMotion({ children, motionKey }: Readonly<{ children: ReactNo
     clear();
     naturalHeight.current = to;
     if (from === to || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const transition = readMotionTransition(host, 'layout');
+    const transition = readSizeTransition(host, from, to);
     host.style.height = `${from}px`;
     host.style.overflow = 'clip';
     targetHeight.current = to;
-    const revision = generation.current;
-    const animation = animate(from, to, {
-      ...transition,
-      onUpdate: value => {
-        if (generation.current === revision) host.style.height = `${value}px`;
-      },
+    // Native height interpolation avoids a JS style write on every frame. Height still participates in layout.
+    const animation = host.animate([{ height: `${from}px` }, { height: `${to}px` }], {
+      duration: transition.duration * 1000,
+      easing: `cubic-bezier(${transition.ease.join(', ')})`,
+      fill: 'both',
     });
     controls.current = animation;
-    void Promise.resolve(animation).then(() => {
+    void animation.finished.then(() => {
       if (controls.current === animation) clear();
+    }, () => {
+      // Cancellation rejects finished; it already discarded the effect and released our styles.
     });
   });
 

@@ -43,6 +43,7 @@ function Preview() {
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={() => sample(shortText)}>短消息</button>
         <button onClick={() => sample(longText)}>长消息</button>
+        <button onClick={() => sample(longText.repeat(20))}>超长消息</button>
         <button onClick={() => setDialogOpen(true)}>打开弹窗</button>
         <button onClick={() => setOpen(!open)}>{open ? '收起对话' : '打开对话'}</button>
       </div>
