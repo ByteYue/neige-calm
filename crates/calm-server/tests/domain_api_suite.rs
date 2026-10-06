@@ -33,6 +33,8 @@ mod deferred_read_tx_deadlock_repro;
 mod dispatcher_real_auth_path;
 #[path = "cases/dispatcher_role_scope.rs"]
 mod dispatcher_role_scope;
+#[path = "cases/extractor_rejections.rs"]
+mod extractor_rejections;
 #[path = "cases/frozen_gate_vectors.rs"]
 mod frozen_gate_vectors;
 #[path = "cases/frozen_gate_vectors_transport.rs"]
@@ -61,6 +63,8 @@ mod plugin_names_migration;
 mod preview_gateway;
 #[path = "cases/repo.rs"]
 mod repo;
+#[path = "cases/request_rejections.rs"]
+mod request_rejections;
 #[path = "cases/rest_track_previews.rs"]
 mod rest_track_previews;
 #[path = "cases/role_enforcement.rs"]

@@ -3,10 +3,11 @@
 //! A Claude Planner's catalog is the Claude CLI's own model list, fetched and cached by the
 //! Claude availability check (#1822).
 
+use crate::extract::{Json, Query};
 use std::time::Duration;
 
-use axum::extract::{Query, State};
-use axum::{Json, Router, routing::get};
+use axum::extract::State;
+use axum::{Router, routing::get};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 

@@ -6,14 +6,22 @@
 //! [`FIRST_LOCKOUT`] up to [`MAX_LOCKOUT`]. The cap is deliberately low: a neighbour who fails on
 //! purpose locks the owner out of that address for at most a minute, never longer.
 //!
+//! The key is the host the TCP peer address names, not the address itself: every loopback
+//! address (all of 127.0.0.0/8, `::1`, and their `::ffff:` mappings) is one peer, and an IPv6
+//! address is keyed by its /64. Any local process can bind any 127.x source address, and one IPv6
+//! interface can pick any address in its prefix, so keying by address would hand such a peer a
+//! fresh budget per address and let [`MAX_PEERS`] of them push its throttled record out.
+//!
 //! Not covered: state is process-local and in memory (a restart forgets it, there is no persistent
-//! lockout), and the key is the TCP peer IP. Traffic that arrives through a local reverse proxy
-//! (e.g. `tailscale serve` forwarding to the listener) shares the proxy's address, so every client
-//! behind it shares one budget: a failing client throttles all of them, the owner included, for at
-//! most [`MAX_LOCKOUT`]. Forwarded-for headers are not trusted, since any client can write them.
+//! lockout). Traffic that arrives through a local reverse proxy (e.g. `tailscale serve` forwarding
+//! to the listener) shares the proxy's address, so every client behind it shares one budget: a
+//! failing client throttles all of them, the owner included, for at most [`MAX_LOCKOUT`].
+//! Forwarded-for headers are not trusted, since any client can write them. A /64 is the IPv6 key, so
+//! a holder of a wider prefix (a /48 has 65536 /64s) can still spread attempts over more than
+//! [`MAX_PEERS`] keys and push a throttled record out.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -79,11 +87,11 @@ impl LoginThrottle {
 
     /// Run `verify` for `peer` unless that peer is in a throttle window. The check, the
     /// verification and the bookkeeping happen under one lock, so a burst of parallel attempts
-    /// from one peer cannot all slip in before the first failure is recorded.
+    /// from one peer cannot all slip in before the first failure is recorded. `verify` runs under
+    /// that lock, so it must be cheap: hash before calling this, compare inside.
     pub fn attempt(&self, peer: IpAddr, verify: impl FnOnce() -> bool) -> LoginAttempt {
         let now = (self.clock)();
-        // `::ffff:a.b.c.d` is the same host as `a.b.c.d`.
-        let peer = peer.to_canonical();
+        let peer = peer_key(peer);
         let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(until) = peers.get(&peer).and_then(|f| f.locked_until)
             && now < until
@@ -106,6 +114,16 @@ impl LoginThrottle {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .len()
+    }
+}
+
+/// The host an address names: the record key. `::ffff:a.b.c.d` is `a.b.c.d`; every loopback
+/// address is `127.0.0.1`; an IPv6 address is its /64.
+fn peer_key(peer: IpAddr) -> IpAddr {
+    match peer.to_canonical() {
+        loopback if loopback.is_loopback() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & (u128::MAX << 64))),
+        v4 => v4,
     }
 }
 
@@ -178,6 +196,33 @@ mod tests {
             throttle.attempt("100.64.0.9".parse().unwrap(), || true),
             LoginAttempt::Throttled { .. }
         ));
+    }
+
+    /// The window check, `verify` and the record share one lock: of 64 parallel failing attempts
+    /// whose verification is slow enough for every other thread to reach the check meanwhile,
+    /// exactly the free budget is verified and every other attempt is throttled.
+    #[test]
+    fn parallel_attempts_from_one_peer_verify_one_at_a_time() {
+        let throttle = LoginThrottle::default();
+        let start = Arc::new(std::sync::Barrier::new(64));
+        let attempts: Vec<_> = (0..64)
+            .map(|_| {
+                let (throttle, start) = (throttle.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    throttle.attempt("100.64.0.9".parse().unwrap(), || {
+                        std::thread::sleep(Duration::from_millis(5));
+                        false
+                    })
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = attempts.into_iter().map(|t| t.join().unwrap()).collect();
+        let rejected = outcomes
+            .iter()
+            .filter(|o| **o == LoginAttempt::Rejected)
+            .count();
+        assert_eq!(rejected, FREE_FAILURES as usize, "{outcomes:?}");
     }
 
     #[test]
