@@ -83,7 +83,7 @@ impl Fixture {
     }
     async fn tool_names(&self, identity: &ToolCallIdentity) -> Vec<String> {
         let registry = crate::mcp_server::build_default_registry();
-        let mut descriptors = registry.descriptors_for_role(identity.role);
+        let mut descriptors = registry.descriptors_listed_for(identity.role);
         let scope = plugin_scope_for_track(&self.ctx, identity.track_id.as_deref()).await;
         crate::mcp_server::transport::extend_plugin_tool_descriptors_for_role(
             &self.ctx,
@@ -440,9 +440,7 @@ fn builtin_native_tools_are_served_under_their_minted_names() {
     let mut served: Vec<(String, String, Vec<CardRole>)> = registry
         .descriptors()
         .into_iter()
-        .filter_map(|d| {
-            owner(&d.name).map(|p| (p.manifest().id.clone(), d.name, d.visible_to_roles.to_vec()))
-        })
+        .filter_map(|d| owner(&d.name).map(|p| (p.manifest().id.clone(), d.name, d.roles.to_vec())))
         .collect();
     served.sort_by(|a, b| a.1.cmp(&b.1));
     let want: Vec<(String, String, Vec<CardRole>)> = NATIVE_TOOLS
@@ -486,4 +484,60 @@ fn builtin_native_tools_never_mint_a_manifest_tool_name() {
         colliding.is_empty(),
         "compiled tools mint a manifest tool's name: {colliding:?}"
     );
+}
+
+/// The natives' half of `mcp_tool_role_matrix`: with every built-in running and each native's
+/// Track in its plugin's scope, a `{}` call by every card role is refused for the role reason
+/// (the registry's gate, `-32403`) exactly when the native's declared `roles` exclude that role.
+#[tokio::test]
+async fn native_tools_refuse_exactly_the_roles_they_do_not_declare() {
+    let fx = Fixture::new().await;
+    let running = fx.host.running_plugin_ids().await;
+    for plugin in catalog() {
+        if !running.contains(&plugin.manifest().id) {
+            fx.host.enable(&plugin.manifest().id).await.unwrap();
+        }
+    }
+    let registry = crate::mcp_server::build_default_registry();
+    let mut checked = 0;
+    for plugin in catalog() {
+        let id = plugin.manifest().id.as_str();
+        // `gitforge` serves only a Track bound to it; the other built-ins serve an unbound one.
+        let track = fx.track((id == ID).then_some(ID)).await;
+        for descriptor in plugin.native.descriptors() {
+            for role in [
+                CardRole::Planner,
+                CardRole::Worker,
+                CardRole::Assistant,
+                CardRole::ReportCard,
+            ] {
+                let mut identity = fx.identity(&track);
+                identity.role = role;
+                let result =
+                    registry.lookup(&descriptor.name).unwrap()(fx.ctx.clone(), identity, json!({}))
+                        .await;
+                let error = result.as_ref().err();
+                assert_ne!(
+                    error.map(|e| e.code),
+                    Some(-32601),
+                    "{} must be served to {role:?}: {error:?}",
+                    descriptor.name
+                );
+                let refused = error.is_some_and(|e| {
+                    e.code == -32403
+                        && e.message.contains("tool requires role in [")
+                        && e.message.contains(&format!("got={role:?}"))
+                });
+                assert_eq!(
+                    refused,
+                    !descriptor.roles.contains(&role),
+                    "{} declares {:?}; {role:?}: {error:?}",
+                    descriptor.name,
+                    descriptor.roles
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 20, "anti-vacuity: {checked} native calls");
 }
