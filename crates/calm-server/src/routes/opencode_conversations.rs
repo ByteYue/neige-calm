@@ -1,4 +1,5 @@
 //! Attach an existing native operations conversation without Planner authority.
+use crate::extract::{Json, JsonBody, Path};
 use crate::{
     actor::Actor,
     db::{
@@ -7,7 +8,6 @@ use crate::{
     },
     error::{CalmError, ErrorBody, Result},
     event::{Event, EventScope},
-    extract::{Json, JsonBody, Path},
     harness::initial_snapshot_with_goal,
     model::{Card, CardRole, NewCard, TrackConversationSummary, now_ms},
     opencode_planner::attachment::{Binding, ConnectionSummary, ConnectionsResponse, PAYLOAD_KEY},
