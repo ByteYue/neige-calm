@@ -311,7 +311,7 @@ fn dispatcher_filter_matches_push_kinds() {
         head_sha: "head-sha".into(),
         merge_sha: "merge-sha".into(),
     })));
-    assert!(filter.matches(&env(Event::RatifyRequested {
+    assert!(!filter.matches(&env(Event::RatifyRequested {
         track_id: track.clone(),
         reason: "cap_exhausted".into(),
     })));
@@ -1335,10 +1335,6 @@ fn event_warrants_planner_push_covers_push_allowlist() {
             head_sha: "head-sha".into(),
             merge_sha: "merge-sha".into(),
         },
-        Event::RatifyRequested {
-            track_id: track.clone(),
-            reason: "cap_exhausted".into(),
-        },
         Event::RatifyResolved {
             track_id: track.clone(),
             decision: RatifyDecision::Grant,
@@ -1371,6 +1367,15 @@ fn event_warrants_planner_push_covers_push_allowlist() {
             forge_event.kind_tag()
         );
     }
+    // #2170: the Planner's own ratify request echoes its call and never wakes it.
+    assert!(!event_warrants_planner_push(
+        &Event::RatifyRequested {
+            track_id: track.clone(),
+            reason: "merge_hold".into(),
+        },
+        &ActorId::AiPlanner(planner.clone()),
+        &write
+    ));
     assert!(!event_warrants_planner_push(
         &Event::ForgePrDiffRead {
             track_id: track.clone(),
@@ -1673,10 +1678,7 @@ fn harness_observation_from_event_mapping_pin() {
             },
             Some("impl-parser")
         ),
-        Some(HarnessObservation::RatifyRequested {
-            track_id: track.clone(),
-            reason: "cap_exhausted".into(),
-        })
+        None
     );
     assert_eq!(
         harness_observation_from_event(
@@ -2161,9 +2163,9 @@ async fn planner_push_wiring_table() -> PlannerPushWiringTable {
                 track_id: track.clone(),
                 reason: "cap_exhausted".into(),
             },
-            ActorId::KernelDispatcher,
-            true,
-            true,
+            ActorId::AiPlanner(planner.clone()),
+            false,
+            false,
         ),
         row(
             Event::RatifyResolved {
