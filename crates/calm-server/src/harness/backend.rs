@@ -313,7 +313,7 @@ impl PlannerBackend {
     pub async fn compact_start(&self, thread_id: &str) -> Result<()> {
         match &self.0 {
             Arm::Codex(daemon) => daemon.thread_compact_start(thread_id).await,
-            Arm::Claude(_) => Err(CalmError::BadRequest(
+            Arm::Claude(_) | Arm::OpenCode(_) => Err(CalmError::BadRequest(
                 "Manual context compaction is available for Codex conversations.".into(),
             )),
         }

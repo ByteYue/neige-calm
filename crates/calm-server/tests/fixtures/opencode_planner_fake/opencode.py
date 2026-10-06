@@ -181,6 +181,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         path = url.path.split("/")
         payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+        record("native-writes.jsonl", {"method": "POST", "path": url.path, "payload": payload})
         if url.path == "/session":
             sid = "ses_" + uuid.uuid4().hex
             directory = urllib.parse.parse_qs(url.query)["directory"][0]

@@ -255,3 +255,130 @@ async fn attached_replace_turn_refuses_before_native_history_or_receipts_change(
     assert_eq!(stack.run(&card).await["phase"], "idle");
     stack.shutdown().await;
 }
+
+#[tokio::test]
+async fn attached_manual_compaction_refuses_without_native_writes_and_keeps_continuation() {
+    let fixture = Fixture::new().await;
+    let stack = Stack::boot(&fixture).await;
+    let track = stack.track(&fixture).await;
+    let card = stack.attach(&track, "compact-ownership").await;
+    for (index, (key, text)) in [
+        ("before-compact", "first audit"),
+        ("after-compact", "second audit"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        stack.wait_submit(&card).await;
+        let (status, body) = stack
+            .request(
+                "POST",
+                &format!("/api/cards/{card}/planner/input"),
+                Some(json!({"text":text})),
+                Some(key),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while stack.journals().await != vec![(SESSION.into(), "completed".into()); index + 1]
+            || stack.run(&card).await["phase"] != "turn_completed"
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "turn did not settle"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        stack.wait_submit(&card).await;
+        if key == "after-compact" {
+            break;
+        }
+        let run = stack.run(&card).await;
+        let items = stack.items(&card).await;
+        let journal = stack.journals().await;
+        let native_messages = fixture.native.0.lock().unwrap().messages.clone();
+        let native_writes = fixture.posts();
+        let (status, error) = stack
+            .request(
+                "POST",
+                &format!("/api/cards/{card}/planner/compact"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert_eq!(stack.run(&card).await, run);
+        assert_eq!(stack.items(&card).await, items);
+        assert_eq!(stack.journals().await, journal);
+        assert_eq!(fixture.native.0.lock().unwrap().messages, native_messages);
+        assert_eq!(
+            fixture.posts(),
+            native_writes,
+            "no native compact, prompt or abort"
+        );
+    }
+    assert_eq!(
+        fixture.posts().len(),
+        2,
+        "only the two explicit audit prompts"
+    );
+    stack.shutdown().await;
+}
+
+#[tokio::test]
+async fn running_foreign_turn_is_observed_but_never_stopped_or_sent_into() {
+    let fixture = Fixture::new().await;
+    {
+        let mut native = fixture.native.0.lock().unwrap();
+        native.busy = true;
+        native.messages[1] = assistant(
+            "msg_reply",
+            "msg_original",
+            "foreign partial output",
+            2,
+            false,
+        );
+    }
+    let stack = Stack::boot(&fixture).await;
+    let track = stack.track(&fixture).await;
+    let card = stack.attach(&track, "attach").await;
+    stack.wait_text(&card, "foreign partial output").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while stack.run(&card).await["attached_session"]["status"] != "running" {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "native status did not settle"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let run = stack.run(&card).await;
+    assert_eq!(run["attached_session"]["status"], "running");
+    assert_eq!(run["attached_session"]["can_submit"], false);
+    let (status, _) = stack
+        .request(
+            "POST",
+            &format!("/api/cards/{card}/planner/input"),
+            Some(json!({"text":"do another ETL"})),
+            Some("foreign-busy-input"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    for path in [
+        format!("/api/cards/{card}/planner/interrupt"),
+        format!("/api/cards/{card}/planner/reset"),
+    ] {
+        let (status, _) = stack.request("POST", &path, Some(json!({})), None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}");
+    }
+    assert!(stack.journals().await.is_empty());
+    assert!(fixture.posts().is_empty());
+    let (status, body) = stack
+        .request("DELETE", &format!("/api/cards/{card}"), None, None)
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(fixture.native.0.lock().unwrap().busy);
+    assert!(fixture.posts().is_empty());
+    stack.shutdown().await;
+    assert!(fixture.native.0.lock().unwrap().busy);
+    assert!(fixture.posts().is_empty());
+}

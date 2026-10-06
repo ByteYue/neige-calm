@@ -115,3 +115,14 @@ it.each(['unavailable', 'running'] as const)('refreshes silent %s to ready witho
   expect(requests.filter(request => request.path.includes('/harness/items'))).toHaveLength(historyReads);
   expect(requests.filter(request => request.method === 'POST')).toHaveLength(0);
 }, 10000);
+
+it('keeps manual compaction out of an idle borrowed session command menu', async () => {
+  const requests = mount(true, () => 'idle');
+  await page.getByRole('button', { name: /^Conversation iFood progress/ }).click();
+  const field = page.getByRole('combobox', { name: 'Message' });
+  await expect.element(field).toHaveAttribute('contenteditable', 'true');
+  await field.fill('/');
+  await expect.element(page.getByRole('listbox')).toBeVisible();
+  await expect.element(page.getByRole('option', { name: /Compact/ })).not.toBeInTheDocument();
+  expect(requests.filter(request => request.method !== 'GET')).toHaveLength(0);
+});

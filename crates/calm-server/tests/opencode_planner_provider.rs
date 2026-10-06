@@ -784,3 +784,6 @@ async fn opencode_rest_claim_failure_retains_projection_and_recovery_never_posts
     assert!(status.is_success(), "{status} {body}");
     stack.shutdown().await;
 }
+
+#[path = "support/opencode_planner_compact.rs"]
+mod compact_tests;

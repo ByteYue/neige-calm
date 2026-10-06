@@ -563,55 +563,6 @@ async fn native_agent_model_variant_and_identity_survive_neige_restart() {
     reboot.shutdown().await;
 }
 #[tokio::test]
-async fn running_foreign_turn_is_observed_but_never_stopped_or_sent_into() {
-    let fixture = Fixture::new().await;
-    {
-        let mut native = fixture.native.0.lock().unwrap();
-        native.busy = true;
-        native.messages[1] = assistant(
-            "msg_reply",
-            "msg_original",
-            "foreign partial output",
-            2,
-            false,
-        );
-    }
-    let stack = Stack::boot(&fixture).await;
-    let track = stack.track(&fixture).await;
-    let card = stack.attach(&track, "attach").await;
-    stack.wait_text(&card, "foreign partial output").await;
-    let run = stack.run(&card).await;
-    assert_eq!(run["attached_session"]["status"], "running");
-    assert_eq!(run["attached_session"]["can_submit"], false);
-    let (status, _) = stack
-        .request(
-            "POST",
-            &format!("/api/cards/{card}/planner/input"),
-            Some(json!({"text":"do another ETL"})),
-            Some("foreign-busy-input"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    for path in [
-        format!("/api/cards/{card}/planner/interrupt"),
-        format!("/api/cards/{card}/planner/reset"),
-    ] {
-        let (status, _) = stack.request("POST", &path, Some(json!({})), None).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{path}");
-    }
-    assert!(stack.journals().await.is_empty());
-    assert!(fixture.posts().is_empty());
-    let (status, body) = stack
-        .request("DELETE", &format!("/api/cards/{card}"), None, None)
-        .await;
-    assert!(status.is_success(), "{status} {body}");
-    assert!(fixture.native.0.lock().unwrap().busy);
-    assert!(fixture.posts().is_empty());
-    stack.shutdown().await;
-    assert!(fixture.native.0.lock().unwrap().busy);
-    assert!(fixture.posts().is_empty());
-}
-#[tokio::test]
 async fn unresolved_external_submission_is_fenced_and_never_resent_on_reboot() {
     let fixture = Fixture::new().await;
     let stack = Stack::boot(&fixture).await;
