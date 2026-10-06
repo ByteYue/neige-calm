@@ -51,9 +51,11 @@ export function EditableTitle({
 
   const begin = useCallback(() => {
     if (Date.now() < suppressClickUntil.current) return;
+    /* A fresh edit starts from the stored name, so the failure of an edit that was left or cancelled is not its. */
+    feedback.clear();
     setDraft(value);
     setEditing(true);
-  }, [value]);
+  }, [feedback, value]);
 
   const commit = useCallback((restoreFocus: boolean) => {
     if (pending.current) return;
@@ -104,18 +106,35 @@ export function EditableTitle({
     );
   }
 
+  /* The input and its failure are one focus boundary: moving into the failure's controls (Dismiss) is not leaving the
+     editor, so it neither commits nor closes it, and Escape there cancels as it does in the input. A press there keeps
+     focus in the input, which also covers browsers whose buttons take no focus on click; leaving the boundary is what
+     blurs the editor. Dismissing from the keyboard needs nothing here: the Astryx banner hands focus back to where it
+     came from, the input. */
   return (
-    <><input
+    <span
+      className={styles.editing}
+      /* No semantics of its own: the input and the alert inside keep theirs. */
+      role="presentation"
+      onMouseDown={(event) => { if (event.target !== inputRef.current) event.preventDefault(); }}
+      onBlur={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget)) return;
+        if (feedback.error === null) commit(false); else setEditing(false);
+      }}
+      /* Escape anywhere in the boundary (the input, or Dismiss after a Tab) cancels the edit. */
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault(); event.stopPropagation(); setEditing(false); restoreTitleFocus();
+      }}
+    ><input
       ref={inputRef}
       className={`${styles.input} ${className ?? ''}`}
       aria-label={inputLabel}
       value={draft}
       onChange={(event) => setDraft(event.target.value)}
-      onBlur={() => { if (feedback.error === null) commit(false); else setEditing(false); }}
       onKeyDown={(event) => {
         if (event.key === 'Enter') { event.preventDefault(); commit(true); }
-        else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setEditing(false); restoreTitleFocus(); }
       }}
-    /><OperationFeedback feedback={feedback} /></>
+    /><OperationFeedback feedback={feedback} /></span>
   );
 }

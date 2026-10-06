@@ -1280,6 +1280,85 @@
       }
     },
     "/api/calendar/tasks/{id}": {
+      "get": {
+        "tags": [
+          "calendar"
+        ],
+        "summary": "One task by id, a cancelled one included (the list leaves those out): how a client reads back an update or cancel\nwhose answer was lost.",
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The task, cancelled or not",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalendarEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`unauthorized`: no valid session cookie.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`forbidden`: the caller is not `X-Calm-Actor: user`; AI calls use the calendar tools",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found`: no calendar task with this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`service_unavailable`: the Calendar plugin is not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "calendar"
@@ -3263,7 +3342,7 @@
             }
           },
           "400": {
-            "description": "Path is not inside a git repository or file is binary/non-UTF-8",
+            "description": "Path is invalid or not inside a git repository, or the file is binary/non-UTF-8",
             "content": {
               "application/json": {
                 "schema": {
@@ -3284,6 +3363,16 @@
           },
           "403": {
             "description": "Read permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Neither the path nor its parent folder exists (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3334,7 +3423,7 @@
             }
           },
           "400": {
-            "description": "Path is not a directory or not inside a git repository",
+            "description": "Path is invalid, not a directory, or not inside a git repository",
             "content": {
               "application/json": {
                 "schema": {
@@ -3355,6 +3444,16 @@
           },
           "403": {
             "description": "Read permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Path doesn't exist (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3405,7 +3504,7 @@
             }
           },
           "400": {
-            "description": "Path doesn't exist or is not a directory",
+            "description": "Path is invalid or not a directory",
             "content": {
               "application/json": {
                 "schema": {
@@ -3426,6 +3525,16 @@
           },
           "403": {
             "description": "Read permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Path doesn't exist (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3476,7 +3585,7 @@
             }
           },
           "400": {
-            "description": "Path doesn't exist, is not a file, or is binary/non-UTF-8",
+            "description": "Path is invalid, not a file, or binary/non-UTF-8",
             "content": {
               "application/json": {
                 "schema": {
@@ -3497,6 +3606,16 @@
           },
           "403": {
             "description": "Read permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Path doesn't exist (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3552,7 +3671,7 @@
             }
           },
           "400": {
-            "description": "Path doesn't exist, is not a file, has an unsupported extension, or exceeds the image cap",
+            "description": "Path is invalid, not a file, has an unsupported extension, or exceeds the image cap",
             "content": {
               "application/json": {
                 "schema": {
@@ -3573,6 +3692,16 @@
           },
           "403": {
             "description": "Read permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Path doesn't exist (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -10786,7 +10915,7 @@
             }
           },
           "400": {
-            "description": "Path is invalid, outside the Track workspace, missing, a directory, or binary/non-UTF-8",
+            "description": "Path is invalid, outside the Track workspace, a directory, or binary/non-UTF-8",
             "content": {
               "application/json": {
                 "schema": {
@@ -10816,7 +10945,7 @@
             }
           },
           "404": {
-            "description": "Track not found",
+            "description": "Track not found (`not_found`), or the path doesn't exist in its workspace (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -10881,7 +11010,7 @@
             }
           },
           "400": {
-            "description": "Path is invalid, outside the Track workspace, missing, not a file, unsupported, or too large",
+            "description": "Path is invalid, outside the Track workspace, not a file, unsupported, or too large",
             "content": {
               "application/json": {
                 "schema": {
@@ -10911,7 +11040,7 @@
             }
           },
           "404": {
-            "description": "Track not found",
+            "description": "Track not found (`not_found`), or the path doesn't exist in its workspace (`path_not_found`)",
             "content": {
               "application/json": {
                 "schema": {
