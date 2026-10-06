@@ -97,6 +97,22 @@ impl WorkerSessionInit {
     }
 }
 
+/// Whether a fresh `planner-harness-start` on a card would lose a conversation, for a send that
+/// finds no session it can use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardConversation {
+    /// No session row, no transcript item and no start in flight: nothing ever started the card.
+    /// Whether a send may start it is the card's creator's contract, not this read's.
+    NeverStarted,
+    /// Only `failed`, completed rows with no thread and no `last_thread_id`, no transcript item,
+    /// and no start in flight: the card's starts ran and failed, and a fresh start loses nothing.
+    OnlyFailedStarts,
+    /// Nothing to preserve yet, but a `planner-harness-start` for the card has not finished.
+    StartInFlight,
+    /// A row that holds or may hold a thread, whatever its state, or a transcript item.
+    ThreadToPreserve,
+}
+
 #[async_trait]
 pub trait WorkerSessionProjectionRepo {
     /// Active = starting/running/idle/turn_pending, matching the active-per-card
@@ -124,6 +140,13 @@ pub trait WorkerSessionProjectionRepo {
         &self,
         card_id: &CardId,
     ) -> Result<Option<WorkerSessionProjection>>;
+
+    /// What a fresh start on the card would lose, read in one statement so its facts are of one
+    /// moment.
+    async fn session_projection_conversation_for_card(
+        &self,
+        card_id: &CardId,
+    ) -> Result<CardConversation>;
 
     /// Same persisted eligibility as the explicit failed-conversation restore.
     async fn session_projection_system_error_recovery_matches(
