@@ -8,6 +8,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiRequest, ApiTransportPort, ApiTransportResponse } from '../../../../core/api/types.ts';
+import type { AgentProvider } from '../../../../core/api/schemas.ts';
 import { createUnauthorizedChannel } from '../../../../core/api/unauthorized.ts';
 import { APP_BASEPATH, createAppRouter } from './public.tsx';
 import { bootTestCardRuntime } from './test-card-runtime.ts';
@@ -93,8 +94,16 @@ const NO_CATALOG = {
 /* What the grouped trigger says while a Claude pick follows the CLI's default. */
 const CLAUDE_DEFAULT_TRIGGER = "Model: Claude Opus (1M context) (this installation's default)";
 
+const OPENCODE_CATALOG = {
+  models: [{ id: 'openai/gpt-5', model: 'openai/gpt-5', resolved_model: null, display_name: 'GPT-5 via OpenAI',
+    description: '', is_default: true, default_reasoning_effort: null,
+    supported_reasoning_efforts: [{ reasoning_effort: 'fast', description: null }, { reasoning_effort: 'deep', description: null }] }],
+  default: { model: 'openai/gpt-5', reasoning_effort: null, supported_reasoning_efforts: null },
+  default_source: 'opencode_config', source: 'live', fetched_at_ms: 1,
+};
+
 /** Pick `item` from the `group` section of the open model menu. */
-async function pick(trigger: string, group: 'Codex' | 'Claude', item: string | RegExp) {
+async function pick(trigger: string, group: 'Codex' | 'Claude' | 'OpenCode', item: string | RegExp) {
   (await screen.findByRole('button', { name: trigger })).focus();
   /* By keyboard: astryx swallows a trigger click that lands right after its menu hid. */
   await userEvent.keyboard('{ArrowDown}');
@@ -115,12 +124,14 @@ function harness(options: {
   heldClaudeCatalog?: Promise<void>;
   /** Claude is ready: `?provider=claude` answers the Claude CLI's list. */
   claudePlanner?: boolean;
+  opencodePlanner?: boolean;
+  opencodeUnavailable?: string;
   /** `GET /api/agent-providers` says why a configured Claude Planner cannot run now (#1817); else it is ready. */
   claudeUnavailable?: string;
   /** `GET /api/agent-providers` says Codex cannot run now (#1817); create still accepts it. */
   codexUnavailable?: string;
   /** The created Planner card's `planner_provider`; its `?card_id=` catalog is that provider's. */
-  plannerProvider?: 'codex' | 'claude';
+  plannerProvider?: AgentProvider;
   /** Override the detail read the track page makes when the create lands. */
   trackDetail?: ApiTransportResponse;
   /** Hold the detail read open until this resolves, to drive a slow landing. */
@@ -175,7 +186,17 @@ function harness(options: {
             ? { provider: 'codex', status: 'ready', reason: null, checked_at_ms: 1 }
             : { provider: 'codex', status: 'unavailable', reason: options.codexUnavailable, checked_at_ms: 1 },
           { provider: 'claude', ...claude, checked_at_ms: 1 },
+          { provider: 'opencode', checked_at_ms: 1, ...(options.opencodePlanner !== true
+            ? { status: 'not_configured', reason: 'OpenCode Planner is not configured' }
+            : options.opencodeUnavailable === undefined ? { status: 'ready', reason: null }
+              : { status: 'unavailable', reason: options.opencodeUnavailable }) },
         ] });
+      }
+      if (request.path === '/api/models?provider=opencode') {
+        return Promise.resolve({ status: 200, statusText: 'OK', body: options.opencodePlanner === true ? OPENCODE_CATALOG : NO_CATALOG });
+      }
+      if (request.path === '/api/models?card_id=card-planner' && options.plannerProvider === 'opencode') {
+        return Promise.resolve({ status: 200, statusText: 'OK', body: OPENCODE_CATALOG });
       }
       /* What `routes/models.rs` answers for a Claude Planner (#1822): the Claude CLI's list on a server
          whose Claude is ready, `unavailable` with no catalog on one without Claude Planners. */
@@ -245,7 +266,7 @@ function harness(options: {
       }
       if (request.method === 'GET' && request.path === '/api/cards/card-planner/planner/run') {
         return Promise.resolve({ status: 200, statusText: 'OK', body: {
-          card_id: 'card-planner', worker_session_id: 'runtime', phase: 'idle',
+          card_id: 'card-planner', worker_session_id: 'runtime', phase: 'idle', supports_steer: true,
           model: null, reasoning_effort: null, blocked_reason: null, running_turn: null,
         } });
       }
@@ -413,6 +434,56 @@ describe('New track model selection', () => {
     const body = createdTrackRequests(sent)[0]?.body;
     expect(body).toMatchObject({ planner_provider: 'claude', model: 'sonnet', first_message: 'Plan with Claude' });
     expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('creates an OpenCode Planner with the exact model slug and native variant, dropping the Codex effort', async () => {
+    const { sent } = harness({ templates: [], opencodePlanner: true });
+    await userEvent.click(await screen.findByRole('button', { name: 'New track in Work' }));
+    await findComposer();
+    await pick('Model: Codex Default', 'Codex', 'GPT-5');
+    await userEvent.click(screen.getByRole('button', { name: 'Reasoning effort: low (the default)' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /high/ }));
+    await pick('Model: Codex GPT-5', 'OpenCode', 'GPT-5 via OpenAI');
+    expect(screen.getByRole('button', { name: 'Variant: Default' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Variant: Default' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'deep' }));
+    await userEvent.type(screen.getByLabelText(TASK_LABEL), 'Plan with OpenCode');
+    await userEvent.click(screen.getByRole('button', { name: 'Create track' }));
+    await waitFor(() => expect(createdTrackRequests(sent)).toHaveLength(1));
+    expect(createdTrackRequests(sent)[0]?.body).toMatchObject({
+      planner_provider: 'opencode', model: 'openai/gpt-5', reasoning_effort: 'deep', first_message: 'Plan with OpenCode',
+    });
+  });
+
+  it('disables unavailable OpenCode choices with the server reason', async () => {
+    harness({ templates: [], opencodePlanner: true, opencodeUnavailable: 'OpenCode credentials are missing' });
+    await userEvent.click(await screen.findByRole('button', { name: 'New track in Work' }));
+    await findComposer();
+    (await screen.findByRole('button', { name: 'Model: Codex Default' })).focus();
+    await userEvent.keyboard('{ArrowDown}');
+    const section = await screen.findByRole('group', { name: 'OpenCode' });
+    expect(within(section).getByRole('note').textContent).toBe('OpenCode is unavailable: OpenCode credentials are missing');
+    expect(within(section).getAllByRole('menuitem').every((item) =>
+      item.hasAttribute('disabled') || item.getAttribute('aria-disabled') === 'true')).toBe(true);
+  });
+
+  it('an existing OpenCode Planner keeps its own catalog and sends model updates through the Planner API', async () => {
+    const { sent } = harness({ templates: [], opencodePlanner: true, plannerProvider: 'opencode' });
+    await userEvent.click(await screen.findByRole('button', { name: 'New track in Work' }));
+    await findComposer();
+    await pick('Model: Codex Default', 'OpenCode', 'GPT-5 via OpenAI');
+    await userEvent.type(screen.getByLabelText(TASK_LABEL), 'Plan with OpenCode');
+    await userEvent.click(screen.getByRole('button', { name: 'Create track' }));
+    await waitFor(() => expect(window.location.pathname).toBe(`${APP_BASEPATH}/track/w-new`));
+    const drawer = await screen.findByRole('complementary', { name: 'Planner' });
+    const variant = await within(drawer).findByRole('button', { name: 'Variant: Default' });
+    await waitFor(() => expect((variant as HTMLButtonElement).disabled).toBe(false));
+    await userEvent.click(variant);
+    await userEvent.click(screen.getByRole('menuitem', { name: 'deep' }));
+    await waitFor(() => expect(sent.filter((request) => request.method === 'PUT'
+      && request.path === '/api/cards/card-planner/planner/model').map((request) => request.body))
+      .toEqual([{ model: null, reasoning_effort: 'deep' }]));
+    expect(within(drawer).queryByRole('button', { name: /^Reasoning effort:/ })).toBeNull();
   });
 
   it('a Claude Default sends the provider and no model', async () => {

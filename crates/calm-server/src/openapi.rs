@@ -70,6 +70,8 @@ use utoipa::{Modify, OpenApi, ToSchema};
     ),
     paths(
         crate::auth::login_handler,
+        crate::routes::opencode_conversations::list_connections,
+        crate::routes::opencode_conversations::attach_conversation,
         crate::builtin_plugins::calendar::routes::list,
         crate::builtin_plugins::calendar::routes::read,
         crate::builtin_plugins::calendar::routes::create,
@@ -193,6 +195,11 @@ use utoipa::{Modify, OpenApi, ToSchema};
         crate::routes::version::get_version,
     ),
     components(schemas(
+        crate::routes::opencode_conversations::AttachOpenCodeBody,
+        crate::opencode_planner::attachment::ConnectionsResponse,
+        crate::opencode_planner::attachment::ConnectionSummary,
+        crate::opencode_planner::attachment::AttachedSession,
+        crate::opencode_planner::attachment::AttachedStatus,
         crate::mobile_access::MobileStatus,
         calm_types::mobile_access::MobileProvider,
         calm_types::tailnet::TailnetStatus,

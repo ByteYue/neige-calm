@@ -9,6 +9,9 @@ use crate::db::{RepoOutOfDomain, RepoRead, SharedCodexDaemonUpdate, TranscriptRo
 use crate::error::{CalmError, Result};
 use crate::model::*;
 
+// One storage identifier for the projection owner; native echoes update these rows in place.
+const TRANSCRIPT_TABLE: &str = "harness_items";
+
 /// What a card's harness transcript held, measured before it is destroyed;
 /// `params_bytes` is the summed byte length of the JSON-RPC `params` payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -407,14 +410,14 @@ impl RepoOutOfDomain for SqlxRepo {
         params: &str,
         input_segments: Option<&str>,
     ) -> Result<i64> {
-        let row = sqlx::query(
-            r#"INSERT INTO harness_items (
+        let row = sqlx::query(&format!(
+            r#"INSERT INTO {TRANSCRIPT_TABLE} (
                    worker_session_id, card_id, track_id, thread_id, turn_id,
                    item_uuid, item_type, method, params, input_segments, created_at_ms
                )
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                RETURNING id"#,
-        )
+        ))
         .bind(worker_session_id)
         .bind(card_id)
         .bind(track_id)
@@ -477,12 +480,12 @@ impl RepoOutOfDomain for SqlxRepo {
         card_id: &str,
         client_id: &str,
     ) -> Result<Option<i64>> {
-        let row = sqlx::query(
-            r#"SELECT id FROM harness_items
+        let row = sqlx::query(&format!(
+            r#"SELECT id FROM {TRANSCRIPT_TABLE}
                WHERE card_id = ?1 AND item_uuid = ?2 AND turn_id IS NULL
                  AND method = 'item/completed'
                ORDER BY id DESC LIMIT 1"#,
-        )
+        ))
         .bind(card_id)
         .bind(client_id)
         .fetch_optional(&self.pool)
@@ -501,17 +504,24 @@ impl RepoOutOfDomain for SqlxRepo {
         let mut tx = begin_immediate_tx(&self.pool).await?;
         // `LIMIT 1` is not available on UPDATE in the bundled sqlite build, so the
         // subquery chooses the row: the newest projection with this key.
-        let row = sqlx::query(
-            r#"UPDATE harness_items
-               SET turn_id = ?3, item_uuid = ?4, params = ?5
+        let row = sqlx::query(&format!(
+            r#"UPDATE {TRANSCRIPT_TABLE}
+               SET turn_id = ?3, item_uuid = ?4,
+                   params = CASE WHEN json_type(params, '$.calmQueueEntries') = 'array'
+                       THEN json_set(?5, '$.calmQueueEntries', json_extract(params, '$.calmQueueEntries'))
+                       ELSE ?5 END
                WHERE id = (
-                   SELECT id FROM harness_items
-                   WHERE card_id = ?1 AND item_uuid = ?2 AND turn_id IS NULL
+                   SELECT id FROM {TRANSCRIPT_TABLE}
+                   WHERE card_id = ?1
                      AND method = 'item/completed'
+                     AND item_type = 'userMessage'
+                     AND ((item_uuid = ?2 AND turn_id IS NULL)
+                       OR (item_uuid = ?4 AND turn_id IS ?3
+                           AND json_extract(params, '$.item.clientId') = ?2))
                    ORDER BY id DESC LIMIT 1
                )
                RETURNING id"#,
-        )
+        ))
         .bind(card_id)
         .bind(client_id)
         .bind(turn_id)
@@ -525,11 +535,11 @@ impl RepoOutOfDomain for SqlxRepo {
 
     async fn transcript_projection_delete(&self, card_id: &str, client_id: &str) -> Result<u64> {
         let mut tx = begin_immediate_tx(&self.pool).await?;
-        let done = sqlx::query(
-            r#"DELETE FROM harness_items
+        let done = sqlx::query(&format!(
+            r#"DELETE FROM {TRANSCRIPT_TABLE}
                WHERE card_id = ?1 AND item_uuid = ?2 AND turn_id IS NULL
                  AND method = 'item/completed'"#,
-        )
+        ))
         .bind(card_id)
         .bind(client_id)
         .execute(&mut *tx)

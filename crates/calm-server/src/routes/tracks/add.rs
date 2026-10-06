@@ -106,14 +106,25 @@ impl TrackCreator for RouteTrackCreator {
         } = request;
         // The same gate as `POST /api/tracks` (#1817): read before the area lock, applied to a
         // mint only; a replay mints nothing.
-        let claude_availability = if planner_provider == AgentProvider::Claude {
-            Some(
-                s.provider_availability
-                    .claude(crate::agent_providers::Freshness::Cached, &s.claude_planner)
-                    .await,
-            )
-        } else {
-            None
+        let provider_readiness = match planner_provider {
+            AgentProvider::Claude => s
+                .provider_availability
+                .claude(crate::agent_providers::Freshness::Cached, &s.claude_planner)
+                .await
+                .catalog()
+                .map(|_| ())
+                .map_err(|refusal| refusal.to_string()),
+            AgentProvider::OpenCode => s
+                .provider_availability
+                .opencode(
+                    crate::agent_providers::Freshness::Cached,
+                    &s.opencode_planner,
+                )
+                .await
+                .outcome
+                .map(|_| ()),
+            // Codex permits message-less creation during a daemon outage.
+            AgentProvider::Codex => Ok(()),
         };
         let _area_delete_guard =
             crate::per_card_lock::lock_key(&s.area_delete_locks, area_id.as_str()).await;
@@ -143,9 +154,7 @@ impl TrackCreator for RouteTrackCreator {
         };
         // A dependency unavailable now, not a bad argument: the same call succeeds once the
         // provider is ready.
-        if let Some(checked) = &claude_availability
-            && let Err(refusal) = checked.catalog()
-        {
+        if let Err(refusal) = provider_readiness {
             return Err(TrackAddRefusal::ProviderUnavailable(format!(
                 "the creator's Planner provider {refusal}"
             )));

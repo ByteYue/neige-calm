@@ -25,6 +25,7 @@ pub mod fs;
 pub mod harness_live;
 pub mod idempotency_key;
 pub mod models;
+pub mod opencode_conversations;
 pub mod overlays;
 pub mod planner_cards;
 pub mod planner_compact;
@@ -71,6 +72,7 @@ pub fn protected_router() -> Router<AppState> {
         .merge(activity_dismissals::router())
         .merge(track_asks::router())
         .merge(track_conversations::router())
+        .merge(opencode_conversations::router())
         .merge(track_previews::router())
         .merge(track_report_blocks::router())
         .merge(track_report_series::router())

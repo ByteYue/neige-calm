@@ -50,7 +50,12 @@ pub(crate) async fn list_agent_providers(
     };
     let checked = s
         .provider_availability
-        .all(freshness, &s.claude_planner, &codex.shared_codex_appserver)
+        .all(
+            freshness,
+            &s.claude_planner,
+            &s.opencode_planner,
+            &codex.shared_codex_appserver,
+        )
         .await;
     Ok(Json(
         checked

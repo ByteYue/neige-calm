@@ -40,7 +40,7 @@ filters=(
   'test(/^mcp_server::cli::commands::tests::(every_|help_documents_|prompt_|task_report_surfaces_)/)'
   'test(/^templates::tests::builtin_directory_and_roster_are_the_same_set$/)'
   'test(/^routes::codex::tests::every_codex_worker_hook_is_registered/)'
-  'test(/^(no_retired_tool_names|handle_state_writers|planner_attachments_guarded_surface|openapi|track_write_point_registry|head_schema_fixture)::/)'
+  'test(/^(no_retired_tool_names|handle_state_writers|planner_attachments_guarded_surface|openapi|openapi_statuses|track_write_point_registry|head_schema_fixture)::/)'
   'test(/^events_pruner::no_other_suite_seeds_/)'
   'test(/^bounded_track_tree_sql::every_recursive_parent_track_cte_/)'
   'test(/^no_wildcard_wait_in_the_supervisor_host$/)'

@@ -58,7 +58,7 @@ pub(crate) fn plan(rows: &[TranscriptRow], turn_id: &str) -> Result<RewindPlan, 
     let user_rows = rows
         .iter()
         .filter(|row| row.id > boundary)
-        .filter(|row| super::run_loop::is_user_message_type(row.item_type.as_deref()))
+        .filter(|row| super::transcript::is_user_message_type(row.item_type.as_deref()))
         .collect::<Vec<_>>();
     let prompt_client_id = user_rows.first().and_then(|row| client_id(&row.params));
     let mut said = 0;

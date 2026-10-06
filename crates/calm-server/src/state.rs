@@ -12,6 +12,8 @@ use crate::claude_planner::wiring::ClaudePlannerWiring;
 use crate::harness::HarnessRegistry;
 use crate::ids::ActorId;
 use crate::mcp_server::McpServer;
+use crate::opencode_planner::config::{OpenCodePlannerConfig, OpenCodePlannerHost};
+use crate::opencode_planner::wiring::OpenCodePlannerWiring;
 use crate::operation::card_create_adapter::CardCreateAdapter;
 use crate::operation::child_track_adapter::ChildTrackAdapter;
 use crate::operation::claude_adapter::{ClaudeAdapter, ClaudeWorkerAdapter};
@@ -141,6 +143,7 @@ pub struct RouteState {
     /// The Claude Planner backend (#1791): its config (absent without `--claude-planner-config`)
     /// and marker instance, for creates, readiness, recovery and the scoped sweeps.
     pub(crate) claude_planner: Arc<ClaudePlannerHost>,
+    pub(crate) opencode_planner: Arc<OpenCodePlannerHost>,
     /// Each Planner provider's last availability check (#1817), read by
     /// `GET /api/agent-providers` and track create.
     pub(crate) provider_availability: Arc<crate::agent_providers::ProviderAvailabilityCache>,
@@ -149,6 +152,15 @@ pub struct RouteState {
 }
 
 impl RouteState {
+    pub(crate) fn opencode_planner_wiring(&self) -> OpenCodePlannerWiring {
+        OpenCodePlannerWiring {
+            host: self.opencode_planner.clone(),
+            plugin: self.plugin.clone(),
+            events: self.events.clone(),
+            write: self.write.clone(),
+        }
+    }
+
     /// What recovery and the start adapter open a Claude Planner session with.
     pub(crate) fn claude_planner_wiring(&self) -> ClaudePlannerWiring {
         ClaudePlannerWiring {
@@ -204,6 +216,7 @@ pub struct BootState {
     pub operation_runtime: Arc<OperationRuntime>,
     pub worker_flow: Arc<WorkerFlowDriver>,
     pub claude_planner: Arc<ClaudePlannerHost>,
+    pub opencode_planner: Arc<OpenCodePlannerHost>,
     pub activity_wake: crate::track_activity::ActivityWake,
 }
 
@@ -237,6 +250,7 @@ impl BootState {
             thread_seals: self.shared_codex_appserver.thread_seals().clone(),
             area_delete_locks: crate::per_card_lock::new_keyed_locks(),
             claude_planner: self.claude_planner,
+            opencode_planner: self.opencode_planner,
             provider_availability: Arc::default(),
             activity_wake: self.activity_wake,
         };
@@ -380,6 +394,7 @@ struct OperationAdapterInputs {
     gate_logs_dir: PathBuf,
     workspace_root: PathBuf,
     claude_planner: Arc<ClaudePlannerHost>,
+    opencode_planner: Arc<OpenCodePlannerHost>,
 }
 
 fn terminal_hook_settings(codex: &CodexClient) -> crate::terminal_hooks::TerminalHookSettings {
@@ -480,6 +495,7 @@ fn build_operation_adapters(input: OperationAdapterInputs) -> Vec<Arc<dyn Provid
                 .as_ref()
                 .map(|server| server.shim_config.socket_path.clone()),
             input.claude_planner.clone(),
+            input.opencode_planner.clone(),
         ));
     let planner_harness_interrupt_adapter: Arc<dyn ProviderAdapter> =
         Arc::new(PlannerHarnessInterruptAdapter::new(input.harness.clone()));
@@ -489,6 +505,7 @@ fn build_operation_adapters(input: OperationAdapterInputs) -> Vec<Arc<dyn Provid
             input.shared_codex_appserver,
             input.repo,
             input.claude_planner,
+            input.opencode_planner,
         ));
     let task_verify_adapter: Arc<dyn ProviderAdapter> =
         Arc::new(TaskVerifyAdapter::new(input.gate_logs_dir));
@@ -635,6 +652,7 @@ impl AppState {
             self.shared_codex_appserver.clone(),
             self.route.thread_seals.clone(),
             &self.claude_planner_wiring(),
+            &self.opencode_planner_wiring(),
             &self.harness,
             &self.route.track_delete_locks,
             rows,
@@ -643,6 +661,10 @@ impl AppState {
     }
 
     /// What recovery and the start adapter open a Claude Planner session with.
+    pub fn opencode_planner_wiring(&self) -> OpenCodePlannerWiring {
+        self.route.opencode_planner_wiring()
+    }
+
     pub fn claude_planner_wiring(&self) -> ClaudePlannerWiring {
         self.route.claude_planner_wiring()
     }
@@ -671,6 +693,56 @@ impl AppState {
             .planner_recovery_locks
             .get(card_id)
             .map_or(0, |lock| Arc::strong_count(lock.value()))
+    }
+
+    /// Fixture assembly: the same registered loopback connections used in production.
+    #[cfg(feature = "fixtures")]
+    pub fn with_opencode_connections_config(
+        mut self,
+        config: crate::opencode_planner::attachment::ConnectionsConfig,
+    ) -> Self {
+        let current = &self.route.opencode_planner;
+        self.route.opencode_planner = Arc::new(
+            OpenCodePlannerHost::new(
+                None,
+                current
+                    .instructions_dir
+                    .parent()
+                    .expect("OpenCode data directory"),
+                current.mcp_shim.clone(),
+                current.mcp_socket.clone(),
+            )
+            .expect("OpenCode host")
+            .with_connections(config)
+            .expect("OpenCode connections"),
+        );
+        self.route
+            .opencode_planner
+            .validate_external_directories(&self.route.workspace_root)
+            .expect("External native directories");
+        self.rebuild_operation_runtime();
+        self
+    }
+    /// Fixture assembly: configure the same managed OpenCode host used by production.
+    #[cfg(feature = "fixtures")]
+    pub fn with_opencode_planner_config(mut self, config: OpenCodePlannerConfig) -> Self {
+        let current = &self.route.opencode_planner;
+        let data_dir = current
+            .instructions_dir
+            .parent()
+            .expect("OpenCode host data directory");
+        self.route.opencode_planner = Arc::new(
+            OpenCodePlannerHost::new(
+                Some(config),
+                data_dir,
+                current.mcp_shim.clone(),
+                current.mcp_socket.clone(),
+            )
+            .expect("OpenCode Planner host"),
+        );
+        self.route.provider_availability = Arc::default();
+        self.rebuild_operation_runtime();
+        self
     }
 
     /// Fixture assembly only: run this state's Claude Planners under `config` (the typed
@@ -711,6 +783,7 @@ impl AppState {
                 daemon: self.shared_codex_appserver.clone(),
                 seals: self.route.thread_seals.clone(),
                 claude: self.claude_planner_wiring(),
+                opencode: self.opencode_planner_wiring(),
                 registry: self.harness.clone(),
                 track_delete_locks: self.route.track_delete_locks.clone(),
                 #[cfg(feature = "fixtures")]
@@ -801,6 +874,9 @@ impl AppState {
             repo.sqlite_pool()
                 .expect("AppState::from_parts requires a sqlite-backed Repo"),
         ));
+        let opencode_planner = Arc::new(
+            OpenCodePlannerHost::unconfigured_scratch().expect("scratch OpenCode Planner host"),
+        );
         let claude_planner = Arc::new(
             ClaudePlannerHost::unconfigured_scratch()
                 .expect("a scratch Claude Planner host for AppState::from_parts"),
@@ -821,6 +897,7 @@ impl AppState {
             gate_logs_dir: TaskVerifyAdapter::default_gate_logs_dir(),
             workspace_root: workspace_root_sandbox.path().to_path_buf(),
             claude_planner: claude_planner.clone(),
+            opencode_planner: opencode_planner.clone(),
         });
         let completion = OperationCompletionBus::new();
         let operation_runtime = Arc::new(OperationRuntime::new_unchecked(
@@ -900,6 +977,7 @@ impl AppState {
             operation_runtime,
             worker_flow,
             claude_planner,
+            opencode_planner,
             // No projector runs in a state built from parts; a test that needs one attaches it
             // with `with_activity_wake`.
             activity_wake: crate::track_activity::ActivityWake::detached(),
@@ -1007,6 +1085,7 @@ impl AppState {
             gate_logs_dir: TaskVerifyAdapter::default_gate_logs_dir(),
             workspace_root: self.route.workspace_root.clone(),
             claude_planner: self.route.claude_planner.clone(),
+            opencode_planner: self.route.opencode_planner.clone(),
         });
         let completion = OperationCompletionBus::new();
         let runtime = Arc::new(OperationRuntime::new_unchecked(
@@ -1184,6 +1263,33 @@ impl AppState {
             mcp_socket_path.clone(),
         )?);
         crate::claude_planner::lifecycle::boot(repo.as_ref(), &claude_planner).await?;
+        let opencode_planner = Arc::new(OpenCodePlannerHost::new(
+            cfg.opencode_planner_config
+                .as_deref()
+                .map(OpenCodePlannerConfig::read)
+                .transpose()?,
+            &cfg.data_dir_resolved(),
+            mcp_shim_bin.clone(),
+            mcp_socket_path.clone(),
+        )?);
+        let opencode_planner = Arc::new(
+            Arc::try_unwrap(opencode_planner)
+                .expect("new OpenCode host")
+                .with_connections(
+                    cfg.opencode_connections_config
+                        .as_deref()
+                        .map(crate::opencode_planner::attachment::ConnectionsConfig::read)
+                        .transpose()?
+                        .unwrap_or_default(),
+                )?,
+        );
+        opencode_planner.validate_external_directories(&workspace_root)?;
+        if let Some(pool) = repo.sqlite_pool() {
+            opencode_planner
+                .validate_external_owned_directories(&pool)
+                .await?;
+        }
+        crate::opencode_planner::lifecycle::boot(repo.as_ref(), &opencode_planner).await?;
         let mcp_server = crate::mcp_server::McpServer::spawn_with_context(
             mcp_context.clone(),
             mcp_socket_path,
@@ -1267,6 +1373,7 @@ impl AppState {
             gate_logs_dir: gate_logs_dir.clone(),
             workspace_root: workspace_root.clone(),
             claude_planner: claude_planner.clone(),
+            opencode_planner: opencode_planner.clone(),
         });
         let completion = OperationCompletionBus::new();
         let operation_runtime = Arc::new(
@@ -1383,6 +1490,7 @@ impl AppState {
             operation_runtime,
             worker_flow,
             claude_planner,
+            opencode_planner,
             activity_wake,
         };
         let mut state = state.into_app_state();

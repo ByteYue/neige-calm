@@ -92,6 +92,9 @@ async fn recover_planner_row(
         recovery_daemon.clone(),
         recovery_daemon.thread_seals().clone(),
         &claude_wiring,
+        &calm_server::opencode_planner::wiring::OpenCodePlannerWiring::unconfigured_for_test(
+            repo.clone(),
+        ),
         &registry,
         &calm_server::harness::new_track_delete_locks(),
         runtime,

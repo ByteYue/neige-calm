@@ -79,6 +79,9 @@ pub const PLANNER_FIRST_START: &str = "planner-first-start";
 /// Planner's start (#2184); keyed by the track's area id, which the test knows in advance.
 #[cfg(feature = "fixtures")]
 pub const TRACK_CREATE_BEFORE_PLANNER_START: &str = "track-create-before-planner-start";
+/// Where an attachment is about to resolve its observer runtime; keyed by card id.
+#[cfg(feature = "fixtures")]
+pub const OPENCODE_ATTACH_RECOVERY: &str = "opencode-attach-recovery";
 
 /// Where an operation insert has found no row under its `(kind, idempotency_key)` and is about to
 /// write one; keyed by the idempotency key.

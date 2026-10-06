@@ -3,6 +3,9 @@ import { createConversationDraftActions } from '../conversations/draft-actions.t
 import { useConversationStore } from '../conversations/store.ts';
 import type { ConversationCreationSource, ConversationRouteIntent, PlannerConversationScope } from '../conversations/contracts.ts';
 import { Button } from '@astryxdesign/core/Button';
+import { useOpenCodeConnection } from '../providers/opencode-connections.tsx';
+import { ConnectOpenCodeDialog } from '../../features/track/opencode-session/connect.tsx';
+import { AttachedSessionNotice } from '../../features/planner/attached-session.tsx';
 import type { PaneResizeGroup } from '../../ui/drawer/resize-group.ts';
 import { sideConversationSnapshot } from '../../../../core/domain/side-conversation.ts';
 import { writeClipboardText } from '../../ui/operation-feedback/clipboard.ts';
@@ -38,7 +41,7 @@ import type {
   BoardHostItem, CardAddMenuEntry, CardHost, CardRegistry,
 } from '../../systems/cards/public.js';
 import {
-  cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, plannerCardIn, partitionTrackCards,
+  cardAddMenuEntries, isAssistantHarnessPayload, isPlannerHarnessPayload, plannerCardIn, isPlainChatPayload, partitionTrackCards,
 } from '../../systems/cards/public.js';
 import { mintIdempotencyKey, useKeyedIntent, type KeyedRequest } from '../providers/idempotency-key.ts';
 import footerStyles from './composer-footer.module.css';
@@ -519,6 +522,7 @@ function useConversationPane(
   const composerView = useMemo(() => ({
     compact: compact,
     compacting: store.compacting,
+    canStop: store.canStop,
     attachmentsSupported: store.attachmentsSupported,
     contextUsage: store.contextUsage,
     deleteQueuedEntry: deleteQueuedEntry,
@@ -535,7 +539,7 @@ function useConversationPane(
     steerQueuedEntry: canSteer ? steerQueuedEntry : undefined,
     stopping: store.stopping,
     working: store.working
-  }), [compact, store.compacting, store.attachmentsSupported, store.contextUsage, deleteQueuedEntry, store.historyReady, interrupt, store.model, store.modelCatalog, store.pendingQueue, store.pendingQueueOverflow, store.queueWriteOut, store.sendBlocked, store.sending, setModel, store.stopping, store.working, canSteer, steerQueuedEntry]);
+  }), [compact, store.compacting, store.canStop, store.attachmentsSupported, store.contextUsage, deleteQueuedEntry, store.historyReady, interrupt, store.model, store.modelCatalog, store.pendingQueue, store.pendingQueueOverflow, store.queueWriteOut, store.sendBlocked, store.sending, setModel, store.stopping, store.working, canSteer, steerQueuedEntry]);
   const { replacing, bar: editingBar } = edit;
   const composerNode = useMemo(() => existingId === null ? null : (
             <ChatComposer
@@ -574,7 +578,7 @@ function useConversationPane(
               sendAdornment={<ContextRing usage={composerView.contextUsage} />}
               /* `stopping` keeps Stop shown while the interrupt is in flight; `interrupt()`
                                already refuses a second one. */
-              onStop={!composerView.compacting && (composerView.working || composerView.stopping) ? composerView.interrupt : undefined}
+              onStop={composerView.canStop && !composerView.compacting && (composerView.working || composerView.stopping) ? composerView.interrupt : undefined}
               onNewConversation={options?.inline === true ? undefined : newConversation}
               mentionTrigger={mentionTrigger}
               /* The kernel reads the selection when it hands a batch to codex, so a change
@@ -591,7 +595,7 @@ function useConversationPane(
                     }}
                     disabled={composerView.sendBlocked || !composerView.historyReady || replacing}
                   />
-                  <ModelPill
+                  {scope?.kind !== 'track-opencode' && <ModelPill
                     /* Without a scope the catalog read is disabled, so no `unavailable` label can show. */
                     /* An existing conversation keeps issue-time handling: no availability gate here (#1817). */
                     groups={[{ provider: scopeProvider, catalog: composerView.modelCatalog, availability: null }]}
@@ -599,13 +603,13 @@ function useConversationPane(
                     selection={composerView.model}
                     onChange={composerView.setModel}
                     isDisabled={!composerView.historyReady}
-                  />
+                  />}
                 </HStack>
               )}
             />
   ), [existingId, composerFocusFor, composerFocusRequest, composer.text, setComposerText, composerView,
     replacing, editingBar, options?.showSideCommand, options?.inline, hasSideConversation, sideQuestion,
-    sendText, composerAttachments, newConversation, mentionTrigger, scopeProvider, plannerAsks, answerAsk]);
+    sendText, composerAttachments, newConversation, mentionTrigger, scopeProvider, scope?.kind, plannerAsks, answerAsk]);
 
   const renderDrawer = (resizeGroup: PaneResizeGroup | null = null) => (
       <Drawer
@@ -649,6 +653,7 @@ function useConversationPane(
           </>
         ) : open === null ? undefined : (
           <>
+            {store.attachedSession !== null && <AttachedSessionNotice session={store.attachedSession} />}
             {/* Each query owns its read retry; accepted sends keep their reconciliation fence (#2068). */}
             {(store.historyError !== null || store.runError !== null) && (
               <ErrorBox
@@ -756,7 +761,7 @@ function useConversationPane(
                 regenerateMessage={respondable
                   ? async (message) => { await store.send(open.id, message.text, message.attachments ?? [], false, null); }
                   : undefined}
-                editMessage={respondable && store.pendingQueue.length === 0 && store.pendingQueueOverflow === 0
+                editMessage={respondable && scope?.kind !== 'track-opencode' && store.pendingQueue.length === 0 && store.pendingQueueOverflow === 0
                   && isComposerEmpty(composer) && !attachments.busy ? edit.start : undefined}
                 canContinue={canContinue}
                 stalledReason={store.blockedReason}
@@ -1102,7 +1107,7 @@ function TrackRoute({ transport, unauthorized, cardRuntime, recentFiles }: {
    * live producer. */
   const requestedCard = detail.data?.cards.find((card) => card.id === registry.requestedOpenId
     && card.kind === 'codex'
-    && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload)));
+    && (isPlannerHarnessPayload(card.payload) || isAssistantHarnessPayload(card.payload) || isPlainChatPayload(card.payload)));
   const detailMatchesRoute = trackId !== undefined && detail.data?.track.id === trackId;
   useEffect(() => {
     if (registry.requestedOpenId === null || detail.isLoading || detail.isFetching) return;
@@ -1169,6 +1174,7 @@ function TrackRouteBody({
   useReadReceipt('track', track.id, track.activityAt ?? 0, true, navigationCompletedAt);
   const trackMutations = useTrackMutations(transport, unauthorized);
   const conversationMutations = useTrackConversationMutations(transport, track.id, unauthorized);
+  const openCodeConnection = useOpenCodeConnection(transport, unauthorized, track.id);
   const openMobileSection = useOpenMobileSection();
   const mobileHeaderActionsHost = useMobileHeaderActionsHost();
   const mobileHeaderTitleHost = useMobileHeaderTitleHost();
@@ -1270,7 +1276,8 @@ function TrackRouteBody({
          * comparison rests on, and written the other way it would be a tautology. */
         return row === undefined ? null : {
           id: row.trackId,
-          provider: plannerCard !== undefined && row.id === plannerCard.id ? plannerProviderOf(plannerCard.payload) : 'codex',
+          provider: plannerCard !== undefined && row.id === plannerCard.id ? plannerProviderOf(plannerCard.payload)
+            : row.kind === 'track-opencode' ? 'opencode' : 'codex',
           title: trackTitle, cardId: row.id, cardTitle: row.title,
           updatedAt: row.updatedAt, kind: row.kind, state: row.state,
         };
@@ -1635,7 +1642,8 @@ function TrackRouteBody({
           />
         )
         : undefined}
-      conversationList={chat.list}
+      conversationList={<>{chat.list}<Button label="Connect OpenCode session" size="sm" variant="ghost"
+        onClick={openCodeConnection.show} /></>}
       conversationAction={chat.action}
       onStartConversation={chat.startConversation}
       conversationOpen={chat.isOpen}
@@ -1653,6 +1661,7 @@ function TrackRouteBody({
       onTrackDeleted={() => go({ name: 'today' })}
     />
     </TrackStage>
+    <ConnectOpenCodeDialog {...openCodeConnection.dialog} />
     {/* Keyed by kind: switching kinds is a different form, and a shared mount
         would carry the previous kind's typed values into it. */}
     <Dialog

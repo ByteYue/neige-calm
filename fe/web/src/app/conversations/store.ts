@@ -26,6 +26,8 @@ function forgottenKey(card: string, entryId: string): string {
    every render by a fresh array literal. */
 const EMPTY_PENDING_QUEUE: readonly PendingQueueEntry[] = Object.freeze([]);
 
+const ATTACHED_SESSION_STATUS_POLL_MS = 3000;
+
 export function useConversationStore(
   transport: ApiTransportPort,
   unauthorized: UnauthorizedChannel,
@@ -56,13 +58,21 @@ export function useConversationStore(
   const runQuery = useMemo(
     () => runReads.track(plannerRunQueryOptions(transport, cardId, unauthorized)), [runReads, transport, cardId, unauthorized],
   );
-  const run = useQuery({ ...runQuery, enabled: scope !== null });
+  const requiresAttachedSession = scope?.kind === 'track-opencode';
+  const run = useQuery({ ...runQuery, enabled: scope !== null,
+    // Native liveness can change without a transcript event, including a failed initial read.
+    refetchInterval: requiresAttachedSession ? ATTACHED_SESSION_STATUS_POLL_MS : false,
+  });
   /* The catalog rides alongside the run query: the trigger has to render the chosen
        model's name, and `planner-run` gives only its slug. */
   const modelCatalog = useQuery({
-    ...modelCatalogQueryOptions(transport, { kind: 'card', cardId }, unauthorized), enabled: scope !== null,
+    ...modelCatalogQueryOptions(transport, { kind: 'card', cardId }, unauthorized),
+    enabled: scope !== null && !requiresAttachedSession,
   });
   const phase = run.data?.phase ?? null;
+  const attachedSession = run.data?.attached_session ?? null;
+  const attachmentBlocksInput = requiresAttachedSession && (attachedSession === null || !attachedSession.can_submit);
+  const canStop = requiresAttachedSession ? attachedSession?.can_stop === true : true;
   const stalled = phase === 'wedged';
   /* Anchored on the response's arrival (`dataUpdatedAt`); the fold keeps the earlier anchor for one turn. */
   const [runningAnchor, setRunningAnchor] = useState<RunningTurnAnchor | null>(null);
@@ -140,7 +150,7 @@ export function useConversationStore(
   });
   const working = phase === 'issuing_turn' || phase === 'compacting' || phase === 'turn_running';
   const stop = useConversationStop({
-    cardId, canStop: working && !stalled,
+    cardId, canStop: working && !stalled && canStop,
     responseEnded: phase === 'idle' || phase === 'turn_completed',
     historyKnown: history.data !== undefined,
     newestRowId: items.reduce((latest, row) => Math.max(latest, row.id), 0),
@@ -241,7 +251,7 @@ export function useConversationStore(
     });
   /* On a steer's `done` the entry is forgotten but its send is NOT: a steer delivers the sentence, and the
        kernel's transcript row shows it. */
-  const steerQueuedEntry = phase === 'turn_running'
+  const steerQueuedEntry = phase === 'turn_running' && run.data?.supports_steer === true
     ? (entry: PendingQueueEntry) =>
       registry.holdQueueWrite(cardId, () => mutations.steerQueued(entry.entry_id, entry.rev)).then((outcome) => {
         if (outcome.kind === 'done') forgetQueuedEntry(entry);
@@ -250,6 +260,7 @@ export function useConversationStore(
     : undefined;
 
   return {
+    attachedSession, canStop,
     conversations,
     turnsOf: (conversationId) => conversation?.id === conversationId ? view.transcript : registry.turnsOf(conversationId),
     pending: pendingConversationIds(conversation, working, !stalled && view.sending),
@@ -258,7 +269,7 @@ export function useConversationStore(
     stopping,
     stopFeedback,
     sending: view.sending,
-    sendBlocked: view.blocked,
+    sendBlocked: attachmentBlocksInput || view.blocked,
     pendingQueue,
     pendingQueueOverflow,
     deleteQueuedEntry,
@@ -277,7 +288,10 @@ export function useConversationStore(
     retrySend: outbox.retrySend,
     discardFailedSend: outbox.discardFailedSend,
     dismissFailedSend: outbox.dismissFailedSend,
-    send: outbox.send,
+    // Keyed recovery retries keep going through the original outbox; only a new send needs native admission.
+    send: (conversationId, text, attachments, fromComposer, replaces) => attachmentBlocksInput
+      || (requiresAttachedSession && replaces !== null) ? null
+      : outbox.send(conversationId, text, attachments, fromComposer, replaces),
     attachmentsSupported: run.data?.attachments_supported ?? false,
     contextUsage: run.data?.token_usage ?? null,
     runningAnchor: nextRunningAnchor,

@@ -6,7 +6,7 @@ export function renderConversationReadFixture(initialFailure = true) {
   let unavailable = initialFailure;
   let historyUnavailable = false;
   let runGate: Promise<void> | null = null;
-  const run = { card_id: 'daily-planner', worker_session_id: 'runtime', phase: 'turn_running',
+  const run = { card_id: 'daily-planner', worker_session_id: 'runtime', phase: 'turn_running', supports_steer: true,
     model: null, reasoning_effort: null, blocked_reason: null, running_turn: null };
   const failure: ApiTransportResponse = { status: 503, statusText: 'Unavailable',
     body: { error: 'internal', message: 'private transport diagnostic' } };

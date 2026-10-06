@@ -133,16 +133,13 @@ pub fn policy_for(origin: &WriteOrigin) -> Result<WritePolicy, CalmError> {
     })
 }
 
-/// Mirrors `ToolCallIdentity::to_actor_id`; `Worker` / `ReportCard` are refused by [`policy_for`] first.
+/// Uses the same session identity derivation as MCP writes.
 fn agent_actor(agent: &AgentOrigin) -> ActorId {
-    let session_id = agent.session_id.clone();
-    match agent.role {
-        CardRole::Planner => ActorId::AiPlannerSession(session_id),
-        CardRole::Assistant | CardRole::Worker | CardRole::ReportCard => match agent.provider {
-            AgentProvider::Codex => ActorId::AiCodexSession(session_id),
-            AgentProvider::Claude => ActorId::AiClaudeSession(session_id),
-        },
-    }
+    crate::mcp_server::registry::session_actor(
+        agent.role,
+        &agent.provider,
+        agent.session_id.clone(),
+    )
 }
 
 #[cfg(test)]
@@ -185,6 +182,14 @@ mod tests {
                 "agent/planner/claude",
                 agent(CardRole::Planner, AgentProvider::Claude),
                 ActorId::AiPlannerSession(WorkerSessionId::from("sess_1".to_string())),
+                WriteAttribution::Authored(EditAuthor::Planner),
+                true,
+                RecorderRequirement::AgentGate,
+            ),
+            (
+                "agent/planner/opencode",
+                agent(CardRole::Planner, AgentProvider::OpenCode),
+                ActorId::AiOpenCodeSession(WorkerSessionId::from("sess_1".to_string())),
                 WriteAttribution::Authored(EditAuthor::Planner),
                 true,
                 RecorderRequirement::AgentGate,
@@ -254,7 +259,7 @@ mod tests {
     // distinguish pass-through from a hardcoded `ActorId::User`. Add it when the admitted set widens.
 
     /// Bump this alongside a new arm in [`actor_variant_label`].
-    const ACTOR_ID_NON_USER_VARIANTS: usize = 9;
+    const ACTOR_ID_NON_USER_VARIANTS: usize = 10;
 
     /// No `_` arm: adding an `ActorId` variant fails to compile here.
     fn actor_variant_label(actor: &ActorId) -> &'static str {
@@ -269,6 +274,7 @@ mod tests {
             ActorId::AiPlannerSession(_) => "AiPlannerSession",
             ActorId::AiCodexSession(_) => "AiCodexSession",
             ActorId::AiClaudeSession(_) => "AiClaudeSession",
+            ActorId::AiOpenCodeSession(_) => "AiOpenCodeSession",
         }
     }
 
@@ -284,6 +290,7 @@ mod tests {
             ActorId::AiPlannerSession(WorkerSessionId::from("sess_fork".to_string())),
             ActorId::AiCodexSession(WorkerSessionId::from("sess_fork".to_string())),
             ActorId::AiClaudeSession(WorkerSessionId::from("sess_fork".to_string())),
+            ActorId::AiOpenCodeSession(WorkerSessionId::from("sess_fork".to_string())),
         ];
         let mut labels: Vec<&'static str> = samples.iter().map(actor_variant_label).collect();
         labels.sort_unstable();

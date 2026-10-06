@@ -86,7 +86,8 @@ function setup(options: Options = {}) {
         }));
       }
       if (request.path.endsWith('/planner/run')) {
-        return Promise.resolve(ok({ card_id: PLANNER_CARD.id, worker_session_id: 'r', phase: 'idle' }));
+        return Promise.resolve(ok({ card_id: PLANNER_CARD.id, worker_session_id: 'r', phase: 'idle',
+          supports_steer: true, running_turn: null }));
       }
       if (request.path === '/api/settings') return Promise.resolve(ok({}));
       return Promise.resolve(ok([]));

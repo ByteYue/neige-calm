@@ -160,9 +160,9 @@ pub(super) async fn runtimes_active_for_kind_from_pool(
 ) -> WorkerSessionProjectionResult<Vec<WorkerSessionProjection>> {
     let (provider, _mode, contract) = derive_session_identity(&kind);
     // A Planner row carries its own provider (`WorkerSessionInit::shared_planner`), so the
-    // Planner contract selects both backends.
+    // Planner contract selects every supported Planner provider.
     let provider_sql = if kind == WorkerSessionKind::SharedPlanner {
-        "ws.provider IN (?1, 'claude')"
+        "ws.provider IN (?1, 'claude', 'opencode')"
     } else {
         "ws.provider = ?1"
     };
@@ -784,7 +784,8 @@ impl WorkerSessionProjectionRepo for SqlxRepo {
                            AND json_extract(c.payload, '$.harness_profile') = 'assistant')
                  ))
                  -- #1791 — a Claude Planner: only the Planner contract on a Planner card.
-                 OR (ws.provider = 'claude' AND ws.contract = 'planner' AND c.role = 'planner'))
+                 OR (ws.provider IN ('claude', 'opencode') AND ws.contract = 'planner' AND c.role = 'planner')
+                 OR (ws.provider = 'opencode' AND ws.contract = 'executor' AND c.kind = 'codex' AND c.role = 'worker' AND json_extract(c.payload, '$.harness_profile') = 'plain_chat' AND json_extract(c.payload, '$.opencode_attachment.session_id') = ws.agent_session_id))
                  AND ws.state IN ('starting','running','idle','turn_pending')
                  AND ws.thread_id IS NOT NULL
                  AND ws.handle_state_json IS NOT NULL

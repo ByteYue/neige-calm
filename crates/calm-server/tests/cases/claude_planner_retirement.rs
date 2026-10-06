@@ -100,7 +100,7 @@ async fn a_repoint_sweeps_the_tracks_claude_planner_processes_or_refuses() {
     let (status, body) = repoint(&stack, &track_id, &target).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
-        body.contains("a previous Claude Planner process of this track could not be stopped"),
+        body.contains("a previous managed Planner process of this track could not be stopped"),
         "{body}"
     );
     assert_eq!(

@@ -44,17 +44,29 @@ const NO_CLAUDE = {
   default: { model: null, reasoning_effort: null, supported_reasoning_efforts: null }, default_source: 'unknown',
 };
 
+const OPENCODE_CATALOG = {
+  ...LIVE_CATALOG,
+  models: [{ id: 'openai/gpt-5', model: 'openai/gpt-5', resolved_model: null, display_name: 'GPT-5 via OpenAI',
+    description: '', is_default: true, default_reasoning_effort: null, supported_reasoning_efforts: [
+      { reasoning_effort: 'fast', description: null }, { reasoning_effort: 'deep', description: null },
+    ] }],
+  default: { model: 'openai/gpt-5', reasoning_effort: null, supported_reasoning_efforts: null },
+  default_source: 'opencode_config',
+};
+
 /** What `routes/agent_providers.rs` answers alongside each catalog (#1817). */
-function availability(claude: 'ready' | 'not_configured') {
+function availability(claude: 'ready' | 'not_configured', opencode: boolean) {
   return [
     { provider: 'codex', status: 'ready', reason: null, checked_at_ms: 1 },
     claude === 'ready'
       ? { provider: 'claude', status: 'ready', reason: null, checked_at_ms: 1 }
       : { provider: 'claude', status: 'not_configured', reason: 'calm-server was started without --claude-planner-config', checked_at_ms: 1 },
+    opencode ? { provider: 'opencode', status: 'ready', reason: null, checked_at_ms: 1 }
+      : { provider: 'opencode', status: 'not_configured', reason: 'OpenCode Planner is not configured', checked_at_ms: 1 },
   ];
 }
 
-function mount(claude: unknown) {
+function mount(claude: unknown, opencode = false) {
   const creates: ApiRequest[] = [];
   const ok = (body: unknown): ApiTransportResponse => ({ status: 200, statusText: 'OK', body });
   const transport: ApiTransportPort = { send(request) {
@@ -66,7 +78,8 @@ function mount(claude: unknown) {
     if (request.path === '/api/areas') return Promise.resolve(ok([AREA]));
     if (request.path === '/api/models?provider=codex') return Promise.resolve(ok(LIVE_CATALOG));
     if (request.path === '/api/models?provider=claude') return Promise.resolve(ok(claude));
-    if (request.path === '/api/agent-providers') return Promise.resolve(ok(availability(claude === NO_CLAUDE ? 'not_configured' : 'ready')));
+    if (request.path === '/api/models?provider=opencode') return Promise.resolve(ok(opencode ? OPENCODE_CATALOG : NO_CLAUDE));
+    if (request.path === '/api/agent-providers') return Promise.resolve(ok(availability(claude === NO_CLAUDE ? 'not_configured' : 'ready', opencode)));
     if (request.path === '/api/settings') return Promise.resolve(ok({}));
     return Promise.resolve(ok([]));
   } };
@@ -138,4 +151,27 @@ it('offers only Codex on a server without Claude Planners', async () => {
   await expect.element(page.getByRole('menuitem', { name: 'GPT-5' })).toBeVisible();
   await expect.element(page.getByRole('group', { name: 'Claude' })).not.toBeInTheDocument();
   await expect.element(page.getByRole('menuitem', { name: 'Sonnet' })).not.toBeInTheDocument();
+  await expect.element(page.getByRole('group', { name: 'OpenCode' })).not.toBeInTheDocument();
+});
+
+it.each([1280, 390])('creates an OpenCode Planner with its exact model slug and variant (%ipx)', async (width) => {
+  await page.viewport(width, 844);
+  const { creates } = mount(CLAUDE_CATALOG, true);
+  await openModelMenu('Model: Codex Default');
+  await page.getByRole('group', { name: 'OpenCode' }).getByRole('menuitem', { name: 'GPT-5 via OpenAI' }).click();
+  await expect.element(page.getByRole('button', { name: 'Model: OpenCode GPT-5 via OpenAI' })).toBeVisible();
+  if (width < 600) {
+    await openModelMenu('Model: OpenCode GPT-5 via OpenAI');
+    await expect.element(page.getByRole('group', { name: 'Variant' })).toBeVisible();
+  } else {
+    await page.getByRole('button', { name: 'Variant: Default' }).click();
+  }
+  await page.getByRole('menuitem', { name: 'deep', exact: true }).click();
+  expect(document.documentElement.scrollWidth).toBe(width);
+  await page.getByRole('combobox', { name: 'What this track should do' }).fill('Plan with OpenCode');
+  await page.getByRole('button', { name: 'Create track' }).click();
+  await expect.poll(() => creates.length).toBe(1);
+  expect(creates[0]?.body).toMatchObject({
+    planner_provider: 'opencode', model: 'openai/gpt-5', reasoning_effort: 'deep', first_message: 'Plan with OpenCode',
+  });
 });

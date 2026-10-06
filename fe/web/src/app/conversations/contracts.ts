@@ -6,6 +6,8 @@ import type { RunningTurnAnchor } from '../../../../core/domain/conversation-met
 import type { UploadAttachment } from '../../features/planner/attachments.tsx';
 
 export type ConversationStore = Readonly<{
+  attachedSession: import('../../../../core/domain/conversation.ts').AttachedOpenCodeSession | null;
+  canStop: boolean;
   conversations: readonly Conversation[];
   /** Messages *and* the actions between them, in the order they happened. */
   turnsOf: (conversationId: string) => readonly TranscriptEntry[];
