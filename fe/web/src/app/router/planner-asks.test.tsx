@@ -47,7 +47,7 @@ function setup() {
       if (request.path.includes('/harness/items')) return ok([]);
       if (request.path.endsWith('/planner/run')) return ok({
         card_id: request.path.split('/')[3], worker_session_id: 'runtime', phase: 'idle', model: null,
-        reasoning_effort: null, blocked_reason: null, running_turn: null,
+        reasoning_effort: null, blocked_reason: null, running_turn: null, supports_steer: true,
       });
       if (request.path === '/api/settings') return ok({});
       return ok([]);
