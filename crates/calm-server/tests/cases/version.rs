@@ -136,18 +136,18 @@ async fn get_version_returns_all_fields_with_expected_sources() {
         SYNC_EVENT_VERSION as u64
     );
     // `scripts/gate-sync-event-version-lockstep.sh` binds the constant to this literal, so bumping the constant alone cannot make this file agree with itself.
-    assert_eq!(v["syncEventVersion"].as_u64().unwrap(), 24);
+    assert_eq!(v["syncEventVersion"].as_u64().unwrap(), 25);
 
     assert_eq!(
         v["webCompatVersion"].as_u64().unwrap(),
         WEB_COMPAT_VERSION as u64,
     );
-    assert_eq!(v["webCompatVersion"].as_u64().unwrap(), 41);
+    assert_eq!(v["webCompatVersion"].as_u64().unwrap(), 42);
     assert_eq!(
         v["minWebCompatVersion"].as_u64().unwrap(),
         WEB_COMPAT_VERSION as u64,
     );
-    assert_eq!(v["minWebCompatVersion"].as_u64().unwrap(), 41);
+    assert_eq!(v["minWebCompatVersion"].as_u64().unwrap(), 42);
     assert_eq!(
         v["supervisorControlVersion"].as_u64().unwrap(),
         SUPERVISOR_CONTROL_VERSION as u64,

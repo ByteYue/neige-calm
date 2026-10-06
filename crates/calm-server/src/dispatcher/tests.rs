@@ -1289,6 +1289,15 @@ fn event_warrants_planner_push_covers_push_allowlist() {
     ));
 
     for quiet_event in [
+        Event::RatifyRequested {
+            track_id: track.clone(),
+            reason: "cap_exhausted".into(),
+        },
+        Event::ForgePrPublished {
+            track_id: track.clone(),
+            pr_number: 1,
+            head_sha: "head-sha".into(),
+        },
         Event::WorkspaceLeased {
             track_id: track.clone(),
             card_id: worker.clone(),
@@ -2195,6 +2204,16 @@ async fn planner_push_wiring_table() -> PlannerPushWiringTable {
             ActorId::KernelDispatcher,
             true,
             true,
+        ),
+        row(
+            Event::ForgePrPublished {
+                track_id: track.clone(),
+                pr_number: 1,
+                head_sha: "head-sha".into(),
+            },
+            ActorId::KernelDispatcher,
+            false,
+            false,
         ),
         row(
             Event::ForgePrChecks {
@@ -3963,4 +3982,45 @@ async fn track_updated_with_closed_at_reconciles_the_child() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+}
+
+#[test]
+fn confirmation_receipts_do_not_wake_the_planner_live_or_on_replay() {
+    for event in [
+        Event::RatifyRequested {
+            track_id: TrackId::from("w"),
+            reason: "Which repository?".into(),
+        },
+        Event::ForgePrPublished {
+            track_id: TrackId::from("w"),
+            pr_number: 2169,
+            head_sha: "head".into(),
+        },
+    ] {
+        assert!(
+            !event_warrants_planner_push_with_role(&event, &ActorId::KernelDispatcher, |_| None),
+            "a synchronous receipt must not create another turn: {}",
+            event.kind_tag()
+        );
+        assert!(
+            !PLANNER_CATCH_UP_KINDS.contains(&event.kind_tag()),
+            "replay must agree with live delivery: {}",
+            event.kind_tag()
+        );
+    }
+}
+
+#[test]
+fn asynchronous_opened_results_keep_waking_live_and_on_replay() {
+    let event = Event::ForgePrOpened {
+        track_id: TrackId::from("async-track"),
+        pr_number: 2169,
+        head_sha: "head".into(),
+    };
+    assert!(event_warrants_planner_push_with_role(
+        &event,
+        &ActorId::KernelDispatcher,
+        |_| None
+    ));
+    assert!(PLANNER_CATCH_UP_KINDS.contains(&event.kind_tag()));
 }

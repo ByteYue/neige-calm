@@ -135,9 +135,9 @@ pub(crate) fn event_warrants_planner_push_with_role(
         | Event::ForgePrOpened { .. }
         | Event::ForgePrChecks { .. }
         | Event::ForgeIssueClosed { .. } => true,
-        // #2170: only the Planner authors it (role gate), so the wake would echo its own call;
-        // the user's `ratify.resolved` is the wake that matters.
-        Event::RatifyRequested { .. } => false,
+        // These tools wait for their result: the caller already has the receipt. Keep the
+        // events for the timeline/notifications, but do not schedule another Planner turn.
+        Event::RatifyRequested { .. } | Event::ForgePrPublished { .. } => false,
         // Workspace / worktree lifecycle notices are read back on demand (`neige_task_ls`);
         Event::WorkspaceLeased { .. }
         | Event::WorkspaceReleased { .. }
@@ -1120,6 +1120,7 @@ impl Inner {
             | Event::TaskDispatched { .. }
             | Event::TaskContextFrozen { .. }
             | Event::TaskContextAdvanced { .. }
+            | Event::ForgePrPublished { .. }
             | Event::ForgePrDiffRead { .. }
             | Event::ForgeIssueRead { .. }
             | Event::RatifyRequested { .. }
@@ -1642,6 +1643,7 @@ pub(crate) fn harness_observation_from_event(
         | Event::TaskDispatched { .. }
         | Event::TaskContextFrozen { .. }
         | Event::TaskContextAdvanced { .. }
+        | Event::ForgePrPublished { .. }
         | Event::ForgePrDiffRead { .. }
         | Event::ForgeIssueRead { .. }
         | Event::ProposalSubmitted { .. }
