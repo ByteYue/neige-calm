@@ -8,6 +8,7 @@ import '../../styles/entry.css';
 import { createUiPreferences, UiPreferencesProvider } from '../providers/ui-preferences.tsx';
 import { ThemeProvider } from '../theme/public.tsx';
 import styles from './shell.module.css';
+import { readMotionTransition } from '../../ui/motion/transition.ts';
 import { Sidebar } from './sidebar.tsx';
 
 afterEach(() => { cleanup(); delete document.documentElement.dataset.theme; });
@@ -52,6 +53,9 @@ it('places view options before collapse and shares group disclosure, keyboard ac
   const today = page.getByRole('button', { name: 'Go to Today' });
   const areasDisclosure = page.getByRole('button', { name: 'Collapse Areas', exact: true });
   const areasMarker = areasDisclosure.element().querySelector<HTMLElement>('span[aria-hidden="true"]')!;
+  const motion = readMotionTransition(areasMarker, 'disclosure');
+  expect(parseFloat(getComputedStyle(areasMarker).transitionDuration)).toBe(motion.duration);
+  expect(getComputedStyle(areasMarker).transitionTimingFunction).toBe(`cubic-bezier(${motion.ease.join(', ')})`);
   await today.hover();
   expect(getComputedStyle(areasMarker).opacity).toBe('0');
   await areasDisclosure.hover();
@@ -168,7 +172,10 @@ it('places view options before collapse and shares group disclosure, keyboard ac
   await expect.element(options).toHaveAttribute('aria-expanded', 'false');
   for (const title of recoverable) {
     await options.click();
-    await page.getByRole('menuitem', { name: 'Hidden groups' }).click();
+    const hidden = page.getByRole('menuitem', { name: 'Hidden groups' });
+    // Hover opens this submenu; a later click intentionally toggles it closed after the vendor guard.
+    await hidden.hover();
+    await expect.element(hidden).toHaveAttribute('aria-expanded', 'true');
     await page.getByRole('menuitem', { name: `Show ${title}`, exact: true }).click();
     await expect.element(page.getByRole('group', { name: title, exact: true })).toBeVisible();
   }
