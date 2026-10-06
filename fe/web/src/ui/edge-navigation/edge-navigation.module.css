@@ -1,11 +1,9 @@
 @layer ui {
   .rail {
-    --nc-rail-pitch: 12px;
-    --nc-rail-pitch-open: 28px;
+    --nc-rail-pitch: var(--space-9);
     --nc-rail-max: 320px;
     --nc-rail-dot: 4px;
     --nc-rail-dot-current: var(--dot-sm);
-    --nc-rail-dot-peak: 8px;
     --nc-rail-ink: oklch(58% 0.01 250);
     position: relative;
     block-size: 100%;
@@ -18,7 +16,7 @@
   }
   @media (pointer: coarse) {
     .rail {
-      --nc-rail-pitch: var(--control-h);
+      --nc-rail-pitch: calc(var(--space-11) + var(--space-8));
       --nc-rail-dot: var(--dot-sm);
       --nc-rail-dot-current: var(--dot-md);
     }
@@ -27,7 +25,7 @@
     display: flex;
     flex-direction: column;
     justify-content: safe center;
-    block-size: 100%;
+    block-size: auto;
     max-block-size: var(--nc-rail-max);
     flex: none;
     overflow-y: auto;
@@ -47,84 +45,65 @@
   }
   .railDot::before {
     content: '';
-    inline-size: var(--nc-rail-dot);
-    block-size: var(--nc-rail-dot);
+    --nc-dot-base: var(--nc-rail-dot);
+    inline-size: var(--nc-dot-base);
+    block-size: var(--nc-dot-base);
     border-radius: var(--radius-pill);
     background: var(--nc-rail-ink);
+    transition:
+      inline-size var(--motion-quick) ease-out,
+      block-size var(--motion-quick) ease-out,
+      background-color var(--motion-quick) var(--ease-feedback);
   }
   .railDot:hover::before {
     background: var(--text-2);
+  }
+  .railDot:focus-visible::before {
+    inline-size: var(--dot-md);
+    block-size: var(--dot-md);
   }
   .railDot:focus-visible {
     outline-offset: -2px;
   }
   .railDotActive::before {
-    inline-size: var(--nc-rail-dot-current);
-    block-size: var(--nc-rail-dot-current);
+    --nc-dot-base: var(--nc-rail-dot-current);
     background: var(--accent);
   }
   @media (pointer: fine) {
-    .railDot {
-      block-size: calc(
-        var(--nc-rail-pitch)
-        + (var(--nc-rail-pitch-open) - var(--nc-rail-pitch)) * var(--nc-dot-lift, 0)
-      );
-    }
-    .railDot:first-child {
-      margin-block-start: calc(
-        (var(--nc-rail-pitch-open) - var(--nc-rail-pitch)) * var(--nc-rail-lead, 2)
-      );
-    }
-    .railDot:last-child {
-      margin-block-end: calc(
-        (var(--nc-rail-pitch-open) - var(--nc-rail-pitch)) * var(--nc-rail-tail, 2)
-      );
-    }
     .railDot::before {
-      --nc-dot-size: calc(
-        var(--nc-rail-dot)
-        + (var(--nc-rail-dot-peak) - var(--nc-rail-dot)) * var(--nc-dot-lift, 0)
-      );
+      --nc-dot-size: calc(var(--nc-dot-base) + (var(--dot-md) - var(--nc-dot-base)) * var(--nc-dot-proximity, 0));
       inline-size: var(--nc-dot-size);
       block-size: var(--nc-dot-size);
-      transition:
-        inline-size var(--motion-instant) linear,
-        block-size var(--motion-instant) linear,
-        background-color var(--motion-quick) var(--ease-feedback);
     }
-    .railDotActive::before {
-      --nc-dot-size: calc(
-        var(--nc-rail-dot-current)
-        + (var(--nc-rail-dot-peak) - var(--nc-rail-dot-current)) * var(--nc-dot-lift, 0)
-      );
+    .railDot:hover::before {
+      inline-size: var(--dot-md);
+      block-size: var(--dot-md);
     }
   }
   .railPreview {
-    position: absolute;
-    inset-block-start: 0;
-    inset-inline-end: calc(100% + var(--space-3));
-    z-index: var(--z-raised);
-    inline-size: max-content;
-    max-inline-size: var(--nc-rail-preview-max-inline-size, 22rem);
-    padding: var(--space-3) var(--space-5);
-    border-radius: var(--radius-md);
-    background: var(--paper);
-    box-shadow: var(--shadow-float);
+    max-inline-size: min(17rem, var(--nc-rail-preview-max-inline-size, 17rem));
     overflow-wrap: anywhere;
+    color: var(--text);
+  }
+  .previewTitle {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
+    line-height: var(--leading-snug);
+  }
+  .previewExcerpt {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    overflow: hidden;
+    margin: var(--space-3) 0 0;
     font-size: var(--text-xs);
     font-weight: var(--weight-normal);
-    line-height: var(--leading-snug);
+    line-height: var(--leading-base);
     color: var(--text-2);
-    pointer-events: none;
-  }
-  @media (pointer: coarse) {
-    .railPreview {
-      display: none;
-    }
-  }
-  .previewAfter {
-    inset-inline-start: calc(100% + var(--space-3));
-    inset-inline-end: auto;
   }
   @media (prefers-reduced-motion: reduce) {
     .railDot::before { transition: none; }

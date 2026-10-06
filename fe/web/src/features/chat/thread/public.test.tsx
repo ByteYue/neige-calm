@@ -980,7 +980,36 @@ describe('ChatThread’s exchange rail', () => {
     outer.remove();
   });
 
-  /* 449 and 450 are written out rather than imported: importing `RAIL_PREVIEW_DELAY_MS` would make this green for every value of it. */
+  it('previews the answer belonging to consecutive user messages in one exchange', () => {
+    const { outer, pane } = drawerPane();
+    const turns = exchangeTurns(RAIL_FIXTURE_EXCHANGES);
+    turns.splice(1, 0, turn({ id: 'followup', author: 'you', text: 'One more detail', atMs: NOW + 1 }));
+    render(<ChatThread canContinue={false} cards={{}} stalled={false}
+      conversation={conversation()} turns={turns} />, { container: pane });
+    expect(railDots()).toHaveLength(RAIL_FIXTURE_EXCHANGES);
+    act(() => { railDots()[0].focus(); });
+    expect(document.querySelector('[data-nc-rail-preview] p')?.textContent).toBe('Answer 0');
+    outer.remove();
+  });
+
+  it('previews the matching reply and leaves the latest unanswered exchange empty', async () => {
+    const { outer, pane } = drawerPane();
+    const turns = exchangeTurns(RAIL_FIXTURE_EXCHANGES).slice(0, -1)
+      .map(entry => entry.id === 'agent-2' ? turnOutcome({ id: 'failed-2', atMs: entry.atMs }) : entry);
+    render(<ChatThread canContinue={false} cards={{}} stalled={false}
+      conversation={conversation()} turns={turns} />, { container: pane });
+    act(() => { railDots()[0].focus(); });
+    expect(document.querySelector('[data-nc-rail-preview] p')?.textContent).toBe('Answer 0');
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}');
+    expect(document.querySelector('[data-nc-rail-preview] p')).toBeNull();
+    await userEvent.keyboard('{End}');
+    const preview = document.querySelector('[data-nc-rail-preview]');
+    expect(preview?.querySelector('div')?.textContent).toBe(`Ask ${RAIL_FIXTURE_EXCHANGES - 1}`);
+    expect(preview?.querySelector('p')).toBeNull();
+    outer.remove();
+  });
+
+  /* HoverCard owns the 180 ms initial hover delay; exercise its native event listener. */
   it('holds the prompt back for the whole delay, then floats it out', () => {
     vi.useFakeTimers();
     try {
@@ -990,13 +1019,15 @@ describe('ChatThread’s exchange rail', () => {
         { container: pane },
       );
       const preview = () => document.querySelector('[data-nc-rail-preview]');
+      fireEvent.mouseEnter(document.querySelector('[data-nc-rail-track]')!);
       fireEvent.pointerEnter(railDots()[2], { pointerType: 'mouse' });
       expect(preview()).toBeNull();
 
-      act(() => { vi.advanceTimersByTime(449); });
+      act(() => { vi.advanceTimersByTime(179); });
       expect(preview()).toBeNull();
       act(() => { vi.advanceTimersByTime(1); });
-      expect(preview()?.textContent).toBe('Ask 2');
+      expect(preview()?.querySelector('div')?.textContent).toBe('Ask 2');
+      expect(preview()?.querySelector('p')?.textContent).toBe('Answer 2');
       outer.remove();
     } finally {
       vi.useRealTimers();

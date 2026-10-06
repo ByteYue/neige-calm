@@ -1,21 +1,18 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useHoverCard } from '@astryxdesign/core/HoverCard';
 import { useState } from '../state/public.ts';
 import { observeResize } from './resize.ts';
 import styles from './edge-navigation.module.css';
 
-export type NavigationItem = Readonly<{ id: string; text: string; label: string }>;
-const NOTHING_TO_REPAINT = () => {};
-const RAIL_SPREAD_SPAN = 4;
-const RAIL_SETTLE_STEPS = 4;
-const RAIL_PREVIEW_DELAY_MS = 450;
+export type NavigationItem = Readonly<{ id: string; title: string; excerpt: string; label: string }>;
 const RAIL_PREVIEW_MAX = 240;
+const RAIL_INK_REACH = 3;
 function railPreviewText(text: string): string {
   const line = text.replace(/\s+/g, ' ').trim();
   return line.length <= RAIL_PREVIEW_MAX ? line : `${line.slice(0, RAIL_PREVIEW_MAX - 1)}…`;
 }
 
-/** Dense at rest, with a pointer-centered spread, bounded scrolling and one tab stop.
- * The host owns placement, active-section detection and navigation. */
+/** Stable rows and one continuous hover interaction. The host owns active-item detection and jumps. */
 export function EdgeNavigator({ items, activeId, onSelect, label, className, previewSide = 'before' }: Readonly<{
   items: readonly NavigationItem[];
   activeId: string | null;
@@ -24,28 +21,47 @@ export function EdgeNavigator({ items, activeId, onSelect, label, className, pre
   className?: string;
   previewSide?: 'before' | 'after';
 }>) {
-  const railRef = useRef<HTMLDivElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const dotRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  const previewRef = useRef<HTMLDivElement | null>(null);
+  const pointerY = useRef<number | null>(null);
+  const hoverIntent = useRef<'outside' | 'cold' | 'warm'>('outside');
+  const itemKey = items.map(item => item.id).join('\0');
   const [roved, setRoved] = useState<string | null>(null);
   const [previewed, setPreviewed] = useState<string | null>(null);
-  const previewDelay = useRef<number | null>(null);
-  const repaintEnvelope = useRef(NOTHING_TO_REPAINT);
-  const itemKey = items.map((item) => item.id).join('\0');
-  const activeIndex = items.findIndex((item) => item.id === activeId);
-  const rovedIndex = roved === null
-    ? -1
-    : items.findIndex((item) => item.id === roved);
+  const [closeRequested, setCloseRequested] = useState(false);
+  const preview = useHoverCard({
+    placement: previewSide === 'after' ? 'end' : 'start',
+    focusTrigger: 'always', touchTrigger: 'none', delay: 180, hideDelay: 120,
+    isEnabled: items.length > 0,
+    isOpen: closeRequested ? false : undefined,
+    onShow: () => { if (hoverIntent.current !== 'outside') hoverIntent.current = 'warm'; },
+  });
+  // Astryx 0.6.3's public hide() leaves hover timers armed. Its controlled effect
+  // cancels them before this effect releases the one-commit close request.
+  useEffect(() => { if (closeRequested) setCloseRequested(false); }, [closeRequested]);
+  const activeIndex = items.findIndex(item => item.id === activeId);
+  const rovedIndex = items.findIndex(item => item.id === roved);
   const litStop = Math.max(0, activeIndex);
   const tabStop = rovedIndex < 0 ? litStop : rovedIndex;
+  const selectedIndex = items.findIndex(item => item.id === previewed);
+  const previewIndex = selectedIndex < 0 ? tabStop : selectedIndex;
+  const selected = items[previewIndex];
   const litStopRef = useRef(litStop);
+  const previewOpenRef = useRef(preview.isOpen);
   litStopRef.current = litStop;
+  previewOpenRef.current = preview.isOpen;
+  const positionPreview = preview.positionRef;
+  useLayoutEffect(() => {
+    positionPreview(dotRefs.current[previewIndex] ?? null);
+    return () => { positionPreview(null); };
+  }, [previewIndex, selected?.id, positionPreview]);
   useEffect(() => {
     setRoved(null);
     const track = trackRef.current;
     const focused = document.activeElement;
     if (track === null || focused === null || !track.contains(focused)) return;
+    // A dismissed card or a pointer press keeps focus at the control the reader chose.
+    if (!previewOpenRef.current || !focused.matches(':focus-visible')) return;
     const stop = dotRefs.current[litStopRef.current];
     if (stop == null || stop === focused) return;
     stop.focus({ preventScroll: true });
@@ -63,145 +79,64 @@ export function EdgeNavigator({ items, activeId, onSelect, label, className, pre
   useEffect(() => {
     const track = trackRef.current;
     if (track === null) return;
-    const dots = dotRefs.current;
-    let at: number | null = null;
+    const trackedDots = [...dotRefs.current];
+    const fine = window.matchMedia('(pointer: fine)');
     let queued: number | null = null;
-    let written: number[] = [];
-    let writtenTo: (HTMLElement | null)[] = [];
     const paint = () => {
       queued = null;
-      if (written.length !== dots.length) {
-        written = Array.from({ length: dots.length }, () => Number.NaN);
-        writtenTo = Array.from({ length: dots.length }, () => null);
-      }
-      let settled = Number.NaN;
-      for (let step = 0; step < RAIL_SETTLE_STEPS; step += 1) {
-        const boxes = dots.map((dot) => dot?.getBoundingClientRect() ?? null);
-        let atDot: number | null = null;
-        let atRow = -1;
-        const pointerAt = at;
-        if (pointerAt !== null) {
-          let nearest = -1;
-          let nearestGap = Number.POSITIVE_INFINITY;
-          boxes.forEach((box, index) => {
-            if (box === null || box.height === 0) return;
-            const gap = Math.abs(box.top + box.height / 2 - pointerAt);
-            if (gap < nearestGap) { nearestGap = gap; nearest = index; }
-          });
-          if (nearest >= 0) {
-            const box = boxes[nearest]!;
-            const through = (pointerAt - (box.top + box.height / 2)) / box.height;
-            atDot = nearest + Math.max(-0.5, Math.min(0.5, through));
-            atRow = nearest;
-          }
+      const at = fine.matches ? pointerY.current : null;
+      const dots = dotRefs.current;
+      // Read fixed hitboxes together before writing ink-only properties.
+      const boxes = at === null ? [] : dots.map(dot => dot?.getBoundingClientRect() ?? null);
+      dots.forEach((dot, index) => {
+        if (dot === null) return;
+        const box = boxes[index];
+        if (at === null || box == null || box.height === 0) {
+          dot.style.removeProperty('--nc-dot-proximity');
+          return;
         }
-        const lifts = dots.map((dot, index) => {
-          if (dot === null || atDot === null) return 0;
-          const near = Math.max(0, 1 - Math.abs(index - atDot) / RAIL_SPREAD_SPAN);
-          return Math.round(near * near * (3 - 2 * near) * 1000) / 1000;
-        });
-        let above = 0;
-        let below = 0;
-        if (atDot !== null) {
-          const p = atDot - atRow + 0.5;
-          lifts.forEach((lift, index) => {
-            if (index < atRow) above += lift;
-            else if (index > atRow) below += lift;
-            else { above += lift * p; below += lift * (1 - p); }
-          });
-        }
-        const shoulder = RAIL_SPREAD_SPAN / 2;
-        track.style.setProperty('--nc-rail-lead', `${Math.max(0, shoulder - above)}`);
-        track.style.setProperty('--nc-rail-tail', `${Math.max(0, shoulder - below)}`);
-        lifts.forEach((lift, index) => {
-          const dot = dots[index];
-          if (dot == null || (writtenTo[index] === dot && written[index] === lift)) return;
-          writtenTo[index] = dot;
-          written[index] = lift;
-          if (lift === 0) dot.style.removeProperty('--nc-dot-lift');
-          else dot.style.setProperty('--nc-dot-lift', `${lift}`);
-        });
-        if (atDot === null || (step > 0 && Math.abs(atDot - settled) < 0.01)) break;
-        settled = atDot;
-      }
+        const near = Math.max(0, 1 - Math.abs(box.top + box.height / 2 - at) / (box.height * RAIL_INK_REACH));
+        const proximity = Math.round(near * near * (3 - 2 * near) * 1000) / 1000;
+        if (proximity === 0) dot.style.removeProperty('--nc-dot-proximity');
+        else dot.style.setProperty('--nc-dot-proximity', `${proximity}`);
+      });
     };
-    const schedule = () => {
-      if (queued !== null) return;
-      queued = requestAnimationFrame(paint);
-    };
-    const onMove = (event: PointerEvent) => {
-      at = event.pointerType === 'touch' ? null : event.clientY;
+    const schedule = () => { if (queued === null) queued = requestAnimationFrame(paint); };
+    const reset = () => {
+      if (pointerY.current === null) return;
+      pointerY.current = null;
       schedule();
     };
-    const rest = () => { at = null; schedule(); };
-    track.addEventListener('pointermove', onMove, { passive: true });
-    track.addEventListener('pointerleave', rest);
-    track.addEventListener('pointercancel', rest);
+    const move = (event: PointerEvent) => {
+      if (event.pointerType === 'touch' || !fine.matches) { reset(); return; }
+      pointerY.current = event.clientY;
+      schedule();
+    };
+    const press = (event: PointerEvent) => { if (event.pointerType === 'touch') reset(); };
+    track.addEventListener('pointermove', move, { passive: true });
+    track.addEventListener('pointerdown', press, { passive: true });
+    track.addEventListener('pointerleave', reset);
+    track.addEventListener('pointercancel', reset);
     track.addEventListener('scroll', schedule, { passive: true });
-    repaintEnvelope.current = schedule;
+    fine.addEventListener('change', reset);
+    const stopResize = observeResize(track, schedule);
+    const stopHostResize = track.parentElement === null ? () => {} : observeResize(track.parentElement, schedule);
+    window.addEventListener('resize', schedule);
+    schedule();
     return () => {
-      repaintEnvelope.current = NOTHING_TO_REPAINT;
-      track.removeEventListener('pointermove', onMove);
-      track.removeEventListener('pointerleave', rest);
-      track.removeEventListener('pointercancel', rest);
+      track.removeEventListener('pointermove', move);
+      track.removeEventListener('pointerdown', press);
+      track.removeEventListener('pointerleave', reset);
+      track.removeEventListener('pointercancel', reset);
       track.removeEventListener('scroll', schedule);
+      fine.removeEventListener('change', reset);
+      stopResize();
+      stopHostResize();
+      window.removeEventListener('resize', schedule);
       if (queued !== null) cancelAnimationFrame(queued);
-      for (const dot of dots) dot?.style.removeProperty('--nc-dot-lift');
-      track.style.removeProperty('--nc-rail-lead');
-      track.style.removeProperty('--nc-rail-tail');
+      for (const dot of trackedDots) dot?.style.removeProperty('--nc-dot-proximity');
     };
-  }, []);
-  useEffect(() => { repaintEnvelope.current(); }, [itemKey]);
-  useLayoutEffect(() => {
-    const preview = previewRef.current;
-    const rail = railRef.current;
-    const track = trackRef.current;
-    if (preview === null || rail === null || track === null) return;
-    const dot = dotRefs.current[items.findIndex((item) => item.id === previewed)];
-    if (dot == null) return;
-    const place = () => {
-      const trackBox = track.getBoundingClientRect();
-      const dotBox = dot.getBoundingClientRect();
-      const height = preview.getBoundingClientRect().height;
-      const wanted = dotBox.top + dotBox.height / 2 - height / 2;
-      const lowest = Math.max(trackBox.top, trackBox.bottom - height);
-      const top = Math.min(Math.max(wanted, trackBox.top), lowest);
-      preview.style.insetBlockStart = `${top - rail.getBoundingClientRect().top}px`;
-    };
-    place();
-    track.addEventListener('scroll', place, { passive: true });
-    return () => { track.removeEventListener('scroll', place); };
-  }, [previewed, items]);
-  useEffect(() => () => {
-    if (previewDelay.current !== null) clearTimeout(previewDelay.current);
-  }, []);
-  const dropPreview = () => {
-    if (previewDelay.current !== null) {
-      clearTimeout(previewDelay.current);
-      previewDelay.current = null;
-    }
-    setPreviewed(null);
-  };
-  const showPreview = (id: string) => {
-    if (previewDelay.current !== null) clearTimeout(previewDelay.current);
-    previewDelay.current = null;
-    setPreviewed(id);
-  };
-  const previewOnRest = (id: string) => {
-    if (previewDelay.current !== null) clearTimeout(previewDelay.current);
-    if (previewRef.current !== null) {
-      previewDelay.current = null;
-      setPreviewed(id);
-      return;
-    }
-    previewDelay.current = window.setTimeout(() => {
-      previewDelay.current = null;
-      setPreviewed(id);
-    }, RAIL_PREVIEW_DELAY_MS);
-  };
-  const previewText = previewed === null
-    ? ''
-    : railPreviewText(items.find((item) => item.id === previewed)?.text ?? '');
+  }, [itemKey]);
   const rove = (to: number) => {
     const next = Math.max(0, Math.min(items.length - 1, to));
     setRoved(items[next]?.id ?? null);
@@ -210,64 +145,62 @@ export function EdgeNavigator({ items, activeId, onSelect, label, className, pre
     keepInRailView(trackRef.current, dot);
   };
   return (
-    <div
-      className={`${styles.rail}${className === undefined ? '' : ` ${className}`}`}
-      role="group"
-      aria-label={label}
-      ref={railRef}
-      onPointerLeave={() => {
-        const focused = dotRefs.current.findIndex(dot => dot === document.activeElement && dot?.matches(':focus-visible'));
-        if (focused >= 0) showPreview(items[focused].id);
-        else dropPreview();
-      }}
-    >
-      <div className={styles.railTrack} data-nc-rail-track="" ref={trackRef}>
-        {items.map((item, index) => {
-          return (
-            <button
-              key={item.id}
-              ref={(node) => {
-                dotRefs.current[index] = node;
-                if (node !== null) return;
-                while (dotRefs.current.length > 0 && dotRefs.current.at(-1) === null) {
-                  dotRefs.current.length -= 1;
-                }
-              }}
-              type="button"
-              className={`${styles.railDot} ${item.id === activeId ? styles.railDotActive : ''}`}
-              aria-label={item.label}
-              tabIndex={index === tabStop ? 0 : -1}
-              {...(item.id === activeId ? { 'aria-current': true as const } : {})}
-              onPointerEnter={(event) => {
-                if (event.pointerType === 'touch') return;
-                previewOnRest(item.id);
-              }}
-              onFocus={() => { setRoved(item.id); showPreview(item.id); }}
-              onBlur={dropPreview}
-              onKeyDown={(event) => {
-                const move = ARROW_MOVES[event.key];
-                if (move === undefined) return;
-                event.preventDefault();
-                rove(move(index, items.length));
-              }}
-              onClick={() => {
-                dropPreview();
-                onSelect(item.id);
-              }}
-            />
-          );
-        })}
+    <div className={`${styles.rail}${className === undefined ? '' : ` ${className}`}`} role="group" aria-label={label}>
+      <div className={styles.railTrack} data-nc-rail-track=""
+        ref={node => { trackRef.current = node; preview.interactionRef(node); }}
+        onPointerEnter={event => {
+          hoverIntent.current = event.pointerType === 'touch' ? 'outside' : preview.isOpen ? 'warm' : 'cold';
+        }}
+        onPointerLeave={() => { hoverIntent.current = 'outside'; }}
+        onPointerDown={event => { if (event.pointerType === 'touch') hoverIntent.current = 'outside'; }}
+        onPointerCancel={() => { hoverIntent.current = 'outside'; setCloseRequested(true); preview.hide(); }}
+        onBlur={event => {
+          if (!event.currentTarget.contains(event.relatedTarget)) preview.hide();
+        }}
+      >
+        {items.map((item, index) => (
+          <button key={item.id} type="button"
+            ref={node => {
+              dotRefs.current[index] = node;
+              while (dotRefs.current.length > 0 && dotRefs.current.at(-1) === null) dotRefs.current.length -= 1;
+            }}
+            className={`${styles.railDot} ${item.id === activeId ? styles.railDotActive : ''}`}
+            aria-label={item.label}
+            aria-describedby={preview.isOpen && item.id === selected?.id ? preview.id : undefined}
+            tabIndex={index === tabStop ? 0 : -1}
+            {...(item.id === activeId ? { 'aria-current': true as const } : {})}
+            onPointerEnter={event => {
+              if (event.pointerType === 'touch') return;
+              setPreviewed(item.id);
+              if (preview.isOpen) hoverIntent.current = 'warm';
+              // A selection or Escape dismisses the card, not the ongoing rail interaction.
+              if (hoverIntent.current === 'warm') preview.show();
+            }}
+            onFocus={() => { setRoved(item.id); setPreviewed(item.id); }}
+            onKeyDown={event => {
+              const move = ARROW_MOVES[event.key];
+              if (move === undefined) return;
+              event.preventDefault();
+              rove(move(index, items.length));
+            }}
+            onClick={() => {
+              // Also warm a fast pointer selection that cancelled the first-entry timer.
+              if (hoverIntent.current !== 'outside') hoverIntent.current = 'warm';
+              setCloseRequested(true);
+              preview.hide();
+              onSelect(item.id);
+            }}
+          />
+        ))}
       </div>
-      {previewText !== '' && (
-        <div
-          className={`${styles.railPreview} ${previewSide === 'after' ? styles.previewAfter : ''}`}
-          data-nc-rail-preview=""
-          aria-hidden="true"
-          ref={previewRef}
-        >
-          {previewText}
-        </div>
-      )}
+      {selected !== undefined && preview.renderHoverCard(<div data-nc-rail-preview="">
+        <div className={styles.previewTitle}>{railPreviewText(selected.title)}</div>
+        {selected.excerpt.trim() !== '' && <p className={styles.previewExcerpt}>{railPreviewText(selected.excerpt)}</p>}
+      </div>, { className: styles.railPreview, style: {
+        inlineSize: 'min(17rem, var(--nc-rail-preview-max-inline-size, 17rem))',
+        maxInlineSize: 'min(17rem, var(--nc-rail-preview-max-inline-size, 17rem))',
+        boxSizing: 'border-box', animationDuration: 'var(--motion-quick)',
+      } })}
     </div>
   );
 }
