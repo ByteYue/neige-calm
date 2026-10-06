@@ -70,7 +70,7 @@ async fn repeated_attach_preserves_send_recovered_owner_and_durable_queued_text(
             assert_eq!(answer["code"], "conflict");
             assert_eq!(
                 answer["error"],
-                "conflict: The original OpenCode snapshot is not ready for submission; observe until it settles"
+                "The original OpenCode snapshot is not ready for submission; observe until it settles"
             );
             // Recovery installs the real observer before native history has necessarily arrived.
             // Retry the same intent only after the production readiness projection settles.

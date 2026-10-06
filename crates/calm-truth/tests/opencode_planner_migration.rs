@@ -199,12 +199,12 @@ async fn attached_opencode_index_preserves_corrupt_card_reads_and_native_uniquen
     );
     let binding = r#"{"opencode_attachment":{"directory":"/native","session_id":"ses_existing"}}"#;
     for (id, accepted) in [("native-1", true), ("native-2", false)] {
-        let result = sqlx::query("INSERT INTO cards(id,track_id,kind,sort,payload,created_at,updated_at,role) VALUES(?1,'t','codex',0,?2,1,1,'planner')")
+        let result = sqlx::query("INSERT INTO cards(id,track_id,kind,sort,payload,created_at,updated_at,role) VALUES(?1,'t','codex',0,?2,1,1,'worker')")
             .bind(id).bind(binding).execute(&mut db).await;
         assert_eq!(
             result.is_ok(),
             accepted,
-            "only one native target binding may exist"
+            "only one native target binding may exist: {result:?}"
         );
         if let Err(error) = result {
             assert!(
