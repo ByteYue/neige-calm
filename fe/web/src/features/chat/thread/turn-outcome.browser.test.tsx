@@ -45,7 +45,7 @@ it.each(['interrupted', 'failed'] as const)('retains the disclosure and default 
   await userEvent.click(button);
   expect(detail.checkVisibility()).toBe(true);
   expect(detail.textContent).toBe(status === 'failed'
-    ? 'The model provider is temporarily unavailable.' : 'No interruption details are available.');
+    ? 'No failure details are available.' : 'No interruption details are available.');
 });
 
 it.each([['interrupted', 320], ['interrupted', 390], ['interrupted', 1280],
@@ -189,4 +189,21 @@ it.each([320, 390, 1280])('keeps one current pause and hides historical interrup
     expect(scroller.getBoundingClientRect().bottom).toBeLessThanOrEqual(screen.getByRole('textbox').getBoundingClientRect().top + 1);
     expect(document.documentElement.scrollWidth).toBe(width);
   }
+});
+
+it.each([390, 1280])('keeps stop failure evidence readable while execution status is unconfirmed (%ipx)', async (width) => {
+  await page.viewport(width, 844);
+  const reason = 'The stop request was refused.';
+  const { container } = render(<div style={{ position: 'relative', height: '90dvh', containerType: 'inline-size' }}>
+    <Drawer open title="Review" onClose={() => undefined} footer={<ChatComposer onSend={() => undefined} />}>
+      <ChatThread canContinue={false} cards={{}} stalled={false} statusUnconfirmed conversation={conversation()}
+        turns={[]} stopFeedback={{ kind: 'failed', message: reason }} />
+    </Drawer>
+  </div>);
+  await userEvent.click(screen.getByRole('button', { name: 'Status unconfirmed', expanded: false }));
+  expect(screen.getByText('Stop failed', { exact: true }).checkVisibility()).toBe(true);
+  expect(screen.getByText(reason, { exact: true }).checkVisibility()).toBe(true);
+  expect(screen.queryByText('Running', { exact: true })).toBeNull();
+  expect(container.querySelector('[data-nc-turn-outcome]')).toBeNull();
+  expect(document.documentElement.scrollWidth).toBe(width);
 });

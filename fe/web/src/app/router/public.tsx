@@ -425,7 +425,7 @@ function useConversationPane(
   const edit = useConversationEdit({ conversationId: composerId, transcript: composerId === null ? [] : store.turnsOf(composerId),
     historyReady: store.historyReady, focusComposer });
   /* The one readiness every response action and the continue guidance share. */
-  const canContinue = store.historyReady && !store.sendBlocked && !store.working && !store.stopping;
+  const canContinue = store.runReady && store.runError === null && store.historyReady && !store.sendBlocked && !store.working && !store.stopping;
   /* A conversation's provider is fixed for its life; its model picker offers that provider's group alone. */
   const scopeProvider: AgentProvider = scope === null ? 'codex' : scope.provider;
   const go = useGo();
@@ -687,21 +687,19 @@ function useConversationPane(
           </>
         ) : open === null ? undefined : (
           <>
-            {/* The conversation's two reads, one notice: its Try again reads again each one that failed. A send answered
-                after an unknown attempt holds the composer until a run read started after it lands (#2068). */}
+            {/* Each query owns its read retry; accepted sends keep their reconciliation fence (#2068). */}
             {(store.historyError !== null || store.runError !== null) && (
-              <ChatFooterNotice>
-                <ChatFooterError message={[store.historyError, store.runError].filter((text) => text !== null).join(' ')} />
-                <ChatFooterRemedy
-                  disabled={(store.historyError !== null && store.historyLoading) || (store.runError !== null && store.runLoading)}
-                  onClick={() => {
-                    if (store.historyError !== null) store.retryHistory();
-                    if (store.runError !== null) store.retryRun();
-                  }}>
-                  {(store.historyError !== null && store.historyLoading) || (store.runError !== null && store.runLoading)
-                    ? 'Loading…' : 'Try again'}
-                </ChatFooterRemedy>
-              </ChatFooterNotice>
+              <ErrorBox
+                message={[store.historyError, store.runError].filter((text) => text !== null).join(' ')}
+                pending={(store.historyError !== null && store.historyLoading) || (store.runError !== null && store.runLoading)}
+                actionLabel={store.historyError !== null && store.runError !== null ? 'Reload conversation'
+                  : store.runError !== null ? 'Reload status' : 'Reload history'}
+                description={store.runError === null ? undefined
+                  : 'The last known status may be out of date. Reloading does not restart the conversation.'}
+                onRetry={() => {
+                  if (store.historyError !== null) store.retryHistory();
+                  if (store.runError !== null) store.retryRun();
+                }} />
             )}
             {store.failedSend !== null && (
               <ChatFooterNotice>
@@ -789,6 +787,8 @@ function useConversationPane(
                 pending={store.pending.has(open.id)}
                 cards={source.cards}
                 stalled={store.stalled}
+                statusUnconfirmed={!store.runReady || store.runError !== null}
+                statusLoading={store.runLoading}
                 copyText={edit.held === null ? writeClipboardText : undefined}
                 regenerateMessage={respondable
                   ? async (message) => { await store.send(open.id, message.text, message.attachments ?? [], false, null); }
