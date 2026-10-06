@@ -297,6 +297,7 @@ impl CalmError {
     pub fn reason(&self) -> String {
         match self {
             CalmError::CodexRefused(m)
+            | CalmError::PlannerProviderRefused(m)
             | CalmError::NotFound(m)
             | CalmError::PathNotFound(m)
             | CalmError::Conflict(m)
@@ -424,6 +425,13 @@ mod response_body_tests {
             (
                 StatusCode::NOT_FOUND,
                 serde_json::json!({ "error": "plugin git-forge", "code": "not_found" })
+            )
+        );
+        assert_eq!(
+            answer(CalmError::PlannerProviderRefused("no native model".into())).await,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "no native model", "code": "planner_provider_refused" })
             )
         );
         assert_eq!(
