@@ -17,7 +17,7 @@ def sdk(monkeypatch):
     calls = []
     position = NS(account_channel='lb_papertrading', positions=[])
     state = NS(shares=0, available=0, total='10000', cash='10000', price='100',
-               quote_at=NOW, quote_status='Normal', channel='lb_papertrading', account='PAPER123', orders=[], half=False)
+               quote_at=NOW, quote_status='Normal', channel='lb_papertrading', account='PAPER123', orders=[], calendar='full')
 
     class Trade:
         def stock_positions(self):
@@ -36,6 +36,9 @@ def sdk(monkeypatch):
         def today_orders(self):
             return state.orders
 
+        def today_executions(self):
+            return []
+
         def submit_order(self, **kwargs):
             calls.append(kwargs)
             return NS(order_id='sdk-order')
@@ -48,7 +51,10 @@ def sdk(monkeypatch):
 
         def trading_days(self, market, begin, end):
             assert begin == end
-            return NS(trading_days=[] if state.half else [begin], half_trading_days=[begin] if state.half else [])
+            if state.calendar == 'error':
+                raise RuntimeError('calendar unavailable')
+            return NS(trading_days=[begin] if state.calendar == 'full' else [],
+                      half_trading_days=[begin] if state.calendar == 'half' else [])
 
     class Asset:
         def statements(self, kind, start_date, limit):
@@ -128,7 +134,7 @@ def test_sdk_freshness_recheck(sdk):
 
 
 def test_sdk_half_day_market_is_closed_at_1300_new_york(sdk):
-    sdk.state.half=True
+    sdk.state.calendar='half'
     at=datetime(2026,9,30,17,tzinfo=timezone.utc)
     _, opened=bridge.market(sdk.quote,at)
     assert not opened
@@ -174,7 +180,7 @@ def test_sdk_unsettled_proceeds_are_excluded(sdk):
 
 
 def test_sdk_half_only_calendar_opens_in_the_morning(sdk):
-    sdk.state.half=True
+    sdk.state.calendar='half'
     _,opened=bridge.market(sdk.quote,NOW)
     assert opened
 
@@ -275,3 +281,36 @@ def test_sdk_submission_is_bounded_by_the_decision_deadline(sdk):
         bridge.submit(sdk.asset, sdk.trade, sdk.quote, 'PAPER123',
                       sdk.request | {'not_after': NOW.isoformat()}, sdk.policy)
     assert len(sdk.calls) == 1
+
+
+@pytest.mark.parametrize('calendar,trading_day,half_day,opened', [
+    ('full', True, False, True), ('half', True, True, True), ('holiday', False, False, False)])
+def test_sdk_snapshot_carries_the_trading_day_from_the_sdk_calendar(sdk, calendar, trading_day, half_day, opened):
+    sdk.state.calendar = calendar
+    result = bridge.snapshot(sdk.asset, sdk.trade, sdk.quote, 'PAPER123', {'since': None})
+    assert (result['quote']['trading_day'], result['quote']['half_day']) == (trading_day, half_day)
+    assert result['market_open'] is opened
+    close = '17:00' if calendar == 'half' else '20:00'  # 13:00 / 16:00 New York (EDT)
+    assert result['quote']['regular_close_at'] == f'2026-09-30T{close}:00+00:00'
+
+
+def test_sdk_calendar_failure_fails_the_snapshot_instead_of_guessing(sdk):
+    sdk.state.calendar = 'error'
+    with pytest.raises(RuntimeError, match='calendar unavailable'):
+        bridge.snapshot(sdk.asset, sdk.trade, sdk.quote, 'PAPER123', {'since': None})
+
+
+def test_sdk_snapshot_crossing_midnight_keeps_the_queried_calendar_date(sdk, monkeypatch):
+    from paper_trading.allocation_reconcile import validate_snapshot
+    # Sunday 23:59:59 New York at the SDK read; the App validates two seconds later, on Monday.
+    read_at, validated_at = datetime(2026, 10, 5, 3, 59, 59, tzinfo=timezone.utc), datetime(2026, 10, 5, 4, 0, 1, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, zone=None): return read_at
+    monkeypatch.setattr(bridge, 'datetime', Clock)
+    sdk.state.quote_at, sdk.state.calendar = read_at, 'holiday'
+    raw = json.loads(json.dumps(bridge.snapshot(sdk.asset, sdk.trade, sdk.quote, 'PAPER123', {'since': None})))
+    snapshot = validate_snapshot(raw, NS(account_no='PAPER123'), validated_at)
+    assert snapshot['at'] == validated_at.isoformat()
+    assert (snapshot['calendar_date'], snapshot['trading_day']) == ('2026-10-04', False)
+    assert snapshot['regular_close_at'] == '2026-10-04T20:00:00+00:00'

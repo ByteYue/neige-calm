@@ -37,8 +37,9 @@ flag verifies that the committed file is byte-identical to a fresh run.
 ## Automatic SPY/cash profile
 
 This profile runs a daily SPY/cash target allocation with the official
-Longbridge paper account. Planner research comes through existing Longbridge
-and Wisburg connectors. The Planner captures source references and persists a
+Longbridge paper account. The Planner reads the SPY price and the trading day
+from `spy.status` and its research evidence from Wisburg; it never uses the
+Longbridge CLI or holds broker credentials. The Planner captures source references and persists a
 basis-point target; an ordinary Codex Worker task requests execution of that
 immutable decision. The App's background loop calculates integer shares,
 submits one DAY market order and reconciles actual broker fills. The App never
@@ -128,12 +129,16 @@ creates four weekly Calendar entries from the Track, in America/New_York:
 weekday pre-market research 08:45, execution 09:45 and post-close review
 16:30, and a Saturday weekly review at 10:00. Each entry wakes the Planner at
 its start; the kernel needs Calendar wake and weekly recurrence (#1967), and
-it does not start a Planner that never ran. The Planner skips a day the
-Longbridge trading calendar marks closed. Pre-market research ends in either a
+it does not start a Planner that never ran. Pre-market and post-close refresh
+and stop unless the `spy.status` snapshot's `calendar_date` is today's New York
+date and `trading_day` is true. The snapshot's `calendar_date`, `trading_day`,
+`half_day` and `regular_close_at` come from the broker calendar the App's SDK
+reads for that date; a failed or incomplete calendar read fails the whole
+reconciliation, so the Planner stops instead of guessing. Execution acts only on
+a queued decision, which pre-market saves only on a confirmed trading day. Pre-market research ends in either a
 hold or `spy.plan` with decision ID `spy-YYYYMMDD` (the App accepts 1-55
 lowercase letters, digits or hyphens and a validity of at most 24 hours; the
-Recipe ends it at that day's actual regular-session close from the trading
-calendar). At the execution step the Planner
+Recipe ends it no later than the snapshot's `regular_close_at`). At the execution step the Planner
 declares one `codex`, `access: "read_only"` task `spy-exec-<decision_id>`;
 Claude Workers receive no plugin MCP tools. Only one unresolved decision is
 permitted, and every blocked or uncertain state stays in the Report for
