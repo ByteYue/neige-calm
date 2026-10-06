@@ -1,12 +1,15 @@
 //! `neige tool ls|describe` (#2003 §4.5): a literal, bounded lookup over this session's
-//! `tools/list` set plus every tool a `neige` command calls. Listing is not a grant.
+//! `tools/list` set plus every tool a `neige` command calls, each with the plugin that serves it
+//! (#2227). Listing is not a grant.
 use super::commands::{JSON, cli_spelling, command_for_tool};
 use super::{CliExit, Output};
 use crate::mcp_server::{
     registry::{AppContext, ConnectionIdentity, ToolDescriptor, ToolRegistry},
-    transport::tool_descriptors_for_connection,
+    transport::{PluginOwner, tool_descriptors_for_connection, tool_owner},
 };
+use crate::plugin_host::PluginRegistry;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The CLI-only meta object; it is no tool.
@@ -30,11 +33,13 @@ enum Query {
     },
 }
 
-/// One catalog entry: the descriptor and whether this session's `tools/list` shows it.
+/// One catalog entry: the descriptor, whether this session's `tools/list` shows it, and the plugin
+/// that serves it (`None` for a kernel tool).
 #[derive(Clone)]
 struct Entry {
     tool: ToolDescriptor,
     listed: bool,
+    plugin: Option<PluginOwner>,
 }
 
 fn valid_prefix(value: &str) -> bool {
@@ -112,28 +117,56 @@ fn parse(argv: &[String]) -> Result<(Query, bool), String> {
     }
 }
 
-/// The session's `tools/list` set plus every CLI-covered tool, by name.
-fn entries(listed: Vec<ToolDescriptor>, registry: &ToolRegistry) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = listed
-        .into_iter()
-        .map(|tool| Entry { tool, listed: true })
-        .collect();
+/// The session's `tools/list` set plus every CLI-covered tool, by name, each with its owner.
+fn entries(
+    listed: Vec<ToolDescriptor>,
+    registry: &ToolRegistry,
+    plugins: Option<&PluginRegistry>,
+    running_ids: &BTreeSet<String>,
+) -> Result<Vec<Entry>, String> {
+    let mut tools: Vec<(ToolDescriptor, bool)> =
+        listed.into_iter().map(|tool| (tool, true)).collect();
     for tool in registry.descriptors() {
         if command_for_tool(&tool.name).is_some()
-            && !entries.iter().any(|entry| entry.tool.name == tool.name)
+            && !tools.iter().any(|(listed, _)| listed.name == tool.name)
         {
-            entries.push(Entry {
-                tool,
-                listed: false,
-            });
+            tools.push((tool, false));
         }
     }
+    let mut entries = tools
+        .into_iter()
+        .map(|(tool, listed)| {
+            let plugin =
+                tool_owner(registry, plugins, running_ids, &tool.name).map_err(|e| e.message)?;
+            Ok(Entry {
+                tool,
+                listed,
+                plugin,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     entries.sort_by(|a, b| a.tool.name.cmp(&b.tool.name));
-    entries
+    Ok(entries)
+}
+
+/// `plugin` is the serving plugin's id, `kind` the kind its manifest declares; both null for a
+/// kernel tool.
+fn ownership(entry: &Entry) -> (Value, Value) {
+    match &entry.plugin {
+        Some(owner) => (json!(owner.id), json!(owner.kind)),
+        None => (Value::Null, Value::Null),
+    }
 }
 
 fn row(entry: &Entry) -> Value {
-    json!({ "name": entry.tool.name, "cli": cli_spelling(&entry.tool.name), "listed": entry.listed })
+    let (plugin, kind) = ownership(entry);
+    json!({
+        "name": entry.tool.name,
+        "cli": cli_spelling(&entry.tool.name),
+        "listed": entry.listed,
+        "plugin": plugin,
+        "kind": kind,
+    })
 }
 
 fn select(query: Query, entries: Vec<Entry>) -> Result<Value, String> {
@@ -149,6 +182,9 @@ fn select(query: Query, entries: Vec<Entry>) -> Result<Value, String> {
             let object = value.as_object_mut().expect("a descriptor is an object");
             object.insert("cli".into(), json!(cli_spelling(&entry.tool.name)));
             object.insert("listed".into(), json!(entry.listed));
+            let (plugin, kind) = ownership(&entry);
+            object.insert("plugin".into(), plugin);
+            object.insert("kind".into(), kind);
             if value.to_string().len() > DETAIL_MAX_BYTES {
                 return Err(
                     "tool declaration exceeds the lookup byte limit; use the client's exact-name tool loading"
@@ -191,7 +227,8 @@ fn select(query: Query, entries: Vec<Entry>) -> Result<Value, String> {
     }
 }
 
-/// Text output: one `name  cli-or-—  listed|hidden` row per tool, or the describe JSON, then the footer.
+/// Text output: one `name  cli-or-—  listed|hidden  kernel|plugin:<id>  kind-or-—` row per tool,
+/// or the describe JSON, then the footer.
 fn text(value: &Value) -> String {
     let mut out = match value["tools"].as_array() {
         Some(rows) => {
@@ -199,14 +236,18 @@ fn text(value: &Value) -> String {
                 .iter()
                 .map(|row| {
                     format!(
-                        "{}  {}  {}\n",
+                        "{}  {}  {}  {}  {}\n",
                         row["name"].as_str().expect("rows carry a name"),
                         row["cli"].as_str().unwrap_or("—"),
                         if row["listed"] == json!(true) {
                             "listed"
                         } else {
                             "hidden"
-                        }
+                        },
+                        row["plugin"]
+                            .as_str()
+                            .map_or("kernel".to_string(), |id| format!("plugin:{id}")),
+                        row["kind"].as_str().unwrap_or("—"),
                     )
                 })
                 .collect();
@@ -250,7 +291,15 @@ pub(super) async fn run(
             );
         }
     };
-    match select(query, entries(listed, registry)) {
+    let host = ctx.plugin_host.get();
+    let running_ids = match host {
+        Some(host) => host.running_plugin_ids().await,
+        None => BTreeSet::new(),
+    };
+    let plugins = host.map(|host| host.registry().as_ref());
+    match entries(listed, registry, plugins, &running_ids)
+        .and_then(|entries| select(query, entries))
+    {
         Err(message) => Output::error(
             CliExit::Failed,
             json_mode,
@@ -267,6 +316,8 @@ mod tests {
     use super::*;
     use crate::mcp_server::build_default_registry;
     use crate::model::CardRole;
+    use crate::plugin_host::Manifest;
+    use crate::plugin_host::manifest::ToolKind;
 
     fn tool(name: String) -> ToolDescriptor {
         ToolDescriptor {
@@ -285,6 +336,10 @@ mod tests {
             .map(|name| Entry {
                 tool: tool(name),
                 listed: true,
+                plugin: Some(PluginOwner {
+                    id: "gitforge".into(),
+                    kind: Some(ToolKind::ForgeAction),
+                }),
             })
             .collect()
     }
@@ -377,7 +432,8 @@ mod tests {
                 },
                 vec![Entry {
                     tool: large,
-                    listed: true
+                    listed: true,
+                    plugin: None,
                 }]
             )
             .unwrap_err()
@@ -396,6 +452,10 @@ mod tests {
             (&details["cli"], &details["listed"]),
             (&Value::Null, &json!(true))
         );
+        assert_eq!(
+            (&details["plugin"], &details["kind"]),
+            (&json!("gitforge"), &json!("forge-action"))
+        );
     }
 
     /// #2003 §4.5: a hidden CLI-covered tool is still discoverable, marked `listed: false` with its
@@ -413,31 +473,37 @@ mod tests {
                 prefix: "neige_track_".into(),
                 cursor: None,
             },
-            entries(planner, &registry),
+            entries(planner, &registry, None, &BTreeSet::new()).unwrap(),
         )
         .unwrap();
         let rows = page["tools"].as_array().unwrap();
         assert!(
             rows.contains(
-                &json!({"name":"neige_track_cat","cli":"neige track cat","listed":false})
+                &json!({"name":"neige_track_cat","cli":"neige track cat","listed":false,"plugin":null,"kind":null})
             ),
             "{page}"
         );
         assert!(
             rows.contains(
-                &json!({"name":"neige_track_close","cli":"neige track close","listed":true})
+                &json!({"name":"neige_track_close","cli":"neige track close","listed":true,"plugin":null,"kind":null})
             ),
             "{page}"
         );
         assert!(
-            rows.contains(&json!({"name":"neige_track_rename","cli":null,"listed":true})),
+            rows.contains(&json!({"name":"neige_track_rename","cli":null,"listed":true,"plugin":null,"kind":null})),
             "{page}"
         );
         let described = select(
             Query::Describe {
                 name: "neige_track_cat".into(),
             },
-            entries(registry.descriptors_for_role(CardRole::Planner), &registry),
+            entries(
+                registry.descriptors_for_role(CardRole::Planner),
+                &registry,
+                None,
+                &BTreeSet::new(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -445,6 +511,116 @@ mod tests {
             (&json!("neige track cat"), &json!(false))
         );
         assert!(text(&page).ends_with(&format!("{FOOTER}\n")));
+    }
+
+    /// #2227: every row names the plugin that serves it. A built-in native (`neige_dev_publish`)
+    /// answers to its compiled owner although it reads like a kernel tool; a manifest tool carries
+    /// its declared kind; a name nobody serves is refused rather than shown as a kernel tool.
+    #[test]
+    fn rows_name_the_serving_plugin_and_its_declared_kind() {
+        let registry = build_default_registry();
+        let invest = Manifest::parse(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/invest/manifest.json"
+        )))
+        .unwrap();
+        let plugins = PluginRegistry::builder()
+            .with(invest, None)
+            .build()
+            .with_builtins();
+        let descriptor = |name: &str| tool(name.into());
+        let listed = [
+            "neige_dev_publish",
+            "neige_calendar_add",
+            "plugin_gitforge_git_commit",
+            "plugin_invest_instrument_add",
+            "neige_track_rename",
+        ]
+        .map(descriptor)
+        .to_vec();
+        let running: BTreeSet<String> = ["gitforge", "calendar", "invest"].map(String::from).into();
+        let rows: Vec<Value> = entries(listed, &registry, Some(&plugins), &running)
+            .unwrap()
+            .iter()
+            .map(row)
+            .collect();
+        let owner = |name: &str| {
+            let row = rows.iter().find(|row| row["name"] == name).unwrap();
+            (row["plugin"].clone(), row["kind"].clone())
+        };
+        assert_eq!(owner("neige_dev_publish"), (json!("gitforge"), Value::Null));
+        assert_eq!(
+            owner("neige_calendar_add"),
+            (json!("calendar"), Value::Null)
+        );
+        assert_eq!(
+            owner("plugin_gitforge_git_commit"),
+            (json!("gitforge"), json!("forge-action"))
+        );
+        assert_eq!(
+            owner("plugin_invest_instrument_add"),
+            (json!("invest"), Value::Null)
+        );
+        assert_eq!(owner("neige_track_rename"), (Value::Null, Value::Null));
+        assert_eq!(owner("neige_track_cat"), (Value::Null, Value::Null));
+        let page = json!({"tools": rows, "next_cursor": null});
+        assert!(
+            text(&page).contains("neige_dev_publish  —  listed  plugin:gitforge  —\n"),
+            "{}",
+            text(&page)
+        );
+        assert!(
+            text(&page)
+                .contains("plugin_gitforge_git_commit  —  listed  plugin:gitforge  forge-action\n")
+        );
+        assert!(text(&page).contains("neige_track_cat  neige track cat  hidden  kernel  —\n"));
+        let ghost = entries(
+            vec![descriptor("plugin_ghost_tool")],
+            &registry,
+            Some(&plugins),
+            &running,
+        )
+        .err()
+        .unwrap();
+        assert!(ghost.contains("plugin_ghost_tool"), "{ghost}");
+    }
+
+    /// #2227 review: the host fences only running plugins against minting one name, so an installed,
+    /// stopped plugin may mint a running plugin's name. The row names the running owner, as
+    /// dispatch routes it, instead of failing the whole listing as ambiguous.
+    #[test]
+    fn a_stopped_plugin_minting_the_same_name_leaves_the_running_owner() {
+        let manifest = |id: &str, tool: &str| {
+            Manifest::parse(&format!(
+                r#"{{"manifest_version":2,"id":"{id}","version":"0.1.0","min_kernel_version":"0.1.0","display_name":"X","entrypoint":{{"command":"bin/tool"}},"exposes_tools":[{{"name":"{tool}"}}]}}"#
+            ))
+            .unwrap()
+        };
+        let plugins = PluginRegistry::from_manifests([
+            (manifest("ab-c", "d"), None),
+            (manifest("ab", "c_d"), None),
+        ]);
+        let registry = build_default_registry();
+        for running in ["ab-c", "ab"] {
+            let rows = entries(
+                vec![tool("plugin_ab_c_d".into())],
+                &registry,
+                Some(&plugins),
+                &BTreeSet::from([running.to_string()]),
+            )
+            .unwrap();
+            let row = rows
+                .iter()
+                .find(|entry| entry.tool.name == "plugin_ab_c_d")
+                .unwrap();
+            assert_eq!(
+                row.plugin,
+                Some(PluginOwner {
+                    id: running.into(),
+                    kind: None
+                })
+            );
+        }
     }
 
     #[test]
