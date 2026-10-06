@@ -59,13 +59,13 @@ export function useRequestedConversationOpen({ registry, rows, setOpenTarget, se
 
 export function useConversationEscape({ open, store }: Readonly<{
   open: Conversation | null;
-  store: Pick<ConversationStore, 'working' | 'stopping' | 'interrupt'>;
+  store: Pick<ConversationStore, 'canStop' | 'working' | 'stopping' | 'interrupt'>;
 }>) {
   useEffect(() => {
     if (open === null) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!store.working || store.stopping) return;
+      if (!store.canStop || !store.working || store.stopping) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
       const region = target.closest('[data-nc-drawer]');

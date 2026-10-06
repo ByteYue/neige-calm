@@ -114,7 +114,11 @@ it('observes a foreign running turn without sending, stopping, steering or chang
   expect(screen.queryByRole('button', { name: 'Say it now' })).toBeNull();
   expect(screen.queryByRole('button', { name: /^Model:/ })).toBeNull();
   expect(requests.filter(request => request.path.startsWith('/api/models'))).toHaveLength(0);
-  fireEvent.keyDown(screen.getByRole('combobox', { name: 'Message' }), { key: 'Escape' });
+  const field = screen.getByRole('combobox', { name: 'Message' });
+  let reachedComposer = false;
+  field.addEventListener('keydown', () => { reachedComposer = true; }, { capture: true, once: true });
+  fireEvent.keyDown(field, { key: 'Escape' });
+  expect(reachedComposer).toBe(true);
   await act(async () => { await Promise.resolve(); });
   expect(requests.filter(request => request.method !== 'GET')).toHaveLength(0);
 });
