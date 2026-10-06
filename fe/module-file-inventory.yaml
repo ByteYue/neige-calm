@@ -31,6 +31,7 @@
 - { path: fe/tools/vitest, type: directory, owner: tooling/test-tier, readonly: false, basis: "test-run setup; supplies §0.5's build-time constants Vitest cannot get from vite.config.ts (#997)" }
 - { path: fe/web/index.html, type: file, owner: app/bootstrap, readonly: false, basis: "architecture §5 repository tree; web bootstrap shell" }
 - { path: fe/web/public, type: directory, owner: app/bootstrap, readonly: false, basis: "#1802 public PWA manifest and installation icons" }
+- { path: fe/tools/preview, type: directory, owner: tooling/preview, readonly: false, basis: "#2191 development-only production-component motion preview" }
 - { path: fe/tools/pwa, type: directory, owner: tooling/pwa, readonly: false, basis: "#1802 brand icon generator, web-only manifest-link Vite plugin, and production PWA browser check" }
 - { path: fe/core/AGENTS.md, type: file, owner: architecture, readonly: false, basis: "architecture §2/§14" }
 - { path: fe/web/src/main.tsx, type: file, owner: app/bootstrap, readonly: false, basis: "architecture disease 9" }
@@ -123,6 +124,8 @@
 - { path: fe/web/src/ui/icon, type: directory, owner: ui/icon, readonly: false, basis: "design §6.7 描边图标集；字形墨迹在同字号下差 1.75 倍 (#997)" }
 - { path: fe/web/src/ui/brand, type: directory, owner: ui/brand, readonly: false, basis: "#1211 品牌资产；neige-mark.svg 由 app/shell 的工作区栏与 features/area 的新建页共同引用，放在 ui 是因为 features/** 不得进入 app/**" }
 - { path: fe/web/src/features/chat, type: directory, owner: features/chat, readonly: false, basis: "对话列表；数据源为 WorkerSessionProjection + HarnessItem，端点未落地 (#997)" }
+
+- { path: fe/web/src/ui/motion, type: directory, owner: ui/motion, readonly: false, basis: "local edit-motion design; generic interruptible intrinsic size motion" }
 
 # Non-runtime styles owner (§3 diseases 6/7 and frozen interface §6.8).
 - { path: fe/web/src/styles, type: directory, owner: styles, readonly: true, basis: "frozen interface §6.8" }
