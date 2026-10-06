@@ -2071,7 +2071,7 @@ describe('track conversations', () => {
       const card = pathCardId(request.path);
       if (request.path.endsWith('/planner/run')) {
         return ok({ card_id: card, worker_session_id: 'r', phase: 'turn_running', model: null, reasoning_effort: null, blocked_reason: null,
-          running_turn: null, pending: [{ entry_id: `entry-${card}`, text: `queued in ${card}`, rev: 1, queued_at_ms: 5 }], pending_overflow: 0 });
+          running_turn: null, supports_steer: true, pending: [{ entry_id: `entry-${card}`, text: `queued in ${card}`, rev: 1, queued_at_ms: 5 }], pending_overflow: 0 });
       }
       if (request.method === 'DELETE' && request.path.includes('/planner/input/')) {
         await answered;
