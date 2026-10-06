@@ -6,8 +6,8 @@ use crate::{
         write_with_event_typed,
     },
     error::{CalmError, ErrorBody, Result},
-    extract::{Json, JsonBody, Path},
     event::{Event, EventScope},
+    extract::{Json, JsonBody, Path},
     harness::initial_snapshot_with_goal,
     model::{Card, CardRole, NewCard, TrackConversationSummary, now_ms},
     opencode_planner::attachment::{Binding, ConnectionSummary, ConnectionsResponse, PAYLOAD_KEY},
@@ -268,8 +268,7 @@ pub(crate) async fn attach_conversation(
     )
     .await;
     let (runtime, _harness, _recovery_guard) =
-        super::planner_session::ensure_planner_session(&s, &w, &cs, &card.id, &actor)
-            .await?;
+        super::planner_session::ensure_planner_session(&s, &w, &cs, &card.id, &actor).await?;
     Ok((
         StatusCode::CREATED,
         Json(summary(

@@ -116,10 +116,18 @@ pub(crate) async fn ensure_planner_session(
         return Err(dormant(card_id));
     }
     // A recovered harness can't issue turns without its backend; surface that instead of spawning a silently-wedged task.
-    let provider = runtime.agent_provider.clone().unwrap_or(AgentProvider::Codex);
-    let card = s.repo.card_get(card_id.as_str()).await?
+    let provider = runtime
+        .agent_provider
+        .clone()
+        .unwrap_or(AgentProvider::Codex);
+    let card = s
+        .repo
+        .card_get(card_id.as_str())
+        .await?
         .ok_or_else(|| CalmError::NotFound(format!("card {card_id}")))?;
-    if let Some(binding) = crate::opencode_planner::attachment::Binding::from_payload(&card.payload)? {
+    if let Some(binding) =
+        crate::opencode_planner::attachment::Binding::from_payload(&card.payload)?
+    {
         s.opencode_planner.resolve_binding(&binding)?;
     } else {
         require_backend(s, cs, provider).await?;

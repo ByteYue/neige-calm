@@ -212,7 +212,7 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
             if shared.state().shutting_down {
                 return Ok(());
             }
-            let PlannerEventKind::Item { phase, params } = &notification.kind else {
+            let PlannerEventKind::Item { phase, params, .. } = &notification.kind else {
                 continue;
             };
             let method = phase.method();
@@ -244,7 +244,7 @@ async fn sync(shared: &Shared, projections: &mut HashMap<String, TurnProjection>
 }
 
 async fn persist_item(shared: &Shared, notification: &PlannerEvent) -> Result<()> {
-    let PlannerEventKind::Item { phase, params } = &notification.kind else {
+    let PlannerEventKind::Item { phase, params, .. } = &notification.kind else {
         return Ok(());
     };
     let method = phase.method();

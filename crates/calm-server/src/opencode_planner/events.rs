@@ -14,10 +14,13 @@ pub(crate) fn from_notification(notification: Notification) -> PlannerEvent {
             "item/started" => PlannerEventKind::Item {
                 phase: ItemPhase::Started,
                 params,
+                questions: Vec::new(),
             },
             "item/completed" => PlannerEventKind::Item {
                 phase: ItemPhase::Completed,
                 params,
+                // Native permission and question controls remain with the OpenCode controller.
+                questions: Vec::new(),
             },
             _ => PlannerEventKind::Ignored,
         },
@@ -66,7 +69,7 @@ mod tests {
         });
         assert_eq!(event.thread_id.as_deref(), Some("thread"));
         assert!(
-            matches!(event.kind,PlannerEventKind::Item {phase:ItemPhase::Completed,params:actual} if actual==params)
+            matches!(event.kind,PlannerEventKind::Item {phase:ItemPhase::Completed,params:actual,questions} if actual==params && questions.is_empty())
         );
     }
 }
