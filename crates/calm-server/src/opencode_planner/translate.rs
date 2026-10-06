@@ -58,7 +58,7 @@ impl TurnProjection {
         prior_tokens: i64,
     ) -> crate::error::Result<Self> {
         let registry = crate::mcp_server::build_default_registry();
-        let descriptors = registry.descriptors_for_role(calm_types::model::CardRole::Planner);
+        let descriptors = registry.descriptors_listed_for(calm_types::model::CardRole::Planner);
         let mcp_names = mcp_name_map(descriptors.iter().map(|d| d.name.as_str()))?;
         Ok(Self {
             thread,

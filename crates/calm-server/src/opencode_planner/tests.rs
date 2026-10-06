@@ -232,7 +232,7 @@ fn opencode_mcp_projection_preserves_registered_identity_and_rejects_collisions(
     assert!(super::translate::mcp_name_map(["fixture.a", "fixture_a"].into_iter()).is_err());
     let mut p = projection();
     let descriptors = crate::mcp_server::build_default_registry()
-        .descriptors_for_role(calm_types::model::CardRole::Planner);
+        .descriptors_listed_for(calm_types::model::CardRole::Planner);
     let name = &descriptors
         .iter()
         .find(|d| d.name == "neige_user_ask")
