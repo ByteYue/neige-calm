@@ -270,6 +270,32 @@ def test_spy_recipe_contract_matches_body_and_published_units(allocation_rig):
         assert unit['cell']['kind'] == expects[kind], kind
     assert 'ending 仅作研究，不构成交易建议。' in text
     assert "Persist the decision's sourced reasoning" in text
+    # The 总览 keeps one link to its research Track and asks it by mail; it never researches itself.
+    assert re.findall(r'^- Pre-market decision, on a mail wake:', text, flags=re.M)
+    assert '`- [SPY 研究](neige://wave/<track_id>)`' in text and 'idempotency_key "spy-research"' in text
+    assert 'neige_mail_send' in text and 'Never research yourself.' in text
+    # The decision reads the research reply's sender and date, and cites it as the 总览's own source.
+    assert 'neige --json mail cat <mail_id>' in text and 'its track_id is the research Track' in text
+    assert 'its summary starts with "SPY 盘前研究 <today\'s New York date>"' in text
+    assert "Capture the reply as this Track's own source with neige_source_capture (provenance manual" in text
+    assert 'The pre-market decision reads spy.status without refreshing' in text
+
+
+def test_spy_research_recipe_is_a_report_without_live_views_or_trading():
+    text = (ROOT / 'spy-research-recipe.md').read_text()
+    contract = json.loads(re.match(r'<!-- neige:contract (.*) -->\n', text).group(1))
+    body = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+    headings = re.findall(r'^# (.+)$', body, flags=re.M)
+    assert headings == [s['h1'] for s in contract['sections']]
+    assert headings == ['结论', '核心逻辑', '关键数据', '风险与证伪', '催化剂与跟踪', '来源与边界']
+    assert recipe.views(text) == [] and 'neige://plugin/' not in text
+    # It links back to the 总览, answers by reply mail and never trades.
+    assert '`[SPY 总览](neige://wave/<总览 track_id>)`' in text
+    assert 'neige --json mail cat <mail_id>' in text and 'whose track_id is the 总览 Track' in text
+    assert text.count('neige_mail_send (mail_id = the request)') == 2
+    assert 'summary starting with the request\'s "SPY 盘前研究 YYYY-MM-DD"' in text
+    assert 'Never trade, call spy.* tools, add Calendar entries or declare tasks' in text
+    assert body.rstrip().endswith('仅作研究，不构成交易建议。')
 
 
 class Filling(Prescribed):
